@@ -47,6 +47,24 @@ Open `chrome://extensions/`, enable Developer Mode, click
 **Load unpacked**, and point at the [`chrome_extension/`](chrome_extension/)
 directory. No build step.
 
+## Self-hosting
+
+The Chrome extension ships with the original author's backend hosts
+(`chat-room.work`, `imagine-1-ws.xyz`) baked into
+[`chrome_extension/manifest.json`](chrome_extension/manifest.json) under
+`host_permissions`. To point the extension at your own server, edit
+that field:
+
+```json
+"host_permissions": [
+  "https://your-server.example.com/*"
+]
+```
+
+then reload the unpacked extension. The Android client can switch
+backends at runtime (Login screen → "Connect to another server"); no
+manifest edit is needed.
+
 ## Running the backend
 
 There is no `requirements.txt` yet. Inferred dependencies (see
