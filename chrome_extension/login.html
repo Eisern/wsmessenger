@@ -1,0 +1,68 @@
+<!doctype html>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  Copyright (C) 2026 Yevgeniy Kropochev <y.kropochev87@gmail.com>
+  This file is part of WS Messenger. See LICENSE for terms.
+-->
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>WS Messenger — Login</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <div class="app">
+    <header>
+      <span class="offline">● Login</span>
+	  <button id="registerBtn" type="button">Register</button>
+	  
+    </header>
+
+    <button id="serverSetupToggle" class="login-setup-toggle" type="button" aria-expanded="false" aria-controls="serverSetupPanel">
+      <span class="login-setup-toggle-text">Connect to another server</span>
+      <span id="serverSetupToggleState" class="login-setup-toggle-state">Not configured</span>
+      <span id="serverSetupChevron" class="login-setup-chevron">▾</span>
+    </button>
+
+    <div id="serverSetupPanel" class="login-setup-panel collapsed" aria-hidden="true">
+      <div class="panel-block login-setup-card">
+        <div class="login-setup-head">
+          <div class="login-setup-badge">Connect</div>
+          <div class="panel-block-title login-setup-title">Server Setup</div>
+        </div>
+        <div class="panel-hint login-setup-sub">Set your self-hosted backend before login.</div>
+        <div class="login-setup-inputs-row">
+          <input id="setupApiBase" class="login-setup-input" placeholder="API base (e.g. https://your-se…)">
+          <input id="setupWsBase" class="login-setup-input" placeholder="WS base (e.g. wss://your-ser…)">
+        </div>
+        <div class="buttons login-setup-actions">
+          <button id="setupTestBtn" class="setup-btn setup-btn-test" type="button">Test</button>
+          <button id="setupSaveBtn" class="setup-btn setup-btn-save" type="button">Save</button>
+          <button id="setupReloadBtn" class="setup-btn setup-btn-reload" type="button">Reload</button>
+        </div>
+        <div id="serverSetupStatus" class="login-setup-status"></div>
+      </div>
+    </div>
+
+    <section class="connect" style="max-height:none; opacity:1;">
+      <input id="loginName" placeholder="Username" autocomplete="username">
+      <input id="loginPass" placeholder="Password" type="password" autocomplete="current-password">
+      <div class="buttons">
+        <button id="loginBtn">Login</button>
+      </div>
+      <div id="loginErr" class="room-meta"></div>
+      <div style="text-align:center;margin-top:4px;">
+        <a href="#" id="forgotPasswordLink" style="font-size:12px;color:#6c757d;text-decoration:underline;">Forgot password?</a>
+      </div>
+    </section>
+  </div>
+
+  <script src="argon2id/argon2-bundled.min.js"></script>
+  <script src="argon2-selftest.js"></script>
+
+  <script src="crypto-utils.js"></script>
+  <script src="crypto-manager.js"></script>
+  <script src="rpc.js"></script>
+  <script src="login.js"></script>
+</body>
+</html>

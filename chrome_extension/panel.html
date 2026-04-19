@@ -1,0 +1,465 @@
+<!doctype html>
+<!--
+  SPDX-License-Identifier: AGPL-3.0-or-later
+  Copyright (C) 2026 Yevgeniy Kropochev <y.kropochev87@gmail.com>
+  This file is part of WS Messenger. See LICENSE for terms.
+-->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>WS Messenger</title>
+<link rel="stylesheet" href="panel.css">
+</head>
+<body>
+<div class="app app-v2">
+
+  <!-- Thin right rail  -->
+  <nav class="rail rail-right" aria-label="Main navigation">
+    <button id="navRooms" class="rail-btn is-active" type="button" title="Rooms" aria-pressed="true">
+  <img class="rail-icon-img" src="icons/door_white.png" alt="">
+</button>
+    <button id="navDM" class="rail-btn" type="button" title="DM" aria-pressed="false"><span class="rail-ico">💬</span></button>
+<button id="navInvites" class="rail-btn" type="button" title="Invites" aria-pressed="false">
+  <img class="rail-icon-img" src="icons/invite_white.png" alt="">
+  <span id="friendsBadge" class="badge rail-badge" style="display:none;">0</span>
+</button>
+    <button id="navProfile" class="rail-btn" type="button" title="Profile" aria-pressed="false">
+  <img class="rail-icon-img" src="icons/cog_white.png" alt="">
+</button>
+
+  <div class="rail-spacer"></div>
+
+  <div id="railRecents" class="rail-recents" aria-label="Recent chats">
+    <div id="recentHover" class="recent-hover" aria-hidden="true"></div>
+
+    <div id="recentRooms" class="recent-stack" data-stack="room"></div>
+    <div class="rail-divider" aria-hidden="true"></div>
+    <div id="recentDM" class="recent-stack" data-stack="dm"></div>
+  </div>
+
+  <button id="logoutBtn" class="rail-btn rail-logout" type="button" title="Logout" data-no-hover="1" aria-pressed="false">
+    <span class="rail-ico">⎋</span>
+  </button>
+</nav>
+
+  <div class="pane">
+
+<div class="chat-wrap">
+
+
+
+  <!-- Single topbar -->
+<div class="roombar">
+  <header class="chat-topbar">
+    <div class="chat-topbar-left">
+      <span id="status" class="offline">● Offline</span>
+      <span id="currentRoom" class="current-room">Room: —</span>
+    </div>
+
+    <div class="chat-topbar-right">
+      <button id="inviteBtnTop"
+              class="topbar-icon-btn"
+              type="button"
+              title="Invite user"
+              aria-label="Invite user">+</button>
+    </div>
+  </header>
+
+  <div id="presence" class="presence is-hidden"></div>
+</div>
+
+  <main id="chat" class="chat"></main>
+
+<div class="composer-wrap">
+  <div id="chatSearchHandle" class="chat-search-handle" role="button" tabindex="0" aria-label="Search in chat">
+<!--    <span class="chat-search-arrow">â–²</span> -->
+  </div>
+
+  <div id="chatSearchPanel" class="chat-search-panel" aria-hidden="true">
+    <input id="chatSearchInput" placeholder="Search in current chat..." />
+    <div class="chat-search-actions">
+      <button id="chatSearchPrev" type="button" title="Prev match">↑</button>
+      <button id="chatSearchNext" type="button" title="Next match">↓</button>
+      <div id="chatSearchMeta" class="chat-search-meta"></div>
+<!--      <button id="chatSearchClose" type="button" title="Close">✖</button>-->
+    </div>
+  </div>
+
+  <div id="replyBar" class="reply-bar" style="display:none">
+    <div class="reply-bar-inner">
+      <span class="reply-bar-arrow">↩</span>
+      <div class="reply-bar-content">
+        <span id="replyBarAuthor" class="reply-bar-author"></span>
+        <span id="replyBarText" class="reply-bar-text"></span>
+      </div>
+      <button id="replyBarClose" class="reply-bar-close" title="Cancel reply">✕</button>
+    </div>
+  </div>
+  <section class="composer">
+    <button id="attachBtn" title="Attach file">📎</button>
+    <input id="message" placeholder="Message">
+    <button id="sendBtn">Send</button>
+  </section>
+</div>
+
+</div>
+
+    <!-- Backdrop for side drawer (covers chat, not rail) -->
+    <div id="sideBackdrop" class="side-backdrop" aria-hidden="true"></div>
+
+    <!-- Off-canvas drawer: slides right -> left next to rail -->
+    <aside id="sideDrawer" class="side-drawer" aria-hidden="true">
+      <div class="side-drawer-inner" id="paneTop">
+
+      <!-- ROOMS PANEL -->
+      <section id="panelRooms" class="panel is-active" data-panel="rooms" aria-label="Rooms">
+        <div class="panel-head">
+          <div class="panel-title">Rooms</div>
+          <div class="panel-actions">
+            <button id="roomsRefreshBtn" class="panel-btn" type="button" title="Refresh">Refresh</button>
+            <button id="openCreateRoom" class="panel-btn" type="button" title="Create room">+</button>
+          </div>
+        </div>
+
+        <div id="roomsTabbar" class="settings-tabs">
+          <button id="roomsTabList"   class="settings-tab is-active" type="button">Rooms</button>
+          <button id="roomsTabManage" class="settings-tab"           type="button">Manage</button>
+          <div id="roomsTabHover" class="settings-tab-hover" aria-hidden="true"></div>
+        </div>
+
+        <div id="roomsPaneList" class="friends-tab-pane">
+          <div class="panel-scroll">
+            <div class="panel-block">
+              <div class="panel-block-title" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span>Public rooms search</span>
+                <span class="panel-hint">type to filter</span>
+              </div>
+              <input id="publicRoomsSearch" placeholder="Search Public Rooms by name..." />
+              <div id="publicRoomsSearchList" class="friends-list" style="margin-top:8px;"></div>
+            </div>
+
+            <div class="rooms-two">
+              <div class="rooms-col">
+                <div class="rooms-col-title">Rooms you created</div>
+                <div id="roomsOwnedList" class="friends-list"></div>
+              </div>
+              <div class="rooms-col">
+                <div class="rooms-col-title">Rooms you joined</div>
+                <div id="roomsMemberList" class="friends-list"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="roomsPaneManage" class="friends-tab-pane" style="display:none;">
+          <div class="panel-scroll">
+            <div id="roomManageContent"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DM PANEL -->
+      <section id="panelDM" class="panel" data-panel="dm" aria-label="Direct messages">
+        <div class="panel-head">
+          <div class="panel-title">Direct</div>
+          <div class="panel-actions">
+            <button id="dmRefreshBtn" class="panel-btn" type="button" title="Refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="panel-scroll">
+          <div id="dmList" class="dm-list"></div>
+          <div class="panel-hint" style="margin-top:10px;">Tap a dialog to open. Use `...` (or right-click) for actions.</div>
+        </div>
+      </section>
+
+      <!-- INVITES PANEL (friends + room invites + room join requests) -->
+      <section id="panelInvites" class="panel" data-panel="invites" aria-label="Invites">
+        <div class="panel-head">
+          <div class="panel-title">Invites</div>
+          <div class="panel-actions">
+            <button id="invitesRefreshBtn" class="panel-btn" type="button" title="Refresh">Refresh</button>
+          </div>
+        </div>
+
+        <div class="panel-scroll">
+          <!-- Row: add friend -->
+          <div class="panel-row">
+            <input id="friendName" placeholder="Username" style="flex:1;" />
+            <button id="sendFriendRequestBtn" class="panel-btn" type="button">Send</button>
+          </div>
+
+          <!-- Tabs (reuse existing IDs) -->
+          <div class="friends-tabs" style="margin-top:10px;">
+            <button id="friendsTabBtn" class="friends-tab is-active" type="button">Friends</button>
+            <button id="roomReqTabBtn" class="friends-tab" type="button">
+              Room requests
+              <span id="roomReqBadge" class="badge" style="display:none; margin-left:6px;">0</span>
+            </button>
+          </div>
+
+          <!-- Tab pane: Friends -->
+          <div id="friendsTabPane" class="friends-tab-pane">
+            <div class="friends-section">
+              <div class="friends-section-title">Incoming requests</div>
+              <div id="friendsIncoming" class="friends-list"></div>
+            </div>
+
+            <div class="friends-section">
+              <div class="friends-section-title">Outgoing requests</div>
+              <div id="friendsOutgoing" class="friends-list"></div>
+            </div>
+
+            <div class="friends-section">
+              <div class="friends-section-title">Group invites</div>
+              <div id="groupInvites" class="friends-list"></div>
+            </div>
+
+            <div class="friends-section">
+              <div class="friends-section-title">Friends</div>
+              <div id="friendsAccepted" class="friends-list"></div>
+              <div class="room-meta" style="margin-top:8px;">
+                Tip: enter a room and click Invite next to a friend.
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab pane: Room join requests -->
+          <div id="roomReqTabPane" class="friends-tab-pane" style="display:none;">
+            <div class="friends-section">
+              <div class="friends-section-title" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+                <span>Join requests to your public rooms</span>
+                <button id="roomReqRefreshBtn" class="panel-btn" type="button">Refresh</button>
+              </div>
+              <div class="room-meta" style="margin-top:6px;">
+                Here you can see join requests to your public rooms where you are the owner.
+              </div>
+              <div id="roomReqList" class="friends-list" style="margin-top:8px;"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+<!-- PROFILE PANEL (connection + profile open + logout) -->
+<section id="panelProfile" class="panel" data-panel="profile" aria-label="Profile">
+  <div class="panel-head">
+    <div class="panel-title">Profile</div>
+  </div>
+
+<!-- Settings tabs (вне scroll) -->
+<div id="settingsTabbar" class="settings-tabs" style="margin-top:10px;">
+  <button id="settingsTabProfile" class="settings-tab is-active" type="button">Profile</button>
+  <button id="settingsTabSecurity" class="settings-tab" type="button">Security</button>
+  <button id="settingsTabFeedback" class="settings-tab" type="button">Feedback</button>
+
+  <!-- moving underline -->
+  <div id="settingsTabHover" class="settings-tab-hover" aria-hidden="true"></div>
+</div>
+
+  <div class="panel-scroll">
+
+    <!-- Tab pane: Profile -->
+    <div id="settingsPaneProfile" class="friends-tab-pane">
+      <div class="panel-block">
+        <div class="panel-block-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span>My profile</span>
+          <button id="profileInlineRefresh" class="panel-btn" type="button" title="Refresh">Refresh</button>
+        </div>
+
+        <div class="panel-hint" style="margin-top:6px;">Username</div>
+        <div id="profileInlineUsername" class="profile-inline-username">—</div>
+
+        <div class="panel-hint" style="margin-top:10px;">About</div>
+        <textarea id="profileInlineAbout" class="profile-inline-about" rows="3" maxlength="360"
+                  placeholder="Tell something about yourself"></textarea>
+
+        <div class="panel-hint" style="margin-top:10px;">Privacy</div>
+        <label class="profile-inline-row">
+          <input id="profileInlineAllowInvites" type="checkbox">
+          <span>Allow group invites from non-friends</span>
+        </label>
+        <label class="profile-inline-row">
+          <input id="profileInlineAllowDm" type="checkbox">
+          <span>Allow DMs from non-friends</span>
+        </label>
+
+        <div class="panel-row" style="margin-top:10px;">
+          <button id="profileInlineSave" class="panel-btn" type="button" style="flex:1;">Save</button>
+        </div>
+        <div id="profileInlineStatus" class="panel-hint" style="margin-top:6px;"></div>
+      </div>
+
+      <!-- Connect (один раз, канон) -->
+      <section class="connect" style="margin-top:12px;">
+        <input id="name" placeholder="Name">
+        <input id="room" placeholder="Room ID or Alias (e.g. 30 or 1MH82Y)">
+        <div class="buttons">
+          <button id="connectBtn" type="button">Join</button>
+          <button id="disconnectBtn" disabled>Disconnect</button>
+          <button id="leaveBtn" type="button" disabled title="Leave the room">Leave</button>
+        </div>
+        <div class="panel-hint" style="margin-top:8px;">For quick access, select rooms in the Rooms section.</div>
+      </section>
+
+      <!-- Danger Zone (один раз, канон) -->
+      <div class="panel-block danger-zone" style="margin-top:12px; padding-top:16px; border-top:1px solid #dc3545;">
+        <div class="panel-block-title" style="color:#dc3545;">Danger Zone</div>
+        <div class="panel-hint" style="color:#dc3545; margin-bottom:10px;">
+          Permanently delete your account and all data. This cannot be undone!
+        </div>
+        <button id="deleteAccountBtn" class="panel-btn" type="button"
+                style="background:#dc3545; color:white; border:none; width:100%;">Delete Account</button>
+      </div>
+    </div>
+
+    <!-- Tab pane: Security -->
+    <div id="settingsPaneSecurity" class="friends-tab-pane" style="display:none;">
+      <div class="panel-block">
+        <div class="panel-block-title">Two-factor authentication</div>
+        <div id="security2faMount"></div>
+      </div>
+      <div class="panel-block" style="margin-top:10px;">
+        <div class="panel-block-title">Auto-lock crypto</div>
+        <div id="securityAutolockMount"></div>
+      </div>
+      <div class="panel-block">
+        <div class="panel-block-title">Change password</div>
+        <div id="securityChangePassMount"></div>
+      </div>
+      <div class="panel-block">
+        <div class="panel-block-title">Recovery phrase</div>
+        <div id="securityRecoveryMount"></div>
+      </div>
+    </div>
+
+    <!-- Tab pane: Feedback -->
+    <div id="settingsPaneFeedback" class="friends-tab-pane" style="display:none;">
+      <div class="panel-block">
+        <div class="panel-block-title">Feedback</div>
+        <div class="panel-hint" style="margin-bottom:8px;">Send your ideas or report bugs.</div>
+
+        <textarea id="feedbackMsg" class="profile-inline-about" rows="4" maxlength="1200"
+                  placeholder="Describe the issue / idea. No secrets."></textarea>
+
+        <div class="panel-row" style="margin-top:10px;">
+          <button id="feedbackSendBtn" class="panel-btn" type="button" style="flex:1;">Send</button>
+        </div>
+
+        <div id="feedbackStatus" class="panel-hint" style="margin-top:6px;"></div>
+      </div>
+
+      <div class="panel-block" style="margin-top:10px;">
+        <div class="panel-block-title">About &amp; License</div>
+        <div class="panel-hint" style="line-height:1.45;">
+          <strong>WS Messenger</strong><br>
+          Copyright &copy; 2026 Yevgeniy Kropochev<br>
+          Licensed under the
+          <a href="https://www.gnu.org/licenses/agpl-3.0.html"
+             target="_blank" rel="noopener noreferrer">GNU AGPL-3.0-or-later</a>.
+        </div>
+        <div class="panel-hint" style="margin-top:8px; line-height:1.45;">
+          Source code (AGPL &sect;13):
+          <a id="aboutSourceLink"
+             href="https://github.com/Eisern/wsmessenger"
+             target="_blank" rel="noopener noreferrer"
+             style="word-break:break-all;">https://github.com/Eisern/wsmessenger</a>
+        </div>
+        <div class="panel-hint" style="margin-top:8px;">
+          This program comes with ABSOLUTELY NO WARRANTY.
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+      </div>
+    </aside>
+  </div>
+  <!-- Create room drawer (kept as overlay modal) -->
+  <div id="createRoomDrawer" class="drawer" aria-hidden="true">
+    <div id="createRoomBackdrop" class="drawer-backdrop"></div>
+
+    <div class="drawer-panel">
+  <div class="drawer-head">
+    <div class="drawer-title">Create room</div>
+    <button id="closeCreateRoom" class="drawer-close" type="button">✖</button>
+  </div>
+
+  <div class="create-room-form">
+    <!-- left: room logo -->
+    <div class="create-room-logo">
+      <button id="pickRoomLogo" class="logo-pick" type="button" title="Choose room logo" aria-label="Choose room logo">
+        <span class="logo-plus">+</span>
+      </button>
+      <input id="newRoomLogo" type="file" accept="image/*" hidden>
+    </div>
+
+    <!-- right: name/pass -->
+    <div class="create-room-fields">
+      <input id="newRoomName" placeholder="Room name (alias)" />
+      <input id="newRoomPass" placeholder="Room password (optional)" type="password" />
+    </div>
+
+    <!-- full width description -->
+    <textarea id="newRoomDesc" class="create-room-desc" placeholder="Room description (optional)" rows="3"></textarea>
+
+    <!-- full width public switch (aligned to left edge like logo) -->
+    <label class="create-room-public-switch" for="newRoomPublic">
+      <input id="newRoomPublic" type="checkbox" />
+      <span class="switch-ui" aria-hidden="true"></span>
+      <span class="switch-text">Public room (join by request/approval)</span>
+    </label>
+
+    <label class="create-room-public-switch" for="newRoomReadonly">
+      <input id="newRoomReadonly" type="checkbox" />
+      <span class="switch-ui" aria-hidden="true"></span>
+      <span class="switch-text">Read-only channel (only owner/admin can post)</span>
+    </label>
+
+    <div id="newRoomTypeHint" class="room-type-hint"></div>
+
+    <button id="createRoomBtn" type="button">Create</button>
+
+    <div id="createRoomResult"></div>
+  </div>
+</div>
+
+    </div>
+
+  <!-- (Optional) old drawers are removed in v2 UI -->
+<!-- UI Modal (replaces alert/confirm/prompt) -->
+<div id="uiModal" class="ui-modal hidden" aria-hidden="true">
+  <div class="ui-modal-backdrop" data-ui-close></div>
+
+  <div class="ui-modal-card" role="dialog" aria-modal="true" aria-labelledby="uiModalTitle">
+    <div class="ui-modal-head">
+      <div id="uiModalTitle" class="ui-modal-title">Message</div>
+      <button class="ui-modal-x" type="button" title="Close" data-ui-close>✖</button>
+    </div>
+
+    <div id="uiModalText" class="ui-modal-text"></div>
+
+    <input id="uiModalInput" class="ui-modal-input" type="password" autocomplete="off" spellcheck="false" />
+
+    <div class="ui-modal-actions">
+      <button id="uiModalCancel" class="ui-btn ui-btn-ghost" type="button">Cancel</button>
+      <button id="uiModalOk" class="ui-btn ui-btn-primary" type="button">OK</button>
+    </div>
+  </div>
+</div>
+
+  <!-- âœ… CRYPTO SCRIPTS -->
+  <script src="argon2id/argon2-bundled.min.js"></script>
+  <script src="argon2-selftest.js"></script>
+  <script src="crypto-utils.js"></script>
+  <script src="crypto-manager.js"></script>
+  <script src="rpc.js"></script>
+  
+  
+
+  <script src="panel.js"></script>
+  <script src="panel-crypto.js"></script>
+  <script src="panel-ui.js"></script>
+
+</div>
+</body>
+</html>

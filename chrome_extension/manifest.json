@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "WS Messenger",
+  "version": "0.3.0",
+  "description": "Secure WebSocket messenger with E2EE",
+  
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https:; font-src 'self'; connect-src 'self' https: wss:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; worker-src 'none'; upgrade-insecure-requests;"
+  },
+  
+  "action": { "default_title": "WS Messenger" },
+  "side_panel": { "default_path": "login.html" },
+  "background": { "service_worker": "background.js" },
+  "permissions": ["sidePanel", "storage", "contextMenus"],
+  "host_permissions": [
+    "https://imagine-1-ws.xyz/*",
+    "https://chat-room.work/*"
+  ],
+  "optional_host_permissions": ["https://*/*"],
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
+
+
+

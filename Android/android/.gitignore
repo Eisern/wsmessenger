@@ -1,0 +1,12 @@
+# Build output
+.gradle
+local.properties
+*.iml
+.cxx
+build/
+/app/build/
+
+# Release keystore — NEVER commit these
+keystore.properties
+/app/release.keystore
+/app/*.jks

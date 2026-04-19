@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Broadcast Notice</h1>
+<p style="opacity:.7;font-size:13px;">
+  This message will appear as a popup on the login page of the extension.
+  Use it to inform users about scheduled maintenance or server unavailability.
+  The notice resets if the server is restarted.
+</p>
+
+{% if notice %}
+<div class="card" style="border-color:#5a3a00;background:#1a1000;margin-bottom:16px;">
+  <div class="k">Active notice</div>
+  <div style="margin-top:8px;font-size:13px;">
+    <span style="opacity:.6;">Type:</span>
+    <strong>{{ notice.type }}</strong>
+    &nbsp;·&nbsp;
+    <span style="opacity:.6;">Set by:</span>
+    <strong>{{ notice.updated_by }}</strong>
+  </div>
+  <div style="margin-top:10px;white-space:pre-wrap;word-break:break-word;font-size:14px;line-height:1.5;">{{ notice.message }}</div>
+  <div style="margin-top:14px;">
+    <form method="post" action="/admin/broadcast/clear">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button type="submit" style="background:#3a1010;border-color:#7a2020;">Clear notice (hide popup)</button>
+    </form>
+  </div>
+</div>
+{% else %}
+<div class="card" style="border-color:#1b3a1b;background:#0a140a;margin-bottom:16px;">
+  <div style="opacity:.7;font-size:13px;">No active notice. Login page shows no popup.</div>
+</div>
+{% endif %}
+
+{% if error %}
+<div class="err">{{ error }}</div>
+{% endif %}
+
+<div class="card">
+  <div class="k" style="margin-bottom:12px;">{{ "Update notice" if notice else "Set new notice" }}</div>
+  <form method="post" action="/admin/broadcast">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:12px;opacity:.7;margin-bottom:4px;">Type</label>
+      <select name="notice_type" style="width:100%;">
+        <option value="info"        {% if notice and notice.type == "info"        %}selected{% endif %}>ℹ️  Info</option>
+        <option value="warning"     {% if notice and notice.type == "warning"     %}selected{% endif %}>⚠️  Warning</option>
+        <option value="maintenance" {% if notice and notice.type == "maintenance" %}selected{% endif %}>🔧  Maintenance</option>
+      </select>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;font-size:12px;opacity:.7;margin-bottom:4px;">Message (max 1000 chars)</label>
+      <textarea name="message" rows="5"
+        style="width:100%;box-sizing:border-box;background:#0b0e14;border:1px solid #1b2540;border-radius:10px;padding:8px 10px;color:#e8eefc;font-family:inherit;font-size:13px;resize:vertical;"
+        placeholder="e.g. Scheduled maintenance on March 15, 00:00–04:00 UTC. The server may be unavailable."
+        maxlength="1000">{{ notice.message if notice else "" }}</textarea>
+    </div>
+
+    <button type="submit">{{ "Update notice" if notice else "Publish notice" }}</button>
+  </form>
+</div>
+{% endblock %}

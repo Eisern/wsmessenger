@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network Security Config (RELEASE)
+  ==================================
+  - No cleartext exceptions (Metro dev server not needed in release).
+  - Certificate pinning for primary and secondary backends.
+  - IMPORTANT: Update pin-set when the TLS certificate is renewed.
+-->
+<network-security-config>
+
+    <!-- Block cleartext globally; trust only system CAs -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Certificate pinning: primary backend -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">imagine-1-ws.xyz</domain>
+        <pin-set expiration="2027-01-01">
+            <pin digest="SHA-256">2eJc586zlLVYjU+R9hzyzufQgGV5ejXYPxhuZwzs/mc=</pin>
+            <pin digest="SHA-256">y7xVm0TVJNahMr2sZydE2jQH8SquXV9yLF9seROHHHU=</pin>
+        </pin-set>
+    </domain-config>
+
+    <!-- Certificate pinning: secondary backend -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">chat-room.work</domain>
+        <pin-set expiration="2027-01-01">
+            <pin digest="SHA-256">67WdfjybvR5OiOC6t43nLadhZlGc9t2tmkzEPl6ll9o=</pin>
+            <pin digest="SHA-256">y7xVm0TVJNahMr2sZydE2jQH8SquXV9yLF9seROHHHU=</pin>
+        </pin-set>
+    </domain-config>
+
+</network-security-config>

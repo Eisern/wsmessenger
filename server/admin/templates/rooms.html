@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Rooms</h1>
+
+<form class="row" method="get" action="/admin/rooms">
+  <input name="q" value="{{ q }}" placeholder="search name or alias...">
+  <button type="submit">Search</button>
+</form>
+
+<table class="tbl">
+  <tr><th>ID</th><th>Name</th><th>Alias</th><th>Owner</th><th>Public</th><th>Policy</th><th>Members</th></tr>
+  {% for r in rooms %}
+  <tr>
+    <td>{{ r.id }}</td>
+    <td><a href="/admin/rooms/{{ r.id }}">{{ r.name }}</a></td>
+    <td>{{ r.alias or "" }}</td>
+    <td>{{ r.owner_name }} ({{ r.owner_user_id }})</td>
+    <td>{{ "yes" if r.is_public else "no" }}</td>
+    <td>{{ r.join_policy }}</td>
+    <td>{{ r.members }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Report #{{ report.id }}</h1>
+
+<div class="grid2">
+  <!-- Report info -->
+  <div class="card">
+    <h3>Report info</h3>
+    <div class="row"><b>Status:</b>&nbsp;<span class="st-{{ report.status }}">{{ report.status }}</span></div>
+    <div class="row"><b>Reporter:</b>&nbsp;<a href="/admin/users/{{ report.reporter_id }}">{{ report.reporter_name }}</a></div>
+    <div class="row"><b>Target type:</b>&nbsp;{{ report.target_type }}</div>
+    <div class="row"><b>Target ID:</b>&nbsp;{{ report.target_id }}</div>
+    <div class="row"><b>Reason:</b>&nbsp;{{ report.reason }}</div>
+    <div class="row"><b>Created:</b>&nbsp;{{ report.created_at }}</div>
+    {% if report.comment %}
+      <div style="margin-top:.5rem"><b>Reporter comment:</b></div>
+      <div class="cbox">{{ report.comment }}</div>
+    {% endif %}
+    {% if report.reviewer_name %}
+      <div class="row"><b>Reviewed by:</b>&nbsp;{{ report.reviewer_name }} at {{ report.reviewed_at }}</div>
+    {% endif %}
+    {% if report.review_note %}
+      <div style="margin-top:.5rem"><b>Review note:</b></div>
+      <div class="cbox">{{ report.review_note }}</div>
+    {% endif %}
+  </div>
+
+  <!-- Target info -->
+  <div class="card">
+    <h3>Target details</h3>
+    {% if report.target_type == 'user' and target_info %}
+      <div class="row"><b>Username:</b>&nbsp;<a href="/admin/users/{{ target_info.id }}">{{ target_info.username }}</a></div>
+      <div class="row"><b>Created:</b>&nbsp;{{ target_info.created_at }}</div>
+      <div class="row"><b>Banned:</b>&nbsp;{{ "YES" if target_info.is_banned else "no" }}</div>
+      {% if not target_info.is_banned %}
+        <form method="post" action="/admin/users/{{ target_info.id }}/ban" style="margin-top:.5rem;">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input name="reason" placeholder="ban reason..." style="width:100%;margin-bottom:.25rem;">
+          <button type="submit" class="btn-danger">Ban this user</button>
+        </form>
+      {% endif %}
+
+    {% elif report.target_type == 'room' and target_info %}
+      <div class="row"><b>Room:</b>&nbsp;<a href="/admin/rooms/{{ target_info.id }}">{{ target_info.name }}</a></div>
+      <div class="row"><b>Alias:</b>&nbsp;{{ target_info.alias or '-' }}</div>
+      <div class="row"><b>Owner:</b>&nbsp;<a href="/admin/users/{{ target_info.owner_user_id }}">{{ target_info.owner_name }}</a></div>
+      <div class="row"><b>Public:</b>&nbsp;{{ "yes" if target_info.is_public else "no" }}</div>
+
+    {% elif report.target_type == 'message' and target_info %}
+      <div class="row"><b>Message ID:</b>&nbsp;{{ target_info.id }}</div>
+      <div class="row"><b>Room:</b>&nbsp;<a href="/admin/rooms/{{ target_info.room_id }}">room #{{ target_info.room_id }}</a></div>
+      <div class="row"><b>Author:</b>&nbsp;<a href="/admin/users/{{ target_info.user_id }}">{{ target_info.author_name }}</a></div>
+      <div class="row"><b>Sent:</b>&nbsp;{{ target_info.created_at }}</div>
+      <div style="margin-top:.5rem"><b>Stored text (encrypted):</b></div>
+      <div class="cbox mono">{{ target_info.text[:200] }}{% if target_info.text|length > 200 %}…{% endif %}</div>
+
+    {% else %}
+      <p style="opacity:.6">Target not found (may have been deleted).</p>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Reported content (E2E decrypted by client) -->
+{% if report.reported_content %}
+<div class="card" style="margin-top:.75rem;">
+  <h3>Reported content <span style="font-weight:400;opacity:.6">(decrypted by reporter)</span></h3>
+  <div class="chatlog">
+    {% for msg in report.reported_content %}
+    <div class="chatlog-msg">
+      <span class="chatlog-who">{{ msg.author or 'unknown' }}</span>
+      <span class="chatlog-ts">{{ msg.ts or '' }}</span>
+      <div class="chatlog-txt">{{ msg.text or '' }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Moderation actions -->
+<div class="card" style="margin-top:.75rem;">
+  <h3>Change status</h3>
+  <form method="post" action="/admin/reports/{{ report.id }}/status" class="row" style="gap:.5rem;align-items:flex-start;">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <select name="status">
+      <option value="new"       {% if report.status=='new'       %}selected{% endif %}>new</option>
+      <option value="in_review" {% if report.status=='in_review' %}selected{% endif %}>in_review</option>
+      <option value="resolved"  {% if report.status=='resolved'  %}selected{% endif %}>resolved</option>
+      <option value="dismissed" {% if report.status=='dismissed' %}selected{% endif %}>dismissed</option>
+    </select>
+    <input name="review_note" value="{{ report.review_note or '' }}" placeholder="review note..." style="flex:1;">
+    <button type="submit">Update</button>
+  </form>
+</div>
+
+<!-- Related reports on same target -->
+{% if related %}
+<div class="card" style="margin-top:.75rem;">
+  <h3>Other reports on this target ({{ related|length }})</h3>
+  <table class="tbl">
+    <tr><th>ID</th><th>Reason</th><th>Status</th><th>Reporter</th><th>Created</th></tr>
+    {% for r in related %}
+    <tr>
+      <td><a href="/admin/reports/{{ r.id }}">#{{ r.id }}</a></td>
+      <td>{{ r.reason }}</td>
+      <td><span class="st-{{ r.status }}">{{ r.status }}</span></td>
+      <td>{{ r.reporter_name }}</td>
+      <td>{{ r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else '' }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+<div style="margin-top:1rem;">
+  <a href="/admin/reports?status={{ report.status }}">← Back to reports</a>
+</div>
+{% endblock %}

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Room: {{ r.name }} (id={{ r.id }})</h1>
+<div class="card">
+  <div class="row"><b>Owner:</b> {{ r.owner_name }} ({{ r.owner_user_id }})</div>
+  <div class="row"><b>Alias:</b> {{ r.alias or "-" }}</div>
+  <div class="row"><b>Public:</b> {{ "yes" if r.is_public else "no" }}</div>
+  <div class="row"><b>Join policy:</b> {{ r.join_policy }}</div>
+  <div class="row"><b>Created:</b> {{ r.created_at }}</div>
+</div>
+
+<h2>Members</h2>
+<table class="tbl">
+  <tr><th>User</th><th>Role</th><th>Status</th><th>Since</th><th>Actions</th></tr>
+  {% for m in members %}
+  <tr>
+    <td><a href="/admin/users/{{ m.user_id }}">{{ m.username }}</a> ({{ m.user_id }})</td>
+    <td>{{ m.role }}</td>
+    <td>{{ m.status }}</td>
+    <td>{{ m.created_at }}</td>
+    <td class="actions">
+      <form method="post" action="/admin/rooms/{{ r.id }}/members/{{ m.user_id }}/set-role">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <select name="role">
+          <option value="admin" {% if m.role=='admin' %}selected{% endif %}>admin</option>
+          <option value="member" {% if m.role=='member' %}selected{% endif %}>member</option>
+        </select>
+        <button type="submit">Set</button>
+      </form>
+      <form method="post" action="/admin/rooms/{{ r.id }}/members/{{ m.user_id }}/kick">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button type="submit">Kick</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{{ title or "Admin" }}</title>
+  <link rel="stylesheet" href="/admin/static/admin.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">WS Admin</div>
+    {% if me %}
+      <nav class="nav">
+        <a href="/admin">Dashboard</a>
+        <a href="/admin/users">Users</a>
+        <a href="/admin/rooms">Rooms</a>
+        <a href="/admin/reports">Reports</a>
+        <a href="/admin/audit">Audit</a>
+        <a href="/admin/feedback">Feedback</a>
+        <a href="/admin/broadcast">Broadcast</a>
+      </nav>
+      <form method="post" action="/admin/logout" class="logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button type="submit">Logout ({{ me.username }} · {{ me.role }})</button>
+      </form>
+    {% endif %}
+  </header>
+
+  <main class="wrap">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

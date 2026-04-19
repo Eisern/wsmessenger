@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Reports</h1>
+
+<div class="tabs">
+  <a href="/admin/reports?status=new&q={{ q }}"
+     class="tab {% if current_status=='new' %}active{% endif %}">
+    New ({{ status_counts.get('new', 0) }})
+  </a>
+  <a href="/admin/reports?status=in_review&q={{ q }}"
+     class="tab {% if current_status=='in_review' %}active{% endif %}">
+    In review ({{ status_counts.get('in_review', 0) }})
+  </a>
+  <a href="/admin/reports?status=resolved&q={{ q }}"
+     class="tab {% if current_status=='resolved' %}active{% endif %}">
+    Resolved ({{ status_counts.get('resolved', 0) }})
+  </a>
+  <a href="/admin/reports?status=dismissed&q={{ q }}"
+     class="tab {% if current_status=='dismissed' %}active{% endif %}">
+    Dismissed ({{ status_counts.get('dismissed', 0) }})
+  </a>
+  <a href="/admin/reports?status=&q={{ q }}"
+     class="tab {% if not current_status %}active{% endif %}">
+    All
+  </a>
+</div>
+
+<form class="row" method="get" action="/admin/reports">
+  <input type="hidden" name="status" value="{{ current_status }}">
+  <input name="q" value="{{ q }}" placeholder="search reporter or comment...">
+  <button type="submit">Search</button>
+</form>
+
+{% if reports %}
+<table class="tbl">
+  <tr>
+    <th>ID</th>
+    <th>Status</th>
+    <th>Type</th>
+    <th>Target</th>
+    <th>Reason</th>
+    <th>Reporter</th>
+    <th>Created</th>
+    <th>Reviewer</th>
+  </tr>
+  {% for r in reports %}
+  <tr>
+    <td><a href="/admin/reports/{{ r.id }}">#{{ r.id }}</a></td>
+    <td><span class="st-{{ r.status }}">{{ r.status }}</span></td>
+    <td>{{ r.target_type }}</td>
+    <td>
+      {% if r.target_type == 'user' %}
+        <a href="/admin/users/{{ r.target_id }}">{{ r.target_name or r.target_id }}</a>
+      {% elif r.target_type == 'room' %}
+        <a href="/admin/rooms/{{ r.target_id }}">{{ r.target_name or r.target_id }}</a>
+      {% else %}
+        {{ r.target_name or r.target_id }}
+      {% endif %}
+    </td>
+    <td>{{ r.reason }}</td>
+    <td>{{ r.reporter_name }}</td>
+    <td>{{ r.created_at.strftime('%Y-%m-%d %H:%M') if r.created_at else '' }}</td>
+    <td>{{ r.reviewer_name or '-' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<div class="card" style="margin-top:1rem;"><p>No reports found.</p></div>
+{% endif %}
+{% endblock %}

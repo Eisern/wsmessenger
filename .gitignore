@@ -1,0 +1,74 @@
+# ──────────────────────────────────────────────────────────
+# WS Messenger — root .gitignore
+# Android-specific patterns are in Android/.gitignore
+# ──────────────────────────────────────────────────────────
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# Editors / IDEs
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+*~
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+
+# Logs
+*.log
+
+# Local environment / secrets
+.env
+*.env
+!*.example.env
+secrets/
+*.pem
+*.key
+*.keystore
+!debug.keystore
+keystore.properties
+
+# Internal / non-public docs
+docs/internal/
+
+# Build output (mirrors Android/.gitignore for safety)
+build/
+dist/
+*.apk
+*.aab
+*.jsbundle
+
+# Misc
+.cache/
+coverage/
+.tmp/
+tmp/

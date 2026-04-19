@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>User: {{ u.username }} (id={{ u.id }})</h1>
+
+<div class="card">
+  <div class="row"><b>Created:</b> {{ u.created_at }}</div>
+  <div class="row"><b>2FA:</b> {{ "enabled" if u.has_2fa else "disabled" }}</div>
+  <div class="row"><b>PubKey:</b> {{ "present" if u.public_key else "missing" }}</div>
+  <div class="row"><b>Banned:</b> {{ "yes" if u.is_banned else "no" }}</div>
+
+  {% if u.is_banned %}
+    <div class="row"><b>Reason:</b> {{ u.banned_reason }}</div>
+    <div class="row"><b>At:</b> {{ u.banned_at }}</div>
+  {% endif %}
+
+  <div class="row">
+    <b>Refresh tokens:</b>
+    Active: {{ tok_active }} / Total: {{ tok_all }}
+  </div>
+</div>
+
+<div class="grid2">
+  <form method="post" action="/admin/users/{{ u.id }}/reset-2fa" class="card">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <h3>Reset 2FA</h3>
+    <button type="submit">Reset</button>
+  </form>
+
+  <form method="post" action="/admin/users/{{ u.id }}/revoke-sessions" class="card">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <h3>Revoke sessions</h3>
+    <div class="hint">Sets <code>revoked_at=now()</code> for all active refresh tokens.</div>
+    <button type="submit">Revoke all</button>
+  </form>
+
+  {% if not u.is_banned %}
+  <form method="post" action="/admin/users/{{ u.id }}/ban" class="card">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <h3>Ban user</h3>
+    <input name="reason" placeholder="reason...">
+    <button type="submit">Ban</button>
+  </form>
+  {% else %}
+  <form method="post" action="/admin/users/{{ u.id }}/unban" class="card">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <h3>Unban user</h3>
+    <button type="submit">Unban</button>
+  </form>
+  {% endif %}
+</div>
+
+{% if families and families|length %}
+  <h2>Refresh families</h2>
+  <div class="card">
+    <table class="tbl">
+      <tr>
+        <th>family_id</th>
+        <th>active</th>
+        <th>total</th>
+        <th>last_issued</th>
+        <th>action</th>
+      </tr>
+      {% for f in families %}
+      <tr>
+        <td><code>{{ f.family_id }}</code></td>
+        <td>{{ f.active }}</td>
+        <td>{{ f.total }}</td>
+        <td>{{ f.last_issued }}</td>
+        <td>
+          <form method="post" action="/admin/users/{{ u.id }}/revoke-family" style="display:inline;">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="family_id" value="{{ f.family_id }}">
+            <button type="submit">Revoke family</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </table>
+  </div>
+{% endif %}
+
+{% endblock %}

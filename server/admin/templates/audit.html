@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Audit (last 200)</h1>
+<table class="tbl">
+  <tr><th>ts</th><th>actor</th><th>action</th><th>target</th><th>ok</th><th>ip</th></tr>
+  {% for x in rows %}
+  <tr>
+    <td>{{ x.ts }}</td>
+    <td>{{ x.actor }}</td>
+    <td>{{ x.action }}</td>
+    <td>{{ x.target }}</td>
+    <td>{{ "yes" if x.ok else "no" }}</td>
+    <td>{{ x.ip }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

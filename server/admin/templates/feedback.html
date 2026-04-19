@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Feedback</h1>
+
+<form method="get" action="/admin/feedback" style="display:flex; gap:10px; align-items:flex-end; margin: 12px 0;">
+  <div style="flex: 2;">
+    <div style="font-size:12px; opacity:.75;">Search (username/message)</div>
+    <input name="q" value="{{ q or '' }}" style="width:100%; padding:8px; border-radius:8px; border:1px solid #2a2a2a; background:#111; color:#eee;">
+  </div>
+
+  <div style="flex: 1;">
+    <div style="font-size:12px; opacity:.75;">User ID</div>
+    <input name="user_id" value="{{ user_id or '' }}" inputmode="numeric"
+           style="width:100%; padding:8px; border-radius:8px; border:1px solid #2a2a2a; background:#111; color:#eee;">
+  </div>
+
+  <button class="panel-btn" type="submit">Apply</button>
+  <a class="panel-btn" href="/admin/feedback" style="text-decoration:none; display:inline-flex; align-items:center;">Reset</a>
+</form>
+
+<div class="card" style="padding:0;">
+  <table style="width:100%; border-collapse:collapse;">
+    <thead>
+      <tr style="text-align:left; opacity:.8;">
+        <th style="padding:10px;">ID</th>
+        <th style="padding:10px;">Time</th>
+        <th style="padding:10px;">User</th>
+        <th style="padding:10px;">IP</th>
+        <th style="padding:10px;">Message</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr style="border-top:1px solid #222;">
+        <td style="padding:10px;">
+          <a href="/admin/feedback/{{ r.id }}" style="color:#9ad; text-decoration:none;">{{ r.id }}</a>
+        </td>
+        <td style="padding:10px; white-space:nowrap;">{{ r.created_at }}</td>
+        <td style="padding:10px;">
+          <div><b>{{ r.username }}</b></div>
+          <div style="opacity:.7; font-size:12px;">id={{ r.user_id }}</div>
+        </td>
+        <td style="padding:10px; font-family:monospace; font-size:12px;">{{ r.ip }}</td>
+        <td style="padding:10px;">
+          <div style="opacity:.9;">{{ r.msg_short }}</div>
+          <div style="opacity:.6; font-size:12px; margin-top:4px;">{{ r.ua_short }}</div>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" style="padding:14px; opacity:.7;">No feedback yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

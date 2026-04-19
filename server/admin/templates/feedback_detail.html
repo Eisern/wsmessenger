@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Feedback #{{ row.id }}</h1>
+
+<div style="margin: 8px 0;">
+  <a class="panel-btn" href="/admin/feedback" style="text-decoration:none;">← Back</a>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="k">Created</div><div class="v">{{ row.created_at }}</div>
+  </div>
+  <div class="card">
+    <div class="k">User</div><div class="v">{{ row.username }} (id={{ row.user_id }})</div>
+  </div>
+  <div class="card">
+    <div class="k">IP</div><div class="v" style="font-family:monospace;">{{ row.ip }}</div>
+  </div>
+</div>
+
+<div class="card" style="margin-top: 12px;">
+  <div class="k">UA</div>
+  <div class="v" style="font-family:monospace; font-size:12px; white-space:pre-wrap;">{{ row.ua }}</div>
+</div>
+
+<div class="card" style="margin-top: 12px;">
+  <div class="k">Meta</div>
+  <div class="v" style="font-family:monospace; font-size:12px; white-space:pre-wrap;">{{ row.meta_json }}</div>
+</div>
+
+<div class="card" style="margin-top: 12px;">
+  <div class="k">Message</div>
+  <div class="v" style="white-space:pre-wrap;">{{ row.message }}</div>
+</div>
+{% endblock %}

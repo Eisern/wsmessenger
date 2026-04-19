@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Users</h1>
+
+<form class="row" method="get" action="/admin/users">
+  <input name="q" value="{{ q }}" placeholder="search username...">
+  <button type="submit">Search</button>
+</form>
+
+<table class="tbl">
+  <tr><th>ID</th><th>Username</th><th>Created</th><th>PubKey</th><th>2FA</th><th>Banned</th></tr>
+  {% for u in users %}
+  <tr>
+    <td>{{ u.id }}</td>
+    <td><a href="/admin/users/{{ u.id }}">{{ u.username }}</a></td>
+    <td>{{ u.created_at }}</td>
+    <td>{{ "yes" if u.has_pubkey else "no" }}</td>
+    <td>{{ "yes" if u.has_2fa else "no" }}</td>
+    <td>{{ "yes" if u.is_banned else "no" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

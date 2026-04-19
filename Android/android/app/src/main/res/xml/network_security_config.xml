@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Network Security Config
+  ========================
+  - Cleartext (http://, ws://) is blocked everywhere except localhost/emulator.
+  - Certificate pinning for primary backend (imagine-1-ws.xyz).
+  - IMPORTANT: Update pin-set when the TLS certificate is renewed.
+    To get new fingerprints:
+      openssl s_client -connect imagine-1-ws.xyz:443 2>/dev/null \
+        | openssl x509 -pubkey -noout \
+        | openssl pkey -pubin -outform DER \
+        | openssl dgst -sha256 -binary | openssl enc -base64
+-->
+<network-security-config>
+
+    <!-- Block cleartext globally; trust only system CAs -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Allow cleartext only for Metro dev server (localhost / Android emulator) -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">10.0.3.2</domain>
+    </domain-config>
+
+    <!-- Certificate pinning: primary backend -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">imagine-1-ws.xyz</domain>
+        <pin-set expiration="2027-01-01">
+            <!-- Leaf cert SHA-256 SPKI fingerprint (retrieved 2026-03-09) -->
+            <pin digest="SHA-256">2eJc586zlLVYjU+R9hzyzufQgGV5ejXYPxhuZwzs/mc=</pin>
+            <!-- Intermediate CA SHA-256 SPKI fingerprint (backup pin) -->
+            <pin digest="SHA-256">y7xVm0TVJNahMr2sZydE2jQH8SquXV9yLF9seROHHHU=</pin>
+        </pin-set>
+    </domain-config>
+
+    <!-- Certificate pinning: secondary backend -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="false">chat-room.work</domain>
+        <pin-set expiration="2027-01-01">
+            <!-- Leaf cert SHA-256 SPKI fingerprint (retrieved 2026-03-09) -->
+            <pin digest="SHA-256">67WdfjybvR5OiOC6t43nLadhZlGc9t2tmkzEPl6ll9o=</pin>
+            <!-- Intermediate CA SHA-256 SPKI fingerprint — Let's Encrypt E7 (backup pin) -->
+            <pin digest="SHA-256">y7xVm0TVJNahMr2sZydE2jQH8SquXV9yLF9seROHHHU=</pin>
+        </pin-set>
+    </domain-config>
+
+</network-security-config>

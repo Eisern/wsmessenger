@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Dashboard</h1>
+<div class="grid">
+  <div class="card"><div class="k">Users</div><div class="v">{{ stats.users }}</div></div>
+  <div class="card"><div class="k">Rooms</div><div class="v">{{ stats.rooms }}</div></div>
+  <div class="card"><div class="k">Users w/2FA</div><div class="v">{{ stats.users_2fa }}</div></div>
+  <div class="card"><div class="k">Users w/o pubkey</div><div class="v">{{ stats.users_no_pubkey }}</div></div>
+  <a href="/admin/reports?status=new" class="card {% if stats.reports_pending %}card-warn{% endif %}" style="text-decoration:none;color:inherit;">
+    <div class="k">Reports pending</div>
+    <div class="v">{{ stats.reports_pending }}</div>
+  </a>
+</div>
+{% endblock %}
