@@ -16,6 +16,9 @@
 
 End-to-end encrypted, WebSocket-based messenger.
 
+
+
+
 WS Messenger consists of three components in this repository:
 
 - **Browser extension** — Chrome MV3 side panel, plain ES modules, no
