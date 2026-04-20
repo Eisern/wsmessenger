@@ -16,7 +16,9 @@ Load unpacked via `chrome://extensions/` — point at `chrome_extension/`. No bu
 
 ## Backend Setup
 
-There is no `requirements.txt` or `pyproject.toml`. Inferred Python dependencies from `server/main.py`: `fastapi`, `sqlalchemy`, `passlib[bcrypt]`, `python-jose`, `pyotp`, `qrcode`, `starlette`, `uvicorn`, `jinja2`. The `server/admin/` directory is a FastAPI router (`server/admin/router.py`) with Jinja2 templates and its own HMAC-based CSRF and session management (`server/admin/auth.py`). Audit events are written to an `admin_audit` table.
+Requires PostgreSQL 13+ (tested on 17). There is no `requirements.txt` or `pyproject.toml`. Inferred Python dependencies from `server/main.py`: `fastapi`, `uvicorn`, `starlette`, `sqlalchemy[asyncio]`, `asyncpg`, `pydantic`, `passlib[bcrypt]`, `python-jose`, `pyotp`, `qrcode`, `jinja2`. The `server/admin/` directory is a FastAPI router (`server/admin/router.py`) with Jinja2 templates and its own HMAC-based CSRF and session management (`server/admin/auth.py`). Audit events are written to an `admin_audit` table.
+
+Schema lives in [`server/schema.sql`](server/schema.sql) — apply once with `psql -d <db> -f server/schema.sql` before starting the server. The server itself only lazily creates a few archive tables at runtime (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`); base tables must exist before the first request.
 
 Configuration is via environment variables — copy `server/config.example.env` to `server/.env` and fill in values.
 
@@ -65,12 +67,14 @@ Wrapped room keys use X25519 ECDH + HKDF-SHA256 (info: `"ws-e2ee-wrap-v2"`, salt
 ### Unlock Flow
 
 On login (`login.js`) and on panel re-unlock (`panel-crypto.js` `interactiveUnlockAndSendKek`):
-1. Fetch EPK from `GET /crypto/keys` (salt + iv + ciphertext)
-2. `PBKDF2(password, epk.salt)` → KEK
+1. Load EPK from `chrome.storage.local` via `loadLocalIdentity(username)` (key `e2ee_identity_v1_{username}`: salt + iv + ciphertext)
+2. `Argon2id` (or PBKDF2 fallback) of password with `epk.salt` → KEK
 3. `AES-GCM-decrypt(KEK, epk)` → raw private key bytes → send to `background.js` as `unlock_kek` message
 4. Background imports the private key as a non-extractable `CryptoKey`, holds it for 10 min
 
 The panel does **not** hold the private key — it requests crypto operations from the background via port messages.
+
+EPK is **never** on the server. `GET /crypto/keys` returns HTTP 410 Gone ([server/main.py:3120](server/main.py#L3120)); any Android/extension code path that still calls it is deprecated and will fail.
 
 ### RPC Transport (`rpc.js`)
 
@@ -91,20 +95,18 @@ DMs use a **separate** WebSocket connection (`/ws-dm?thread_id=...`) managed in 
 
 | Store | Contents |
 |---|---|
-| `chrome.storage.local` | Room pinned context |
+| `chrome.storage.local` | EPK (`e2ee_identity_v1_{username}` — salt + iv + ciphertext), room pinned context |
 | `chrome.storage.session` | Temporary unlock KEK (2-minute TTL) |
-| Server DB | EPK (`encrypted_private_key_salt/iv/data`) — user's identity key encrypted with PBKDF2-derived AES key |
+| Server DB | Public keys only (no identity private key material) |
 | Memory only | CryptoKey objects (non-extractable), master key, WebSocket state, DM delivery secrets |
-
-> **Note:** EPK is currently stored server-side so the user can unlock from any device. Planned migration: move EPK to `chrome.storage.local` (two-layer: password-encrypted cold copy + session-key-encrypted hot cache) so the server never holds key material in any form.
 
 ### Backend Hosts
 
-Defined in `chrome_extension/manifest.json` host permissions:
+The author's backend hosts are baked into `chrome_extension/manifest.json` `host_permissions`:
 - `https://imagine-1-ws.xyz` — primary
 - `https://chat-room.work` — secondary
 
-Both support HTTPS and WSS.
+Both support HTTPS and WSS. For self-hosting, edit `host_permissions` and reload the unpacked extension. The Android client can switch backends at runtime (Login screen → "Connect to another server") without a manifest edit.
 
 ## Key File Roles
 
@@ -122,8 +124,10 @@ Both support HTTPS and WSS.
 | `chrome_extension/argon2-selftest.js` | WASM integrity check (pinned SHA-256) + KDF test vector; blocks unlock on failure |
 | `chrome_extension/argon2id/argon2.js` | Emscripten WASM wrapper for Argon2id (SIMD + non-SIMD variants) |
 | `chrome_extension/manifest.json` | MV3 config, permissions, CSP |
-| `server/main.py` | FastAPI server (~5400 lines): auth, rooms, DMs, WebSocket, key storage |
+| `server/main.py` | FastAPI server (~7400 lines): auth, rooms, DMs, WebSocket, public-key storage |
+| `server/schema.sql` | Canonical PostgreSQL DDL — apply once before first server start |
 | `server/admin/` | Admin panel (FastAPI router + Jinja2 templates): users, rooms, reports, audit log |
+| `server/config.example.env` | Example env config — copy to `server/.env` and fill in values |
 
 ## Security Invariants
 
