@@ -67,16 +67,33 @@ manifest edit is needed.
 
 ## Running the backend
 
-There is no `requirements.txt` yet. Inferred dependencies (see
-`THIRD_PARTY_NOTICES.md`):
-`fastapi`, `uvicorn`, `starlette`, `sqlalchemy`, `pydantic`, `passlib[bcrypt]`,
-`python-jose`, `pyotp`, `qrcode`, `jinja2`.
+Requires PostgreSQL 13+ (tested on 17). There is no `requirements.txt` yet.
+Inferred dependencies (see `THIRD_PARTY_NOTICES.md`):
+`fastapi`, `uvicorn`, `starlette`, `sqlalchemy[asyncio]`, `asyncpg`, `pydantic`,
+`passlib[bcrypt]`, `python-jose`, `pyotp`, `qrcode`, `jinja2`.
 
 ```sh
-pip install fastapi uvicorn sqlalchemy 'passlib[bcrypt]' python-jose pyotp qrcode jinja2 pydantic
+# 1. Install dependencies
+pip install fastapi uvicorn 'sqlalchemy[asyncio]' asyncpg \
+    'passlib[bcrypt]' python-jose pyotp qrcode jinja2 pydantic
+
+# 2. Create database and apply schema
+createdb chatdb
+psql -d chatdb -f server/schema.sql
+
+# 3. Configure
 cp server/config.example.env server/.env       # then fill in values
+#    set DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@localhost:5432/chatdb
+#    set JWT_SECRET to a long random string
+
+# 4. Run
 cd server && uvicorn main:app --reload
 ```
+
+The schema in [`server/schema.sql`](server/schema.sql) is the canonical
+DDL. The server itself only lazily creates a few archive tables at runtime
+(`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`);
+all base tables must exist before the first request.
 
 ## Building the Android APK
 
