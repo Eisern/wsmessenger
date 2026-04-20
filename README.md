@@ -14,10 +14,9 @@
 
 А я пойду пилить его дальше-из ближайших целей-максимально возможно упростить self-hosting проекта и попробовать внедрить федеративный протокол для общения между такими самостоятельными серверами.
 
-End-to-end encrypted, WebSocket-based messenger.
 
 
-##
+## End-to-end encrypted, WebSocket-based messenger.
 WS Messenger consists of three components in this repository:
 
 - **Browser extension** — Chrome MV3 side panel, plain ES modules, no
