@@ -10,7 +10,7 @@
 
 Прямо сейчас, скачав файлы клиента-расширения (из папки \chrome_extension) или готовый apk (Android\android\app\build\outputs\apk\debug\app-debug.apk), и запустив их, вы автоматически подключитесь к уже работающему тестовому серверу, и сможете пощупать проект руками и даже попробовать пообщаться на нем со своими друзьями.
 
-Или вы можете взять файл бэкенда (\server\main.py), схему базы данных (\server\schema.sql) почитать этот файл и запустить свой такой же сервер и, указав его в клиенте, общаться в вашем небольшом (или большом!) кругу.
+Или вы можете взять файл бэкенда (\server\main.py), схему базы данных (\server\schema.sql) почитать файл \docs\self-hosting.md и запустить свой такой же сервер и, указав его в клиенте, общаться в вашем небольшом (или большом!) кругу.
 
 А я пойду пилить его дальше-из ближайших целей-максимально возможно упростить self-hosting проекта и попробовать внедрить федеративный протокол для общения между такими самостоятельными серверами.
 
@@ -80,15 +80,13 @@ manifest edit is needed.
 
 ## Running the backend
 
-Requires PostgreSQL 13+ (tested on 17). There is no `requirements.txt` yet.
-Inferred dependencies (see `THIRD_PARTY_NOTICES.md`):
-`fastapi`, `uvicorn`, `starlette`, `sqlalchemy[asyncio]`, `asyncpg`, `pydantic`,
-`passlib[bcrypt]`, `python-jose`, `pyotp`, `qrcode`, `jinja2`.
+Requires Python 3.11+ and PostgreSQL 13+ (tested on 17). Quick start for
+local development:
 
 ```sh
 # 1. Install dependencies
-pip install fastapi uvicorn 'sqlalchemy[asyncio]' asyncpg \
-    'passlib[bcrypt]' python-jose pyotp qrcode jinja2 pydantic
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r server/requirements.txt
 
 # 2. Create database and apply schema
 createdb chatdb
@@ -107,6 +105,10 @@ The schema in [`server/schema.sql`](server/schema.sql) is the canonical
 DDL. The server itself only lazily creates a few archive tables at runtime
 (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`);
 all base tables must exist before the first request.
+
+For a full production deployment — VPS setup, systemd unit, nginx + TLS,
+creating the first admin, updates, and troubleshooting — see
+[`docs/self-hosting.md`](docs/self-hosting.md).
 
 ## Building the Android APK
 

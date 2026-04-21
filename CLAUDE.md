@@ -16,7 +16,9 @@ Load unpacked via `chrome://extensions/` — point at `chrome_extension/`. No bu
 
 ## Backend Setup
 
-Requires PostgreSQL 13+ (tested on 17). There is no `requirements.txt` or `pyproject.toml`. Inferred Python dependencies from `server/main.py`: `fastapi`, `uvicorn`, `starlette`, `sqlalchemy[asyncio]`, `asyncpg`, `pydantic`, `passlib[bcrypt]`, `python-jose`, `pyotp`, `qrcode`, `jinja2`. The `server/admin/` directory is a FastAPI router (`server/admin/router.py`) with Jinja2 templates and its own HMAC-based CSRF and session management (`server/admin/auth.py`). Audit events are written to an `admin_audit` table.
+Requires PostgreSQL 13+ (tested on 17). Runtime dependencies are pinned in [`server/requirements.txt`](server/requirements.txt) — install with `pip install -r server/requirements.txt`. Note that the `passlib[argon2]` extra is used (not `bcrypt`) because the server hashes passwords with Argon2id. The `server/admin/` directory is a FastAPI router (`server/admin/router.py`) with Jinja2 templates and its own HMAC-based CSRF and session management (`server/admin/auth.py`). Audit events are written to an `admin_audit` table.
+
+For a full self-hosting walkthrough (VPS, systemd, nginx + TLS, first admin, updates), see [`docs/self-hosting.md`](docs/self-hosting.md).
 
 Schema lives in [`server/schema.sql`](server/schema.sql) — apply once with `psql -d <db> -f server/schema.sql` before starting the server. The server itself only lazily creates a few archive tables at runtime (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`); base tables must exist before the first request.
 

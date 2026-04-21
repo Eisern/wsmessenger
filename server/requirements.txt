@@ -1,0 +1,35 @@
+# WS Messenger — backend runtime dependencies.
+# Install with:  pip install -r server/requirements.txt
+#
+# Versions are pinned to a compatible minor range to keep self-hosted
+# deployments reproducible. Loosen or tighten as needed.
+
+# Web framework + ASGI server (uvicorn[standard] pulls in websockets,
+# httptools, and uvloop on Linux for better performance).
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.29,<1.0
+
+# Data validation (FastAPI dep, but pinned explicitly).
+pydantic>=2.5,<3.0
+
+# Database.
+SQLAlchemy[asyncio]>=2.0,<3.0
+asyncpg>=0.29,<1.0
+
+# Password hashing. The CryptContext is configured with schemes=["argon2"],
+# so the argon2 extra is required — bcrypt is NOT used.
+passlib[argon2]>=1.7.4,<2.0
+
+# JWT signing / verification.
+python-jose[cryptography]>=3.3,<4.0
+
+# TOTP (2FA) + QR-code generation for authenticator app enrollment.
+pyotp>=2.9,<3.0
+qrcode>=7.4,<9.0
+
+# HTML templating for the admin panel.
+Jinja2>=3.1,<4.0
+
+# Required by FastAPI to parse multipart/form-data (admin login form,
+# uploads).
+python-multipart>=0.0.9,<1.0
