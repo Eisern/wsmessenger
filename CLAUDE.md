@@ -46,15 +46,14 @@ Both crypto modules self-register on `globalThis.__wsCrypto` using an IIFE with 
 
 ```
 Password
-  → Argon2id (primary, via WASM) or PBKDF2 (620,000 iterations, SHA-256, fallback) → KEK
-    → Decrypt master key (AES-256-GCM)
-      → Decrypt identity key (X25519 private)
-        → ECDH with peer ephemeral → Unwrap room keys (AES-256-GCM)
+  → Argon2id (primary, via WASM) or PBKDF2 (≥600,000 iters, SHA-256/384/512) → KEK
+    → AES-GCM-decrypt EPK → X25519 identity private key (non-extractable CryptoKey)
+      → ECDH(peer ephemeral) + HKDF-SHA-256 → Unwrap room/DM keys (AES-256-GCM)
 ```
 
 Key state lives in `CryptoManager` (`chrome_extension/crypto-manager.js`), which holds non-extractable `CryptoKey` objects. `chrome_extension/crypto-utils.js` provides the raw primitives. The private key is cleared from memory on lock/logout.
 
-`background.js` holds the master key in memory with a 10-minute TTL (`hasMasterKey()`); the unlock KEK in `chrome.storage.session` has a 2-minute TTL enforced by the background. The interactive unlock auto-lock timer fires after 5 minutes of inactivity.
+`background.js` holds two AES-GCM keys in service-worker RAM (not storage), each with a 10-minute idle TTL (`hasMasterKey()` / `hasUnlockKek()`): `_masterKey` is the password-derived KEK (used for `storage_encrypt`/`storage_decrypt` of small at-rest blobs like room passwords) and `_unlockKekKey` is a separate one-shot session AES key generated at unlock time for panel↔background handoff. The interactive unlock auto-lock timer defaults to 5 minutes of inactivity and is user-configurable up to 15 minutes.
 
 Argon2id is loaded from `chrome_extension/argon2id/argon2.js` (Emscripten WASM wrapper) with SIMD variant (`argon2-simd.wasm`) preferred. `chrome_extension/argon2-selftest.js` runs at startup: verifies SHA-256 integrity of both `.wasm` files against pinned hashes, then runs a KDF test vector. If the self-test fails, derivation is blocked (fail-closed — no silent PBKDF2 fallback).
 
@@ -69,10 +68,10 @@ Wrapped room keys use X25519 ECDH + HKDF-SHA256 (info: `"ws-e2ee-wrap-v2"`, salt
 ### Unlock Flow
 
 On login (`login.js`) and on panel re-unlock (`panel-crypto.js` `interactiveUnlockAndSendKek`):
-1. Load EPK from `chrome.storage.local` via `loadLocalIdentity(username)` (key `e2ee_identity_v1_{username}`: salt + iv + ciphertext)
+1. Load EPK from `chrome.storage.local` via `loadLocalIdentity(username)` (key `e2ee_local_identity_v2:<username>`; value is a JSON blob with `v`, `username`, `salt`, `iv`, `data`, `kdf`)
 2. `Argon2id` (or PBKDF2 fallback) of password with `epk.salt` → KEK
-3. `AES-GCM-decrypt(KEK, epk)` → raw private key bytes → send to `background.js` as `unlock_kek` message
-4. Background imports the private key as a non-extractable `CryptoKey`, holds it for 10 min
+3. Panel and background perform a **secure handoff** (per-request ephemeral P-256 ECDH + HKDF-SHA-256, `info = "wsapp-unlock-handoff-v1"`, 30 s TTL via `UNLOCK_HANDOFF_TTL_MS`); the master bytes and a fresh session KEK are AES-GCM-encrypted on the wire between contexts. The legacy direct `unlock_kek_set` message is refused server-side in the worker.
+4. Background imports the X25519 private key as a non-extractable `CryptoKey` and keeps it until lock/logout (tied to the 10-minute master-key idle TTL).
 
 The panel does **not** hold the private key — it requests crypto operations from the background via port messages.
 
@@ -97,10 +96,10 @@ DMs use a **separate** WebSocket connection (`/ws-dm?thread_id=...`) managed in 
 
 | Store | Contents |
 |---|---|
-| `chrome.storage.local` | EPK (`e2ee_identity_v1_{username}` — salt + iv + ciphertext), room pinned context |
-| `chrome.storage.session` | Temporary unlock KEK (2-minute TTL) |
-| Server DB | Public keys only (no identity private key material) |
-| Memory only | CryptoKey objects (non-extractable), master key, WebSocket state, DM delivery secrets |
+| `chrome.storage.local` | EPK (`e2ee_local_identity_v2:<username>` — JSON with `v`/`username`/`salt`/`iv`/`data`/`kdf`), room pinned context, UI preferences |
+| `chrome.storage.session` | Active username marker (`e2ee_active_user_v2`) and transient UI hand-off state. **Nothing password-derived.** |
+| Server DB | Public keys, wrapped room/DM key blobs, ciphertext, metadata, delivery secrets — **no private key material, no plaintext** |
+| Service-worker RAM | Non-extractable `CryptoKey`s (identity, room, DM), `_masterKey`, `_unlockKekKey`, JWT, WebSocket state, `dmDeliverySecrets` Map. Cleared on lock/logout/10-min idle. |
 
 ### Backend Hosts
 
