@@ -166,8 +166,23 @@ Key notes:
   is `./uploads` under the process's working directory. Pick an
   explicit path on your data volume, e.g.
   `UPLOAD_DIR=/var/lib/wsapp/uploads`.
-- **`TRUST_PROXY_HEADERS=1`** — set this when you run behind nginx so
-  the server honours `X-Forwarded-For` for rate limiting and logs.
+- **`TRUST_PROXY_HEADERS`** — controls whether the server trusts
+  `X-Forwarded-For` / `X-Real-IP` as the client IP.
+  - `=1` (recommended for standard self-host): set this when the
+    backend runs behind nginx on the same host, so the server sees
+    real client IPs for rate limiting and audit logs. The uvicorn
+    flags `--proxy-headers --forwarded-allow-ips="127.0.0.1"` in the
+    systemd unit below complement this on the ASGI layer.
+  - `=0` (for privacy-focused deployments): set this if you
+    intentionally put the server behind one or more relays to hide
+    client IPs. The server records only the TCP peer — for a typical
+    nginx-on-localhost setup that means `127.0.0.1`, and real end-user
+    IPs never reach the server or its logs. In this mode, **also drop
+    `--proxy-headers` from the uvicorn ExecStart** (section 7 below),
+    otherwise uvicorn rewrites `request.client.host` from
+    `X-Forwarded-For` regardless of the app-level flag and the
+    real IPs leak back in. Per-IP rate limits collapse to a single
+    bucket in this mode — rely on the per-user limits instead.
 - **SMTP_*** / `FEEDBACK_TO` — only needed if you want the in-app
   feedback form to email you. Skip for a personal deployment.
 
@@ -411,7 +426,10 @@ example config uses 1 hour.
 Set `TRUST_PROXY_HEADERS=1` in `.env` and make sure nginx forwards
 `X-Forwarded-For`. Also pass `--proxy-headers
 --forwarded-allow-ips="127.0.0.1"` to uvicorn (the systemd unit above
-already does).
+already does). If you are running in privacy mode
+(`TRUST_PROXY_HEADERS=0`) this behaviour is intentional — client IPs
+are being intentionally hidden from the server and only per-user rate
+limits are effective.
 
 **Argon2id login is very slow under load.**
 Login is CPU- and memory-bound by design. Lower `ARGON2_MEMORY_COST`
