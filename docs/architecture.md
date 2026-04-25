@@ -403,6 +403,15 @@ endpoint (`/ws-dm`) rejects every non-ping client message and tells
 the client to use `POST /ud/dm/send` instead
 ([`server/main.py#L5893`](../server/main.py#L5893)).
 
+### Scope: DM only, not rooms
+
+Sealed sender is intentionally a property of DMs, not rooms. The
+room model relies on server-side enforcement of per-user roles
+(owner / admin / member, mutes, bans, kicks, posting rights), which
+requires the server to know the identity of the sender on every
+write. Hiding the sender from the server in rooms would make that
+enforcement impossible, so the architecture does not attempt it.
+
 ---
 
 ## WebSockets
