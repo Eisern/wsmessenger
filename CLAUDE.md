@@ -137,3 +137,34 @@ Both support HTTPS and WSS. For self-hosting, edit `host_permissions` and reload
 - Sensitive fields (`token`, `password`, `kek`, `privateKey`, etc.) are redacted from logs via `redactDeep()` in `background.js`.
 - `CryptoKey` objects for private/room keys are non-extractable; raw key bytes are wiped from Maps on `clear()` by nulling references to accelerate GC.
 - Room passwords are never stored in plaintext in extension storage.
+
+<!-- gitnexus:start -->
+# GitNexus — Code Intelligence (optional)
+
+If GitNexus is configured locally as an MCP server, the repo can be indexed as **wsmessenger** and queried for callers, blast radius, and execution flows. None of this is required to work in the repo — the section below describes the workflow when those tools are available. If they are not, ignore this section and use Grep / Glob / Read as usual.
+
+> If a GitNexus tool reports a stale index, re-run `npx gitnexus analyze` (assumes a local GitNexus install).
+
+## Suggested workflow when GitNexus is available
+
+- SHOULD run `gitnexus_impact({target: "symbolName", direction: "upstream"})` before modifying a function/class/method, and surface the blast radius (direct callers, affected processes, risk level) to the user.
+- SHOULD run `gitnexus_detect_changes()` before committing to confirm the diff only affects expected symbols and flows.
+- SHOULD warn the user when impact analysis returns HIGH or CRITICAL risk before proceeding.
+- For exploring unfamiliar code, prefer `gitnexus_query({query: "concept"})` for process-grouped results over plain grep.
+- For a 360-degree view of one symbol, use `gitnexus_context({name: "symbolName"})`.
+
+## Avoid
+
+- AVOID find-and-replace renames across files — `gitnexus_rename` understands the call graph and is safer when available.
+- AVOID ignoring HIGH or CRITICAL risk warnings from impact analysis without explicitly telling the user.
+
+## Resources (when GitNexus is configured)
+
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/wsmessenger/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/wsmessenger/clusters` | All functional areas |
+| `gitnexus://repo/wsmessenger/processes` | All execution flows |
+| `gitnexus://repo/wsmessenger/process/{name}` | Step-by-step execution trace |
+
+<!-- gitnexus:end -->

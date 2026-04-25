@@ -72,3 +72,5 @@ dist/
 coverage/
 .tmp/
 tmp/
+.gitnexus
+AGENTS.md
