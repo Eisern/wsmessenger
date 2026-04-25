@@ -27,7 +27,6 @@ export default [
     rules: {
       eqeqeq: ["error", "smart"],
       "no-var": "error",
-      "prefer-const": "warn",
       "no-unused-vars": [
         "warn",
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
@@ -35,12 +34,14 @@ export default [
       // {}.hasOwnProperty(...) is used in places; this rule is too noisy here.
       "no-prototype-builtins": "off",
       // panel.html loads panel.js / panel-crypto.js / panel-ui.js as separate <script> tags
-      // sharing one global scope. The whole codebase relies on implicit globals across
-      // files (function declared in panel.js, called from panel-ui.js). ESLint lints each
-      // file in isolation, so both no-undef and no-implicit-globals fire constantly with
-      // false positives. Full fix would require migrating to ES modules.
+      // sharing one global scope. ESLint lints each file in isolation and cannot see
+      // cross-file references — a `let` declared in panel.js but reassigned only from
+      // panel-ui.js looks unreassigned to ESLint, and prefer-const --fix would convert
+      // it to `const`, breaking the runtime. Disable the whole family of cross-file
+      // scope-aware rules until/unless we migrate to ES modules.
       "no-undef": "off",
       "no-implicit-globals": "off",
+      "prefer-const": "off",
       // Empty catch blocks are an intentional "swallow this error" pattern in many places.
       // Keep the rule on for empty if/while/etc. blocks (which often are real bugs).
       "no-empty": ["error", { allowEmptyCatch: true }],
