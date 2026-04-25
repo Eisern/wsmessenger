@@ -1,0 +1,38 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = [
+    "Android",
+    "chrome_extension",
+    "node_modules",
+    "server/admin/templates",
+    ".venv",
+]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes — undefined names, unused imports
+    "I",        # isort — import ordering
+    "B",        # flake8-bugbear — common bug patterns
+    "UP",       # pyupgrade — modern syntax for the target Python
+    "ASYNC",    # asyncio pitfalls (relevant: WS endpoints)
+    "S",        # bandit-style security checks
+    "SIM",      # simplifications
+    "RUF",      # ruff-specific
+]
+ignore = [
+    "E501",     # line length — formatter handles it
+    "B008",     # FastAPI Depends(...) in argument defaults is idiomatic
+    "S101",     # assert (allowed; primarily for future tests)
+    "RUF002",   # ambiguous-unicode-character-docstring — Russian text is intentional
+    "RUF003",   # ambiguous-unicode-character-comment   — same reason
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Self-host bind on 0.0.0.0 is intentional.
+"server/main.py" = ["S104"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

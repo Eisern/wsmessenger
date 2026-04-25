@@ -1,0 +1,14 @@
+{
+  "name": "ws-messenger-extension",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Lint tooling for the WS Messenger Chrome extension. Not consumed at runtime — the extension is loaded unpacked from this directory and has no build step.",
+  "scripts": {
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.15.0",
+    "eslint": "^9.15.0",
+    "globals": "^15.13.0"
+  }
+}
