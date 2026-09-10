@@ -104,7 +104,7 @@ async def _assert_can_act_on_user(db, actor: "AdminPrincipal", target_user_id: i
 # ---------- auth ----------
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", _ctx(request))
+    return templates.TemplateResponse(request, "login.html", _ctx(request))
 
 
 @router.post("/login")
@@ -112,6 +112,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
     # ── пункт 1: rate limit ──
     if check_rate_limit(request, username):
         return templates.TemplateResponse(
+            request,
             "login.html",
             _ctx(request, error="Too many attempts. Try again later."),
             status_code=429,
@@ -121,6 +122,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
     if verify is None:
         # лучше упасть явно, чем случайно открыть доступ
         return templates.TemplateResponse(
+            request,
             "login.html",
             _ctx(request, error="Server misconfigured (no verify_password)"),
             status_code=500,
@@ -151,6 +153,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             await _audit(db, request, None, "unknown", "admin_login_failed", username, False)
             await db.commit()
             return templates.TemplateResponse(
+                request,
                 "login.html",
                 _ctx(request, error=GENERIC_ERROR),
                 status_code=401,
@@ -162,6 +165,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             await _audit(db, request, u["id"], u["username"], "admin_login_failed", username, False)
             await db.commit()
             return templates.TemplateResponse(
+                request,
                 "login.html",
                 _ctx(request, error=GENERIC_ERROR),
                 status_code=401,
@@ -172,6 +176,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             await _audit(db, request, u["id"], u["username"], "admin_login_failed_banned", username, False)
             await db.commit()
             return templates.TemplateResponse(
+                request,
                 "login.html",
                 _ctx(request, error=GENERIC_ERROR),
                 status_code=401,
@@ -187,6 +192,7 @@ async def login(request: Request, username: str = Form(...), password: str = For
             await _audit(db, request, u["id"], u["username"], "admin_login_denied_not_admin", username, False)
             await db.commit()
             return templates.TemplateResponse(
+                request,
                 "login.html",
                 _ctx(request, error=GENERIC_ERROR),
                 status_code=401,
@@ -234,6 +240,7 @@ async def dashboard(request: Request):
         reports_new = (await db.execute(text("SELECT COUNT(*) FROM reports WHERE status IN ('new','in_review')"))).scalar_one()
 
     return templates.TemplateResponse(
+        request,
         "dashboard.html",
         _ctx(request,
             me=p,
@@ -272,7 +279,7 @@ async def users_list(request: Request, q: str = ""):
         )
         users = [dict(r) for r in res.mappings().all()]
 
-    return templates.TemplateResponse("users.html", _ctx(request, me=p, q=q, users=users))
+    return templates.TemplateResponse(request, "users.html", _ctx(request, me=p, q=q, users=users))
 
 
 @router.get("/users/{user_id}", response_class=HTMLResponse)
@@ -336,6 +343,7 @@ async def user_detail(request: Request, user_id: int):
         families = [dict(r) for r in fres.mappings().all()]
 
     return templates.TemplateResponse(
+        request,
         "user_detail.html",
         _ctx(request,
             me=p,
@@ -517,7 +525,7 @@ async def rooms_list(request: Request, q: str = ""):
         )
         rooms = [dict(r) for r in res.mappings().all()]
 
-    return templates.TemplateResponse("rooms.html", _ctx(request, me=p, q=q, rooms=rooms))
+    return templates.TemplateResponse(request, "rooms.html", _ctx(request, me=p, q=q, rooms=rooms))
 
 
 @router.get("/rooms/{room_id}", response_class=HTMLResponse)
@@ -555,7 +563,7 @@ async def room_detail(request: Request, room_id: int):
         )
         members = [dict(m) for m in mres.mappings().all()]
 
-    return templates.TemplateResponse("room_detail.html", _ctx(request, me=p, r=dict(r), members=members))
+    return templates.TemplateResponse(request, "room_detail.html", _ctx(request, me=p, r=dict(r), members=members))
 
 
 @router.post("/rooms/{room_id}/members/{user_id}/set-role")
@@ -664,6 +672,7 @@ async def reports_list(request: Request, status: str = "new", q: str = ""):
         status_counts = {row["status"]: row["cnt"] for row in cnt_res.mappings().all()}
 
     return templates.TemplateResponse(
+        request,
         "reports.html",
         _ctx(request,
             me=p,
@@ -763,6 +772,7 @@ async def report_detail(request: Request, report_id: int):
         related = [dict(row) for row in hist_res.mappings().all()]
 
     return templates.TemplateResponse(
+        request,
         "report_detail.html",
         _ctx(request,
             me=p,
@@ -847,7 +857,7 @@ async def audit_list(request: Request):
         )
         rows = [dict(x) for x in res.mappings().all()]
 
-    return templates.TemplateResponse("audit.html", _ctx(request, me=p, rows=rows))
+    return templates.TemplateResponse(request, "audit.html", _ctx(request, me=p, rows=rows))
 
 # ---------- feedback ----------
 @router.get("/feedback", response_class=HTMLResponse)
@@ -884,6 +894,7 @@ async def feedback_list(request: Request, q: str = "", user_id: int | None = Non
         rows = [dict(r) for r in res.mappings().all()]
 
     return templates.TemplateResponse(
+        request,
         "feedback.html",
         _ctx(request, me=p, q=q, user_id=user_id, rows=rows),
     )
@@ -910,6 +921,7 @@ async def feedback_detail(request: Request, fid: int):
             return RedirectResponse("/admin/feedback", status_code=302)
 
     return templates.TemplateResponse(
+        request,
         "feedback_detail.html",
         _ctx(request, me=p, row=dict(row)),
     )
@@ -923,7 +935,7 @@ NOTICE_TYPES = {"info", "warning", "maintenance"}
 async def broadcast_page(request: Request):
     p = require_admin(request)
     notice = getattr(request.app.state, "broadcast_notice", None)
-    return templates.TemplateResponse("broadcast.html", _ctx(request, me=p, notice=notice))
+    return templates.TemplateResponse(request, "broadcast.html", _ctx(request, me=p, notice=notice))
 
 
 @router.post("/broadcast")
@@ -940,6 +952,7 @@ async def broadcast_set(
     if not message:
         notice = getattr(request.app.state, "broadcast_notice", None)
         return templates.TemplateResponse(
+            request,
             "broadcast.html",
             _ctx(request, me=p, notice=notice, error="Message cannot be empty."),
             status_code=400,
