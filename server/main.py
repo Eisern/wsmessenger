@@ -6305,7 +6305,8 @@ async def register_ed25519_key(
     if not pub_b64:
         raise HTTPException(status_code=400, detail="public_key required")
     try:
-        raw = base64.b64decode(pub_b64 + "==", validate=True)
+        _padded = pub_b64 + "=" * ((4 - len(pub_b64) % 4) % 4)
+        raw = base64.b64decode(_padded, validate=True)
     except Exception:
         raise HTTPException(status_code=400, detail="public_key must be valid base64")
     if len(raw) != 32:
