@@ -292,22 +292,12 @@ server {
         proxy_read_timeout 60s;
     }
 
-    # Room WebSocket.
-    location /ws {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade    $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Host              $host;
-        proxy_set_header X-Real-IP         $remote_addr;
-        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 3600s;
-        proxy_send_timeout 3600s;
-    }
-
-    # DM WebSocket (sealed sender).
-    location /ws-dm {
+    # All three WebSocket endpoints: /ws (rooms), /ws-dm (sealed-sender DMs),
+    # /ws-notify (per-user notifications and unread badges). Miss any one of
+    # them and it silently falls through to `location /` above, which has no
+    # Upgrade headers -- the handshake then fails with a 404 and the feature
+    # dies with no server-side error.
+    location ~ ^/(ws|ws-dm|ws-notify)(/|$) {
         proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Upgrade    $http_upgrade;
@@ -360,6 +350,28 @@ inserting a row into `admin_users`.
    credentials. Roles are `admin` (moderation) and `superadmin` (full
    access, including promoting other admins).
 
+> **The admin panel requires HTTPS.** The session cookie is issued with
+> `Secure`, so over plain `http://` the browser accepts the login and then
+> drops the cookie -- every page afterwards returns 401. If you see that,
+> you are on HTTP, not misconfigured.
+
+> **Restrict who can reach `/admin/`.** Nothing in the application limits
+> admin access by network -- the guard is a session cookie only, and the
+> nginx config above serves `/admin/` to the whole internet. Put it behind
+> your VPN or an IP allowlist:
+>
+> ```nginx
+> location /admin/ {
+>     allow 10.8.0.0/24;   # your VPN subnet
+>     deny  all;
+>     proxy_pass http://127.0.0.1:8000;
+>     proxy_set_header Host              $host;
+>     proxy_set_header X-Real-IP         $remote_addr;
+>     proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+>     proxy_set_header X-Forwarded-Proto $scheme;
+> }
+> ```
+
 ---
 
 ## 10. Point clients at your server
@@ -376,9 +388,23 @@ in your checkout:
 ]
 ```
 
-Also edit the default backend URL in `chrome_extension/background.js`
-(search for the existing host strings and replace them). Then reload
-the unpacked extension at `chrome://extensions/`.
+The host is also hardcoded in three JS files -- **all** of them must be
+changed, not just `background.js`. Miss one and the extension will keep
+calling the author's server on an origin you just removed from
+`host_permissions`, so the request is blocked with no useful error:
+
+| File | Constants |
+|---|---|
+| `chrome_extension/background.js` | `API_BASE`, `WS_BASE` |
+| `chrome_extension/login.js` | `DEFAULT_API_BASE`, `DEFAULT_WS_BASE` (login + registration) |
+| `chrome_extension/panel.js` | `API_BASE` |
+
+```sh
+cd chrome_extension
+grep -rn "imagine-1-ws.xyz\|chat-room.work" background.js login.js panel.js manifest.json
+```
+
+Then reload the unpacked extension at `chrome://extensions/`.
 
 ### Android
 
