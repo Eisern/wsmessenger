@@ -1395,6 +1395,28 @@ if (msg.type === "members_changed") {
   if (rid && rid !== "0") {
     roomMembersById[rid] = null;
     if (membersPanelOpen) requestRoomMembers(Number(rid));
+
+    // The room key cannot be shared at invite time: the server requires the
+    // target to be an accepted member, and an invitee is still 'pending'.
+    // Share it here, when they accept, or they can never decrypt the room.
+    if (String(msg.action || "") === "invite_accepted") {
+      const uname = String(msg.username || "").trim();
+      const isOwner = !!roomOwnerById[rid];
+      if (uname && isOwner) {
+        (async () => {
+          try {
+            await shareRoomKeyToUser(Number(rid), uname);
+            console.log("Room key shared to", uname, "after invite accept");
+          } catch (e) {
+            const emsg = e?.message || String(e);
+            console.warn("Auto key share after invite accept failed:", emsg);
+            if (/verification|verify/i.test(emsg)) {
+              try { await __ui.alert("Key share to " + uname + " needs verification: " + emsg); } catch {}
+            }
+          }
+        })();
+      }
+    }
   }
   return;
 }

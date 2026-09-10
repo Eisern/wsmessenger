@@ -1324,6 +1324,22 @@ wsState._lastDial = {
           return;
         }
 
+        // Room membership events must reach the panel as a first-class message:
+        // panel.js has a `members_changed` handler (member-list refresh, and the
+        // room-key share when an invitee accepts), but anything relayed as
+        // {type:"raw"} is silently dropped — no panel file handles "raw".
+        if (data?.type === "members_changed") {
+          broadcastToPanels({
+            type: "members_changed",
+            room_id: data.room_id ?? null,
+            action: data.action ?? null,
+            username: data.username ?? null,
+            new_role: data.new_role ?? null,
+            ts: data.ts ?? null,
+          });
+          return;
+        }
+
         broadcastToPanels({ type: "raw", data });
       } catch {
         broadcastToPanels({ type: "raw_text", text: String(e.data) });
