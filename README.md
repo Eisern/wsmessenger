@@ -64,21 +64,20 @@ directory. No build step.
 
 ## Self-hosting
 
-The Chrome extension ships with the original author's backend hosts
-(`chat-room.work`, `imagine-1-ws.xyz`) baked into
-[`chrome_extension/manifest.json`](chrome_extension/manifest.json) under
-`host_permissions`. To point the extension at your own server, edit
-that field:
+Both clients can be pointed at your own server at runtime, with no
+rebuild and no source edit:
 
-```json
-"host_permissions": [
-  "https://your-server.example.com/*"
-]
-```
+- **Chrome extension** — on the login screen, open **"Connect to another
+  server"**, enter your API base, and save. The extension asks for host
+  permission for that origin and stores the choice; the author's hosts
+  remain only as defaults.
+- **Android** — Login screen → **"Connect to another server"**. Saved
+  per device.
 
-then reload the unpacked extension. The Android client can switch
-backends at runtime (Login screen → "Connect to another server"); no
-manifest edit is needed.
+Your server must be reachable over **HTTPS**. The extension's content
+security policy allows `https:` and `wss:` only, and its optional host
+permissions cover `https://*/*`, so a plain-HTTP backend cannot be used
+even on localhost.
 
 ## Running the backend
 

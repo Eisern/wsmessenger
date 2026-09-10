@@ -102,7 +102,7 @@ key" in the code that runs inside the service worker. Its second
 job, beyond being used for unlock, is to AES-GCM-encrypt small
 pieces of state that the panel wants to cache at rest, e.g. room
 passwords (see the `storage_encrypt` / `storage_decrypt` handlers
-at [`background.js#L1671`](../chrome_extension/background.js#L1671)).
+at [`background.js#L1687`](../chrome_extension/background.js#L1687)).
 
 Lifetime: cleared after 10 minutes of inactivity
 ([`background.js#L39`](../chrome_extension/background.js#L39),
@@ -297,7 +297,7 @@ The handoff token is strictly one-shot with a 30 s expiry
 [`background.js#L17`](../chrome_extension/background.js#L17)).
 The legacy transport (`unlock_kek_set`) is disabled server-side in
 the worker and refuses any inbound message
-([`background.js#L1716`](../chrome_extension/background.js#L1716)).
+([`background.js#L1732`](../chrome_extension/background.js#L1732)).
 
 The decrypted X25519 private key is **never held in the panel** —
 the panel calls the background via RPC whenever it needs a crypto
@@ -380,7 +380,7 @@ assembled at
 ### Transport layer
 
 Messages are delivered via `POST /ud/dm/send`
-([`server/main.py#L7104`](../server/main.py#L7104)) with **no
+([`server/main.py#L7105`](../server/main.py#L7105)) with **no
 `Authorization` header**. Requests are instead authenticated with
 an HMAC-SHA-256 tag over a per-thread `delivery_secret`. The
 server records `user_id = NULL` for the row, so even the write
@@ -389,7 +389,7 @@ account.
 
 The delivery secret is fetched once per thread via
 `GET /dm/{thread_id}/delivery-secret`
-([`server/main.py#L7219`](../server/main.py#L7219)) — this call
+([`server/main.py#L7220`](../server/main.py#L7220)) — this call
 *does* require the user's JWT (it verifies membership) — and then
 cached. Cache lives in `dmDeliverySecrets` on Chrome
 ([`background.js#L569`](../chrome_extension/background.js#L569))

@@ -378,33 +378,35 @@ inserting a row into `admin_users`.
 
 ### Chrome extension
 
-The author's hosts (`chat-room.work`, `imagine-1-ws.xyz`) are baked
-into `chrome_extension/manifest.json` under `host_permissions`. Edit it
-in your checkout:
+No edit and no reload required. On the login screen open **"Connect to
+another server"**, enter your API base (`https://messenger.example.com`),
+and press **Save**. The extension asks Chrome for permission to talk to
+that origin, stores the choice in `chrome.storage.local` under
+`server_config`, and every later request follows it. **Test** checks
+`/health` before you commit to it.
 
-```json
-"host_permissions": [
-  "https://messenger.example.com/*"
-]
-```
+Your backend must be reachable over **HTTPS**. The extension's content
+security policy permits only `https:` and `wss:`, and its
+`optional_host_permissions` cover `https://*/*` - so a plain-HTTP
+backend cannot be granted, not even on localhost.
 
-The host is also hardcoded in three JS files -- **all** of them must be
-changed, not just `background.js`. Miss one and the extension will keep
-calling the author's server on an origin you just removed from
-`host_permissions`, so the request is blocked with no useful error:
+The author's hosts (`chat-room.work`, `imagine-1-ws.xyz`) stay in
+`manifest.json` and in the JS files as **defaults**, used until you save
+a server of your own. Editing them out is optional; if you distribute a
+fork and want your host to be the default, change all four places, since
+each context resolves its own base:
 
 | File | Constants |
 |---|---|
+| `chrome_extension/manifest.json` | `host_permissions` |
 | `chrome_extension/background.js` | `API_BASE`, `WS_BASE` |
-| `chrome_extension/login.js` | `DEFAULT_API_BASE`, `DEFAULT_WS_BASE` (login + registration) |
-| `chrome_extension/panel.js` | `API_BASE` |
+| `chrome_extension/login.js` | `DEFAULT_API_BASE`, `DEFAULT_WS_BASE` |
+| `chrome_extension/panel.js` | `API_BASE` (shared with `panel-crypto.js`, `panel-ui.js`) |
 
 ```sh
 cd chrome_extension
 grep -rn "imagine-1-ws.xyz\|chat-room.work" background.js login.js panel.js manifest.json
 ```
-
-Then reload the unpacked extension at `chrome://extensions/`.
 
 ### Android
 

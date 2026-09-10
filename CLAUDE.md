@@ -107,7 +107,9 @@ The author's backend hosts are baked into `chrome_extension/manifest.json` `host
 - `https://imagine-1-ws.xyz` — primary
 - `https://chat-room.work` — secondary
 
-Both support HTTPS and WSS. For self-hosting, edit `host_permissions` and reload the unpacked extension. The Android client can switch backends at runtime (Login screen → "Connect to another server") without a manifest edit.
+Both support HTTPS and WSS. These are **defaults only** — both clients switch backends at runtime (Login screen → "Connect to another server"), with no manifest edit or rebuild.
+
+The chosen backend lives in `chrome.storage.local` under `server_config` (`{apiBase, wsBase}`). `login.js` writes it and requests the host permission via `optional_host_permissions`; `background.js` reads it once at service-worker start and re-reads on a `server_config_updated` port message; `panel.js` resolves it at parse time and follows `chrome.storage.onChanged` (`panel-crypto.js` and `panel-ui.js` share that script scope, so key and file operations follow too). A self-hosted backend must be HTTPS: the extension CSP permits only `https:`/`wss:`, and `optional_host_permissions` covers `https://*/*`.
 
 ## Key File Roles
 
