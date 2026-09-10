@@ -1758,7 +1758,7 @@ class NetworkService {
   async changePassword(oldPassword, newPassword) {
     return this._fetch('/auth/change-password', {
       method: 'POST',
-      body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }),
+      body: { old_password: oldPassword, new_password: newPassword },
     });
   }
 
