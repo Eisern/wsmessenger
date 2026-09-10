@@ -2,6 +2,42 @@
 // Copyright (C) 2026 Yevgeniy Kropochev <y.kropochev87@gmail.com>
 // This file is part of WS Messenger. See LICENSE for terms.
 
+// Default backend. Overridden at runtime by the server config the user sets on
+// the login page ("Connect to another server"), which background.js already
+// honours — panel.js and panel-crypto.js (same script scope) used to ignore it,
+// so every key and file request kept addressing the default host.
+let API_BASE = "https://imagine-1-ws.xyz";
+
+// --- Runtime backend resolution -------------------------------------------
+// Must run before anything issues a request. background.js resolves the same
+// `server_config` key for its own calls; the panel needs it too, otherwise the
+// crypto endpoints (/keys/*, /crypto/*) and file transfer silently address the
+// default host instead of the self-hosted one.
+let __apiBaseReady = Promise.resolve();
+function __applyServerConfig(cfg) {
+  const api = String(cfg?.apiBase || "").trim().replace(/\/$/, "");
+  if (api) API_BASE = api;
+  return API_BASE;
+}
+try {
+  __apiBaseReady = (async () => {
+    try {
+      const r = await chrome.storage.local.get("server_config");
+      __applyServerConfig(r?.server_config);
+    } catch (e) {
+      console.warn("server_config read failed; using default backend:", e?.message || e);
+    }
+    return API_BASE;
+  })();
+  // Keep in sync if the user changes servers while the panel is open.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes.server_config) return;
+    __applyServerConfig(changes.server_config.newValue);
+  });
+} catch (e) {
+  console.warn("server_config bootstrap unavailable:", e?.message || e);
+}
+
 let port = null;
 let portConnecting = false;
 let pendingRoomAlias = "";
@@ -947,7 +983,6 @@ async function fetchRoomPin(roomId) {
   }
 }
 
-const API_BASE = "https://imagine-1-ws.xyz";
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 function humanSize(bytes) {
