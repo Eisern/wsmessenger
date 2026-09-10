@@ -1373,19 +1373,19 @@ ws.onclose = (ev) => {
     last &&
     (Date.now() - (last.ts || 0)) < 5000;
 
+  // 1006 is a LOCAL code meaning "connection closed without a close frame"; a
+  // server never sends it. It signals a transport failure (server restart,
+  // proxy, TLS, network) — it can never mean "this room needs a password":
+  // /ws takes no password (the URL carries only room_id/alias) and rejects on
+  // policy with 1008. Treating it as an auth failure produced a bogus password
+  // prompt for passwordless rooms and, worse, skipped the reconnect entirely.
+  // Log it and fall through to the normal backoff reconnect below.
   if (!md && looksLikeHandshakeFail) {
-
-    if (last && !last.hadRoomPass) {
-      broadcastToPanels({ type: "auth_needed", roomName: last.roomName });
-      broadcastToPanels({ type: "status", online: false, reconnecting: false, connecting: false });
-      broadcastToPanels({ type: "ws_closed", code: closeCode, reason: closeReason, wasClean });
-      return;
-    }
-
-    broadcastToPanels({ type: "error", message: "WS closed before open. Check token/room access/origin/proxy." });
-    broadcastToPanels({ type: "status", online: false, reconnecting: false, connecting: false });
-    broadcastToPanels({ type: "ws_closed", code: closeCode, reason: closeReason, wasClean });
-    return;
+    swarn("WS closed before open (transport failure); will retry", {
+      roomName: last?.roomName,
+      code: closeCode,
+      reason: closeReason,
+    });
   }
 
   const shouldReconnect = !md && !isPolicyOrAuthClose;
