@@ -1096,8 +1096,10 @@ window.addEventListener("peer_key_changed", (e) => {
     const shown = !profilePanel.classList.contains("is-hidden") &&
                   !profilePanel.hasAttribute("hidden");
     if (shown && profileUsername.textContent?.trim() === changedUser) {
-      // Re-load the safety number with updated "keyChanged" flag
-      try { loadSafetyNumber(changedUser); } catch {}
+      // Re-load the safety number with updated "keyChanged" flag.
+      // (This used to call a loadSafetyNumber() that does not exist, so the
+      // ReferenceError was swallowed and the panel never refreshed.)
+      try { _loadSafetyNumberUI(changedUser); } catch {}
     }
   }
 });
@@ -5543,6 +5545,86 @@ function _renderRoomManageReqs(container, rid, requests) {
   }
 }
 
+/**
+ * List peers the key sweep refuses to serve until their safety number is
+ * verified, with a click-through to do it.
+ *
+ * Batch sharing must never fire one modal per peer — that trains people to
+ * dismiss security dialogs. This is the durable surface; the sweep also drops a
+ * single system line in the open room.
+ */
+function _renderKeyTrustBlocked(container, statusEl) {
+  const old = container.querySelector("[data-key-trust-blocked]");
+  if (old) old.remove();
+
+  let blocked = [];
+  try {
+    blocked = (typeof getKeyShareTrustBlocked === "function") ? getKeyShareTrustBlocked() : [];
+  } catch { return; }
+  if (!blocked.length) return;
+
+  const box = document.createElement("div");
+  box.setAttribute("data-key-trust-blocked", "1");
+  box.className = "panel-hint";
+  box.style.cssText = "margin-top:8px; line-height:1.5;";
+
+  const head = document.createElement("div");
+  head.textContent = blocked.length === 1
+    ? "1 member can't receive the room key until you verify their safety number:"
+    : `${blocked.length} members can't receive the room key until you verify their safety numbers:`;
+  box.appendChild(head);
+
+  for (const entry of blocked) {
+    const link = document.createElement("button");
+    link.className = "panel-btn";
+    link.style.cssText = "margin-top:6px; margin-right:6px;";
+    link.textContent = "Verify " + entry.username;
+    link.onclick = () => {
+      // Opening the profile is what renders the safety number and its verify
+      // button; _loadSafetyNumberUI alone would fill a hidden drawer.
+      try { openProfile(entry.username); } catch (e) {
+        if (statusEl) statusEl.textContent = "Error: " + (e?.message || e);
+      }
+    };
+    box.appendChild(link);
+  }
+
+  container.appendChild(box);
+}
+
+/** Tell the user why a room shows no plaintext, without blaming a lock. */
+function showRoomKeyPendingNotice(roomId) {
+  const rid = Number(roomId);
+  if (!rid || Number(activeRoomId || 0) !== rid) return;
+  if (typeof addMsg !== "function") return;
+  addMsg(
+    "System",
+    "Waiting for this room's key. It arrives automatically once the room owner " +
+    "or an admin is online — no action needed."
+  );
+}
+
+// One aggregated line per sweep, only when the affected room is open.
+window.onKeyGapSweepDone = function (summary, blocked) {
+  try {
+    if (!Array.isArray(blocked) || !blocked.length) return;
+    const openRid = Number(activeRoomId || 0);
+    if (!openRid) return;
+    const here = blocked.filter(b => Array.isArray(b.rooms) && b.rooms.includes(openRid));
+    if (!here.length) return;
+    const names = here.map(b => b.username).join(", ");
+    if (typeof addMsg === "function") {
+      addMsg(
+        "System",
+        (here.length === 1
+          ? "1 member can't receive the room key until you verify their safety number: "
+          : `${here.length} members can't receive the room key until you verify their safety numbers: `) +
+        names + ". See Rooms → Manage → Keys."
+      );
+    }
+  } catch {}
+};
+
 function renderRoomManagePane(roomId) {
   const el = document.getElementById("roomManageContent");
   if (!el) return;
@@ -5909,6 +5991,11 @@ function renderRoomManagePane(roomId) {
   keysStatus.style.marginTop = "6px";
   keysSection.appendChild(keysStatus);
 
+  const myManageRole = String(
+    (typeof roomRoleById !== "undefined" && roomRoleById[String(rid)]) || ""
+  ).toLowerCase();
+  const isProvider = isOwner || myManageRole === "owner" || myManageRole === "admin";
+
   if (isOwner) {
     const rotateBtn = document.createElement("button");
     rotateBtn.className = "panel-btn";
@@ -5935,6 +6022,41 @@ function renderRoomManagePane(roomId) {
       rotateBtn.disabled = false;
     };
     keysSection.appendChild(rotateBtn);
+  }
+
+  if (isProvider) {
+    // Manual run of the same sweep the client does automatically. This is a
+    // user gesture, so it is the one place an unlock prompt is legitimate.
+    const sweepBtn = document.createElement("button");
+    sweepBtn.className = "panel-btn";
+    sweepBtn.style.cssText = "width:100%; margin-top:8px;";
+    sweepBtn.textContent = "Send missing keys";
+    sweepBtn.onclick = async () => {
+      sweepBtn.disabled = true;
+      sweepBtn.textContent = "Sending…";
+      keysStatus.textContent = "";
+      try {
+        const res = await sweepRoomKeyGaps({ roomId: rid, reason: "manual", interactive: true });
+        if (!res.ran) {
+          keysStatus.textContent = "Already running or rate-limited — try again shortly.";
+        } else if (!res.shared && !res.alreadyHad && !res.skipped && !res.failed) {
+          keysStatus.textContent = "Everyone in this room already has the key.";
+        } else {
+          const bits = [`Delivered to ${res.shared} member(s).`];
+          if (res.alreadyHad) bits.push(`${res.alreadyHad} already covered by someone else.`);
+          if (res.skipped) bits.push(`${res.skipped} skipped.`);
+          if (res.failed) bits.push(`${res.failed} failed.`);
+          keysStatus.textContent = bits.join(" ");
+        }
+        _renderKeyTrustBlocked(keysSection, keysStatus);
+      } catch (e) {
+        keysStatus.textContent = "Error: " + (e?.message || e);
+      }
+      sweepBtn.textContent = "Send missing keys";
+      sweepBtn.disabled = false;
+    };
+    keysSection.appendChild(sweepBtn);
+    _renderKeyTrustBlocked(keysSection, keysStatus);
   } else {
     const retryBtn = document.createElement("button");
     retryBtn.className = "panel-btn";
@@ -5944,14 +6066,37 @@ function renderRoomManagePane(roomId) {
       retryBtn.disabled = true;
       retryBtn.textContent = "Loading…";
       keysStatus.textContent = "";
+      let holdDisabled = false;
       try {
-        const ok = await loadRoomKey(rid);
-        keysStatus.textContent = ok ? "Key loaded successfully." : "Key not available from server.";
+        // A rotation may have left our key only in the archive, so try that first.
+        try { await loadRoomKeyArchiveFromServer(rid); } catch {}
+        const res = await loadRoomKey(rid);
+        if (res.ok) {
+          keysStatus.textContent = "Key loaded successfully.";
+          try { renderedHistoryRoomId = null; } catch {}
+          try { safePost({ type: "history_get", roomId: rid, limit: HISTORY_PAGE_SIZE }); } catch {}
+        } else if (res.locked) {
+          keysStatus.textContent = "Crypto is locked — unlock and try again.";
+        } else {
+          // Name who can actually fix this instead of the old dead-end
+          // "Key not available from server."
+          const providers = members
+            .filter(m => ["owner", "admin"].includes(String(m?.role || "").toLowerCase()))
+            .map(m => m?.username)
+            .filter(Boolean);
+          keysStatus.textContent =
+            "No key yet. The room owner or an admin has to open WS Messenger once, " +
+            "then it arrives automatically." +
+            (providers.length ? ` Providers: ${providers.join(", ")}.` : "");
+          // Don't let this become a manual hammer.
+          holdDisabled = true;
+          setTimeout(() => { retryBtn.disabled = false; }, 15000);
+        }
       } catch (e) {
         keysStatus.textContent = "Error: " + (e?.message || e);
       }
       retryBtn.textContent = "Re-request my key";
-      retryBtn.disabled = false;
+      if (!holdDisabled) retryBtn.disabled = false;
     };
     keysSection.appendChild(retryBtn);
   }

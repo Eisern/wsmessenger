@@ -71,11 +71,22 @@ On login (`login.js`) and on panel re-unlock (`panel-crypto.js` `interactiveUnlo
 1. Load EPK from `chrome.storage.local` via `loadLocalIdentity(username)` (key `e2ee_local_identity_v2:<username>`; value is a JSON blob with `v`, `username`, `salt`, `iv`, `data`, `kdf`)
 2. `Argon2id` (or PBKDF2 fallback) of password with `epk.salt` → KEK
 3. Panel and background perform a **secure handoff** (per-request ephemeral P-256 ECDH + HKDF-SHA-256, `info = "wsapp-unlock-handoff-v1"`, 30 s TTL via `UNLOCK_HANDOFF_TTL_MS`); the master bytes and a fresh session KEK are AES-GCM-encrypted on the wire between contexts. The legacy direct `unlock_kek_set` message is refused server-side in the worker.
-4. Background imports the X25519 private key as a non-extractable `CryptoKey` and keeps it until lock/logout (tied to the 10-minute master-key idle TTL).
+4. The panel decrypts the EPK and imports the X25519 identity key as a non-extractable `CryptoKey` into `CryptoManager`, where it stays until lock/logout.
 
-The panel does **not** hold the private key — it requests crypto operations from the background via port messages.
+The **panel** holds the identity private key, not the service worker. `crypto-utils.js` and `crypto-manager.js` are loaded only by `panel.html` and `login.html`; `background.js` has no `importScripts` and never sees an X25519 key. What background keeps is the password-derived `_masterKey` (for `storage_encrypt`/`storage_decrypt`), the one-shot `_unlockKekKey` session key, and the ephemeral P-256 key pair used for the handoff in step 3 — each on the 10-minute idle TTL. Room-key wrapping and message decryption therefore happen in the panel; the worker is a transport, not a crypto oracle.
 
 EPK is **never** on the server. `GET /crypto/keys` returns HTTP 410 Gone ([server/main.py:3120](server/main.py#L3120)); any Android/extension code path that still calls it is deprecated and will fail.
+
+### Room Key Delivery
+
+A room key reaches a new member by being wrapped for their public key and uploaded — the server never holds it in the clear. Delivery is **pull-driven backfill**, not a one-shot push:
+
+- `GET /crypto/rooms/key-gaps[?room_id=N]` returns accepted members who have no `chat_room_keys` row, in rooms the caller may serve. The state is derived, not stored — there is no request table.
+- `POST /crypto/room/{id}/share` accepts the room **owner or an admin** (`require_room_moderator`). Body field `if_absent: true` makes the write fill a gap only; the server forces it on for every non-owner, so only the owner can ever replace an existing key (which is what `rotateRoomKey` depends on). The response carries `written: bool` — `false` means another provider closed the gap first, which is a success.
+- `notify_key_gap` is pushed on `/ws-notify` (per-user, always on) when someone becomes an accepted member. It is a wake-up carrying only `room_id`; recipients re-query the endpoint above.
+- The panel's sweep (`sweepRoomKeyGaps` / `scheduleRoomKeySweep` in `panel-crypto.js`) drains the list on startup, unlock, notify, membership change, room open, and a manual **Rooms → Manage → Keys → Send missing keys**. It never prompts for a password: locked means defer, and it backs off on failure.
+
+The old behaviour required the owner to be connected to that specific room's socket at the moment of acceptance; since a client holds one room socket at a time, that failed whenever the owner was offline or simply in another room.
 
 ### RPC Transport (`rpc.js`)
 

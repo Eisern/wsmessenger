@@ -1336,12 +1336,23 @@ async function loadRoomKeyArchiveFromServer(roomId) {
   }
 }
 
+/**
+ * Load this room's key into CryptoManager.
+ *
+ * Background-safe: never prompts.
+ *
+ * Returns a result object rather than a bare boolean because the three failure
+ * modes need different handling and callers used to blame all of them on a
+ * lock — which made a room we simply have no key for pop a password prompt.
+ * Mirrors loadDmKey's shape.
+ *
+ * @returns {Promise<{ok: boolean, locked?: boolean, notFound?: boolean, error?: boolean}>}
+ */
 async function loadRoomKey(roomId) {
-  // Background-safe: never prompts; returns false when locked
   const okCrypto = await ensureCryptoReady({ interactive: false });
   if (!okCrypto) {
     console.warn("Crypto locked; skip loadRoomKey");
-    return false;
+    return { ok: false, locked: true };
   }
 
   try {
@@ -1352,7 +1363,7 @@ async function loadRoomKey(roomId) {
     await loadRoomKeyArchive(rid);
 
     const token = await requestToken();
-    if (!token) return false;
+    if (!token) return { ok: false, locked: true };
 
     const response = await fetch(API_BASE + `/crypto/room-key/${roomId}`, {
       method: "GET",
@@ -1365,8 +1376,9 @@ async function loadRoomKey(roomId) {
 
       const isOwner = !!roomOwnerById[String(rid)];
       if (!isOwner) {
+        // Not a lock and not an error: a provider has yet to deliver our key.
         console.warn(`Not owner of room ${rid}, cannot create room key`);
-        return false;
+        return { ok: false, notFound: true };
       }
 
       console.log(`We are owner of room ${rid}, creating room key...`);
@@ -1374,22 +1386,22 @@ async function loadRoomKey(roomId) {
       if (created) {
         await loadRoomKeyArchiveFromServer(rid);
         console.log(`Room key auto-created for room ${rid}`);
-        return true;
+        return { ok: true };
       }
 
       console.error(`Failed to auto-create room key for room ${rid}`);
-      return false;
+      return { ok: false, error: true };
     }
 
     if (!response.ok) {
       console.warn("Failed to get room key:", response.status);
-      return false;
+      return { ok: false, error: true };
     }
 
     const data = await response.json().catch(() => null);
     if (!data?.encrypted_room_key) {
       console.warn("room key response has no encrypted_room_key");
-      return false;
+      return { ok: false, error: true };
     }
 
     const roomKeyBase64 = await CU().decryptRoomKeyForUser(
@@ -1404,10 +1416,10 @@ async function loadRoomKey(roomId) {
     await loadRoomKeyArchiveFromServer(rid);
 
     console.log(`Room key loaded for room ${rid}`);
-    return true;
+    return { ok: true };
   } catch (error) {
     console.error("loadRoomKey failed:", error);
-    return false;
+    return { ok: false, error: true };
   }
 }
 
@@ -1437,6 +1449,17 @@ async function fetchPeerPublicKey(peerUsername) {
   return body.public_key;
 }
 
+// Trust failures carry a `code` so batch callers can tell "this peer needs a
+// human to verify a safety number" from "we could not check right now". Before
+// this, the only caller sniffed the message text with a regex, which does not
+// survive a sweep over many peers: one flaky /keys/{u} fetch would be reported
+// to the user as a security event.
+function _trustError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
 async function assertPeerKeyTrustedForSharing(
   peerUsername,
   actionLabel = "sharing encrypted key",
@@ -1446,13 +1469,15 @@ async function assertPeerKeyTrustedForSharing(
   if (!peer) throw new Error("Missing peer username");
   const keyCheck = await checkPeerKeyChanged(peer, { force: true, peerPublicKeyB64 });
   if (keyCheck === null) {
-    throw new Error(
+    // Pass peerPublicKeyB64 to keep this off the network: then null can only
+    // mean crypto is unusable locally, not that a fetch flapped.
+    throw _trustError("TRUST_UNVERIFIABLE",
       `Unable to verify trust state for "${peer}". ` +
       `Open Safety Number and verify before ${actionLabel}.`
     );
   }
   if (keyCheck.changed) {
-    throw new Error(
+    throw _trustError("TRUST_CHANGED",
       `Public key for "${peer}" has changed since last known. ` +
       `Verify safety numbers before ${actionLabel}.`
     );
@@ -1468,13 +1493,13 @@ async function assertPeerKeyTrustedForSharing(
     try {
       const stored = await chrome.storage.local.get([changedKey]);
       if (stored[changedKey]) {
-        throw new Error(
+        throw _trustError("TRUST_UNVERIFIED",
           `Public key for "${peer}" has recently changed and requires re-verification. ` +
           `Open Safety Numbers and verify before ${actionLabel}.`
         );
       }
     } catch (e) {
-      if (String(e?.message || "").includes("requires re-verification")) throw e;
+      if (e?.code === "TRUST_UNVERIFIED") throw e;
       // Storage read error — fail open (don't block on infrastructure error)
     }
   }
@@ -1876,8 +1901,8 @@ async function encryptMessageForRoom(roomId, plaintext) {
   if (!Number.isInteger(rid) || rid <= 0) throw new Error("Bad roomId");
 
   if (!CM()?.roomKeys?.has(rid)) {
-    const ok = await loadRoomKey(rid);
-    if (!ok) throw new Error("No room key for this room");
+    const res = await loadRoomKey(rid);
+    if (!res.ok) throw new Error("No room key for this room");
   }
 
   // Re-check after async loadRoomKey — key could have been cleared by lock/logout
@@ -1937,8 +1962,8 @@ async function decryptMessageFromRoom(roomId, text) {
 
 if (!CM()?.roomKeys?.has(rid)) {
   try {
-    const ok = await loadRoomKey(rid);
-    if (!ok) {
+    const res = await loadRoomKey(rid);
+    if (!res.ok) {
       console.warn("Received encrypted message but room key not available", rid);
       return "[Encrypted message - key not available]";
     }
@@ -1965,12 +1990,25 @@ if (!CM()?.roomKeys?.has(rid)) {
 
 }
 
-async function shareRoomKeyToUser(roomId, targetUsername) {
+/**
+ * Wrap this room's key for one member and upload it.
+ *
+ * @param {number} roomId
+ * @param {string} targetUsername
+ * @param {object} [opts]
+ * @param {boolean} [opts.interactive=true] prompt to unlock if locked. The key
+ *   sweep passes false: an automatic trigger must never raise a password prompt.
+ * @param {boolean} [opts.ifAbsent=false] fill a gap only, never replace a key
+ *   the target already holds. The server forces this on for non-owners anyway.
+ * @returns {Promise<{ok: true, written: boolean}>} written=false means the
+ *   target already had a key — a success, not a failure.
+ */
+async function shareRoomKeyToUser(roomId, targetUsername, { interactive = true, ifAbsent = false } = {}) {
   const rid = Number(roomId);
   const uname = (targetUsername || "").trim();
   if (!rid || !uname) throw new Error("shareRoomKeyToUser: missing args");
 
-  await ensureCryptoReady({ interactive: true, reason: "Share room key" });
+  await ensureCryptoReady({ interactive, reason: "Share room key" });
 
   let roomKeyBase64 = await CM().exportRoomKeyForSharing(rid);
 
@@ -2031,14 +2069,320 @@ async function shareRoomKeyToUser(roomId, targetUsername) {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + token
       },
-      body: JSON.stringify({ encrypted_room_key: encryptedForInvitee, key_id: keyId })
+      body: JSON.stringify({
+        encrypted_room_key: encryptedForInvitee,
+        key_id: keyId,
+        if_absent: !!ifAbsent,
+      })
     }
   );
 
   const d2 = await r2.json().catch(() => ({}));
   if (!r2.ok) throw new Error(d2.detail || `Share failed (${r2.status})`);
 
+  // Older servers answer {ok:true} with no `written`; treat that as written.
+  return { ok: true, written: d2?.written !== false };
+}
+
+// ============================
+// Room key backfill sweep
+// ============================
+//
+// A member who accepts an invite while no provider is watching this room's
+// socket used to end up with no key at all, permanently: delivery was a push
+// that nothing retried, and a client holds one room socket at a time, so the
+// owner of several rooms was listening to at most one of them.
+//
+// The sweep replaces that with a pull. The server derives "accepted member with
+// no key row" and hands the list to anyone entitled to serve it (owner or
+// admin); every provider drains it whenever it is alive and unlocked.
+//
+// It never prompts. A locked client defers to the unlock trigger instead — an
+// automatic background task must not raise a password dialog.
+
+const KEY_SWEEP_MIN_INTERVAL_MS  = 60_000;
+const KEY_SWEEP_ERROR_BACKOFF_MS = 5 * 60_000;
+const KEY_SWEEP_PAIR_COOLDOWN_MS = 10 * 60_000;
+const KEY_SWEEP_TRUST_BLOCK_MS   = 30 * 60_000;
+const KEY_SWEEP_MAX_PASSES       = 5;
+const KEY_SWEEP_PAGE             = 100;
+const KEY_SWEEP_MAX_TRANSIENT    = 3;
+const KEY_SWEEP_PAIR_COOLDOWN_CAP = 500;
+
+let __sweepRunning = false;
+let __sweepRerunRooms = new Set();
+let __sweepNextAllowedTs = 0;
+let __sweepTimer = null;
+let __sweepPendingRooms = new Set();
+let __sweepWantGlobal = false;
+const __sweepPairCooldown = new Map();   // "rid:username" -> ts
+const __sweepTrustBlocked = new Map();   // username -> {ts, reason, rooms:Set}
+
+function _sweepPairKey(rid, uname) {
+  return String(rid) + ":" + String(uname).toLowerCase();
+}
+
+function _sweepNotePairCooldown(rid, uname) {
+  if (__sweepPairCooldown.size >= KEY_SWEEP_PAIR_COOLDOWN_CAP) {
+    // Map preserves insertion order, so the first key is the oldest.
+    const oldest = __sweepPairCooldown.keys().next();
+    if (!oldest.done) __sweepPairCooldown.delete(oldest.value);
+  }
+  __sweepPairCooldown.set(_sweepPairKey(rid, uname), Date.now());
+}
+
+function _sweepPairOnCooldown(rid, uname) {
+  const ts = __sweepPairCooldown.get(_sweepPairKey(rid, uname));
+  return !!ts && (Date.now() - ts) < KEY_SWEEP_PAIR_COOLDOWN_MS;
+}
+
+function _sweepTrustBlockedFor(uname) {
+  const entry = __sweepTrustBlocked.get(String(uname).toLowerCase());
+  if (!entry) return false;
+  if ((Date.now() - entry.ts) >= KEY_SWEEP_TRUST_BLOCK_MS) {
+    __sweepTrustBlocked.delete(String(uname).toLowerCase());
+    return false;
+  }
   return true;
+}
+
+/** Peers the sweep cannot serve until a human verifies their safety number. */
+function getKeyShareTrustBlocked() {
+  const out = [];
+  for (const [uname, entry] of __sweepTrustBlocked.entries()) {
+    if ((Date.now() - entry.ts) >= KEY_SWEEP_TRUST_BLOCK_MS) continue;
+    out.push({ username: uname, reason: entry.reason, rooms: [...entry.rooms] });
+  }
+  return out;
+}
+
+/** Clear a peer's block once they have been verified. */
+function clearKeyShareTrustBlock(uname) {
+  __sweepTrustBlocked.delete(String(uname || "").toLowerCase());
+}
+
+async function fetchRoomKeyGaps({ roomId = 0, limit = KEY_SWEEP_PAGE } = {}) {
+  const token = await requestToken();
+  if (!token) throw new Error("No token");
+
+  const qs = new URLSearchParams({ limit: String(limit) });
+  if (roomId) qs.set("room_id", String(roomId));
+
+  const r = await fetch(API_BASE + "/crypto/rooms/key-gaps?" + qs.toString(), {
+    method: "GET",
+    headers: { "Authorization": "Bearer " + token },
+  });
+
+  if (r.status === 429) {
+    const retryAfter = Number(r.headers.get("Retry-After")) || 120;
+    __sweepNextAllowedTs = Date.now() + retryAfter * 1000;
+    throw new Error(`Rate limited (retry in ${retryAfter}s)`);
+  }
+
+  // Not a provider for this room, or the room is gone. Ordinary members hit
+  // this on every membership event; it is an answer, not a failure, and must
+  // not trip the error backoff.
+  if (r.status === 403 || r.status === 404) {
+    return { gaps: [], truncated: false, notProvider: true };
+  }
+
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `key-gaps failed (${r.status})`);
+
+  return {
+    gaps: Array.isArray(body.gaps) ? body.gaps : [],
+    truncated: !!body.truncated,
+  };
+}
+
+// Failures that will not change on an immediate retry: the gap is real but we
+// cannot close it right now, so cool the pair down instead of spinning.
+function _sweepIsPermanentish(msg) {
+  return /not a member|not found|re-register|not valid base64|Not owner/i.test(msg);
+}
+
+/**
+ * Close every room-key gap this account is entitled to close.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.roomId=0] limit to one room (0 = every servable room)
+ * @param {string} [opts.reason] what triggered this, for logs
+ * @param {boolean} [opts.interactive=false] allow an unlock prompt. Only ever
+ *   true for an explicit user gesture.
+ * @returns {Promise<{ran: boolean, shared: number, alreadyHad: number,
+ *   skipped: number, failed: number}>} ran=false means the sweep declined to
+ *   start (already running, locked, or inside the backoff window).
+ */
+async function sweepRoomKeyGaps({ roomId = 0, reason = "", interactive = false } = {}) {
+  const summary = { ran: false, shared: 0, alreadyHad: 0, skipped: 0, failed: 0 };
+
+  if (__sweepRunning) {
+    // 0 means "global"; either way the request is not lost.
+    __sweepRerunRooms.add(Number(roomId) || 0);
+    return summary;
+  }
+
+  const okCrypto = await ensureCryptoReady({ interactive });
+  if (!okCrypto) {
+    // Locked: defer. The unlock trigger re-enters, no prompt from here.
+    return summary;
+  }
+
+  if (Date.now() < __sweepNextAllowedTs) return summary;
+
+  __sweepRunning = true;
+  summary.ran = true;
+  let anyFailure = false;
+
+  try {
+    let pass = 0;
+    let more = true;
+
+    while (more && pass < KEY_SWEEP_MAX_PASSES) {
+      pass += 1;
+      more = false;
+
+      let page;
+      try {
+        page = await fetchRoomKeyGaps({ roomId });
+      } catch (e) {
+        anyFailure = true;
+        console.warn(`[KeySweep] gap fetch failed (${reason}):`, e?.message || e);
+        break;
+      }
+
+      if (!page.gaps.length) break;
+
+      const byRoom = new Map();
+      for (const g of page.gaps) {
+        const rid = Number(g?.room_id);
+        const uname = String(g?.username || "").trim();
+        if (!rid || !uname) continue;
+        if (!byRoom.has(rid)) byRoom.set(rid, []);
+        byRoom.get(rid).push(uname);
+      }
+
+      let transientRun = 0;
+      let progressed = false;
+
+      for (const [rid, unames] of byRoom.entries()) {
+        // Refresh from the server before sharing: shareRoomKeyToUser only falls
+        // back to loadRoomKey when no key is in memory at all, so a key that
+        // predates a rotation would otherwise be handed out as current.
+        try { await loadRoomKey(rid); } catch { /* share will report it */ }
+
+        for (const uname of unames) {
+          if (_sweepTrustBlockedFor(uname) || _sweepPairOnCooldown(rid, uname)) {
+            summary.skipped += 1;
+            continue;
+          }
+
+          try {
+            // Fetch the peer key here so the trust check stays off the network
+            // and a flaky fetch cannot masquerade as a trust failure.
+            const peerPub = await fetchPeerPublicKey(uname);
+            await assertPeerKeyTrustedForSharing(uname, "sharing the room key", { peerPublicKeyB64: peerPub });
+
+            const res = await shareRoomKeyToUser(rid, uname, { interactive: false, ifAbsent: true });
+            // written:false = another provider won the race. The gap is closed,
+            // which is all we wanted — a success, not a failure.
+            if (res?.written) {
+              summary.shared += 1;
+              console.log(`[KeySweep] room ${rid}: key delivered to ${uname} (${reason})`);
+            } else {
+              summary.alreadyHad += 1;
+            }
+            progressed = true;
+            transientRun = 0;
+          } catch (e) {
+            const code = e?.code || "";
+            const msg = e?.message || String(e);
+
+            if (code === "TRUST_CHANGED" || code === "TRUST_UNVERIFIED") {
+              const key = uname.toLowerCase();
+              const entry = __sweepTrustBlocked.get(key) || { ts: 0, reason: code, rooms: new Set() };
+              entry.ts = Date.now();
+              entry.reason = code;
+              entry.rooms.add(rid);
+              __sweepTrustBlocked.set(key, entry);
+              summary.skipped += 1;
+              console.warn(`[KeySweep] ${uname} needs verification before key share:`, msg);
+              continue;
+            }
+
+            summary.failed += 1;
+            _sweepNotePairCooldown(rid, uname);
+
+            if (code === "TRUST_UNVERIFIABLE" || !_sweepIsPermanentish(msg)) {
+              // Only infrastructure trouble earns the long global backoff. One
+              // member with, say, an unusable public key is already cooled down
+              // per pair and must not throttle every other room.
+              anyFailure = true;
+              transientRun += 1;
+              console.warn(`[KeySweep] room ${rid}/${uname} transient failure:`, msg);
+              if (transientRun >= KEY_SWEEP_MAX_TRANSIENT) {
+                console.warn("[KeySweep] too many transient failures, ending pass");
+                break;
+              }
+            } else {
+              console.warn(`[KeySweep] room ${rid}/${uname} skipped:`, msg);
+            }
+          }
+        }
+
+        if (transientRun >= KEY_SWEEP_MAX_TRANSIENT) break;
+      }
+
+      // Another page is only worth fetching if this one actually shrank the set.
+      more = page.truncated && progressed && transientRun < KEY_SWEEP_MAX_TRANSIENT;
+    }
+
+  } finally {
+    __sweepRunning = false;
+    __sweepNextAllowedTs = Date.now() +
+      (anyFailure ? KEY_SWEEP_ERROR_BACKOFF_MS : KEY_SWEEP_MIN_INTERVAL_MS);
+  }
+
+  if (summary.shared || summary.alreadyHad || summary.skipped || summary.failed) {
+    console.log(`[KeySweep] ${reason || "sweep"} done:`, summary);
+  }
+  try { window.onKeyGapSweepDone?.(summary, getKeyShareTrustBlocked()); } catch {}
+
+  // Triggers that arrived mid-run: re-arm the timer so they are not dropped.
+  // The backoff clock set in `finally` still governs when this actually runs.
+  if (__sweepRerunRooms.size) {
+    const pending = [...__sweepRerunRooms];
+    __sweepRerunRooms = new Set();
+    for (const r of pending) scheduleRoomKeySweep("rerun", { roomId: r, delayMs: KEY_SWEEP_MIN_INTERVAL_MS });
+  }
+
+  return summary;
+}
+
+/**
+ * The only entry point triggers should use: one timer, one in-flight flag and
+ * one backoff clock, so a locked or failing client cannot hammer the endpoint.
+ */
+function scheduleRoomKeySweep(reason = "", { roomId = 0, delayMs = 0 } = {}) {
+  if (roomId) __sweepPendingRooms.add(Number(roomId));
+  else __sweepWantGlobal = true;
+
+  if (__sweepTimer) return;
+
+  __sweepTimer = setTimeout(() => {
+    __sweepTimer = null;
+    const rooms = [...__sweepPendingRooms];
+    const wantGlobal = __sweepWantGlobal;
+    __sweepPendingRooms = new Set();
+    __sweepWantGlobal = false;
+
+    // A global request supersedes the per-room ones queued behind it, and two
+    // or more rooms are cheaper to serve as one unfiltered query than as N.
+    const only = (!wantGlobal && rooms.length === 1) ? rooms[0] : 0;
+    sweepRoomKeyGaps({ roomId: only, reason }).catch((e) => {
+      console.warn("[KeySweep] sweep threw:", e?.message || e);
+    });
+  }, Math.max(0, delayMs));
 }
 
 // ============================
@@ -2144,6 +2488,10 @@ async function markKeyVerified(peerUsername) {
       storageKey + ":changed",
       storageKey + ":pending",
     ]);
+    // The sweep refuses to share to a peer it flagged; verifying is exactly the
+    // human step it was waiting for, so let the next sweep serve them.
+    clearKeyShareTrustBlock(peer);
+    scheduleRoomKeySweep("verified");
     return true;
   } catch (e) {
     console.warn("markKeyVerified error:", e);

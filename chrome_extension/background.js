@@ -36,6 +36,14 @@ const SENSITIVE_PORT_TYPES = new Set([
   "room_logo_upload",
 ]);
 
+// Server pushes on /ws-notify that panels are allowed to see. Anything not
+// listed is dropped silently, so a new payload type needs a line here.
+const NOTIFY_RELAY_TYPES = new Set([
+  "notify_room_msg",
+  "notify_dm_msg",
+  "notify_key_gap",
+]);
+
 function hasMasterKey(maxAgeMs = 10 * 60 * 1000) {
   return !!_masterKey && (Date.now() - _masterKeyTs) < maxAgeMs;
 }
@@ -621,7 +629,7 @@ async function connectNotifyWs() {
     if (ws !== _notifyWs) return;
     try {
       const data = JSON.parse(e.data);
-      if (data?.type === "notify_room_msg" || data?.type === "notify_dm_msg") {
+      if (NOTIFY_RELAY_TYPES.has(data?.type)) {
         broadcastToPanels(data);
       }
     } catch {}

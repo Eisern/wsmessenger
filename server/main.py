@@ -354,6 +354,8 @@ RL_KEYS_PUBLISH_IP_PER_10MIN       = _env_int("RL_KEYS_PUBLISH_IP_PER_10MIN", 12
 RL_KEYS_PUBLISH_USER_PER_10MIN     = _env_int("RL_KEYS_PUBLISH_USER_PER_10MIN", 60)
 RL_CRYPTO_KEYWRITE_IP_PER_10MIN    = _env_int("RL_CRYPTO_KEYWRITE_IP_PER_10MIN", 180)
 RL_CRYPTO_KEYWRITE_USER_PER_10MIN  = _env_int("RL_CRYPTO_KEYWRITE_USER_PER_10MIN", 120)
+RL_CRYPTO_KEYGAPS_IP_PER_10MIN     = _env_int("RL_CRYPTO_KEYGAPS_IP_PER_10MIN", 120)
+RL_CRYPTO_KEYGAPS_USER_PER_10MIN   = _env_int("RL_CRYPTO_KEYGAPS_USER_PER_10MIN", 60)
 RL_ROOMS_CREATE_IP_PER_10MIN       = _env_int("RL_ROOMS_CREATE_IP_PER_10MIN", 30)
 RL_ROOMS_CREATE_USER_PER_10MIN     = _env_int("RL_ROOMS_CREATE_USER_PER_10MIN", 20)
 RL_ROOMS_DELETE_IP_PER_10MIN       = _env_int("RL_ROOMS_DELETE_IP_PER_10MIN", 30)
@@ -1068,6 +1070,10 @@ class RoomKeyIn(BaseModel):
 class RoomKeyShareIn(BaseModel):
     encrypted_room_key: str = Field(..., max_length=MAX_ENCRYPTED_KEY_B64_LEN)
     key_id: str | None = None
+    # Fill a gap only: never replace a key the target already has. Defaults to
+    # False so existing callers keep the original upsert behaviour; the server
+    # forces it on for every non-owner sharer (see share_room_key).
+    if_absent: bool = False
 
 class DmOpenIn(BaseModel):
     username: str
@@ -3174,11 +3180,11 @@ async def share_room_key(
     authorization: str | None = Header(default=None),
 ):
     u = require_user_from_bearer(authorization)
-    owner_user_id = int(u["user_id"])
+    actor_user_id = int(u["user_id"])
     key_id = _normalize_key_id(payload.key_id)
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"crypto:keywrite:ip:{ip}", RL_CRYPTO_KEYWRITE_IP_PER_10MIN, 600)
-    await enforce_http_rate_limit(f"crypto:keywrite:user:{owner_user_id}", RL_CRYPTO_KEYWRITE_USER_PER_10MIN, 600)
+    await enforce_http_rate_limit(f"crypto:keywrite:user:{actor_user_id}", RL_CRYPTO_KEYWRITE_USER_PER_10MIN, 600)
 
     target_username = (target_username or "").strip()
     if not target_username:
@@ -3187,17 +3193,22 @@ async def share_room_key(
     async with SessionLocal() as session:
         await _ensure_key_archive_tables(session)
         
+        # Existence first, so a missing room stays a 404 instead of becoming the
+        # moderator guard's 403 — both clients surface `detail` verbatim.
         res = await session.execute(sql_i("""
-            SELECT owner_user_id
+            SELECT 1
             FROM chat_rooms
             WHERE id = :rid
         """, "rid"), {"rid": room_id})
-        row = res.mappings().first()
-        if not row:
+        if not res.first():
             raise HTTPException(status_code=404, detail="Room not found")
 
-        if int(row["owner_user_id"]) != owner_user_id:
-            raise HTTPException(status_code=403, detail="Only room owner can share room key")
+        # Owner *or* admin. A room key that only the owner can hand out never
+        # reaches an invitee while the owner is away, and both clients hold a
+        # single room socket at a time, so "away" includes "sitting in another
+        # room". get_room_role() resolves the owner from chat_rooms first, so an
+        # owner without a members row still passes.
+        actor_role = await require_room_moderator(session, room_id, actor_user_id)
 
         res2 = await session.execute(text("""
             SELECT id
@@ -3217,13 +3228,34 @@ async def share_room_key(
         if not res3.first():
             raise HTTPException(status_code=403, detail="Target user is not a member of this room")
         
-        await session.execute(sql_i("""
-            INSERT INTO chat_room_keys (room_id, user_id, encrypted_room_key)
-            VALUES (:rid, :uid, :erk)
-            ON CONFLICT (room_id, user_id)
-            DO UPDATE SET encrypted_room_key = EXCLUDED.encrypted_room_key
-        """, "rid", "uid"), {"rid": room_id, "uid": target_user_id, "erk": payload.encrypted_room_key})
-        if key_id:
+        # The chat_room_keys row *is* "the current key for this user", and
+        # rotateRoomKey() relies on overwriting it so a kicked member's copy goes
+        # stale. A sharer whose in-memory key predates a rotation would otherwise
+        # push the room back onto the old key. Only the owner may replace a key,
+        # and only when it does not ask for a gap fill; an admin can never do
+        # more than fill a hole, whatever it sends.
+        if payload.if_absent or actor_role != ROLE_OWNER:
+            res4 = await session.execute(sql_i("""
+                INSERT INTO chat_room_keys (room_id, user_id, encrypted_room_key)
+                VALUES (:rid, :uid, :erk)
+                ON CONFLICT (room_id, user_id)
+                DO NOTHING
+                RETURNING id
+            """, "rid", "uid"), {"rid": room_id, "uid": target_user_id, "erk": payload.encrypted_room_key})
+            written = res4.first() is not None
+        else:
+            await session.execute(sql_i("""
+                INSERT INTO chat_room_keys (room_id, user_id, encrypted_room_key)
+                VALUES (:rid, :uid, :erk)
+                ON CONFLICT (room_id, user_id)
+                DO UPDATE SET encrypted_room_key = EXCLUDED.encrypted_room_key
+            """, "rid", "uid"), {"rid": room_id, "uid": target_user_id, "erk": payload.encrypted_room_key})
+            written = True
+
+        # Gated on `written`: the archive is keyed by a client-supplied key_id
+        # that readers trust as the kid -> key mapping, so a sharer who wrote
+        # nothing must not be able to seed entries under arbitrary kids.
+        if key_id and written:
             await session.execute(sql_i("""
                 INSERT INTO chat_room_key_archive (room_id, user_id, key_id, encrypted_room_key)
                 VALUES (:rid, :uid, :kid, :erk)
@@ -3238,7 +3270,10 @@ async def share_room_key(
 
         await session.commit()
 
-    return {"ok": True}
+    # written=False means the target already had a key and this was a gap fill —
+    # a success for the caller's purpose, not an error. Callers racing to close
+    # the same gap must treat it as such.
+    return {"ok": True, "written": written}
 
 @app.get("/crypto/room-key/{room_id}")
 async def get_room_key(room_id: int, authorization: str | None = Header(default=None)):
@@ -3297,6 +3332,83 @@ async def get_room_key_archive(room_id: int, authorization: str | None = Header(
             }
             for r in rows
         ],
+    }
+
+@app.get("/crypto/rooms/key-gaps")
+async def crypto_room_key_gaps(
+    request: Request,
+    room_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+    authorization: str | None = Header(default=None),
+):
+    """Accepted members who hold no room key, in rooms the caller may serve.
+
+    "X is missing the key for room Y" needs no bookkeeping of its own: it is an
+    accepted chat_room_members row with no chat_room_keys row. Owners and admins
+    drain this list whenever they are online and unlocked, which is what makes
+    key delivery survive the owner being away when an invite is accepted.
+    """
+    u = require_user_from_bearer(authorization)
+    uid = int(u["user_id"])
+    ip = get_client_ip_request(request)
+    await enforce_http_rate_limit(f"crypto:keygaps:ip:{ip}", RL_CRYPTO_KEYGAPS_IP_PER_10MIN, 600)
+    await enforce_http_rate_limit(f"crypto:keygaps:user:{uid}", RL_CRYPTO_KEYGAPS_USER_PER_10MIN, 600)
+
+    async with SessionLocal() as session:
+        if room_id is not None:
+            # Say why rather than returning an empty list, as /rooms/{id}/join-requests does.
+            res = await session.execute(sql_i("""
+                SELECT 1 FROM chat_rooms WHERE id = :rid
+            """, "rid"), {"rid": room_id})
+            if not res.first():
+                raise HTTPException(status_code=404, detail="Room not found")
+            await require_room_moderator(session, room_id, uid)
+
+        # rid=0 means "no room filter": room ids start at 1 (Query(ge=1)), so the
+        # sentinel keeps the statement a single constant string rather than one
+        # assembled per request.
+        params = {"uid": uid, "lim": int(limit) + 1, "rid": int(room_id or 0)}
+
+        # The eligibility predicate lives in the query, so the unfiltered form
+        # needs no extra guard: a user with nothing to serve simply gets [].
+        res2 = await session.execute(sql_i("""
+            WITH servable AS (
+                SELECT r.id AS room_id, r.name AS room_name
+                FROM chat_rooms r
+                WHERE r.owner_user_id = :uid
+                UNION
+                SELECT r.id, r.name
+                FROM chat_rooms r
+                JOIN chat_room_members me
+                  ON me.room_id = r.id AND me.user_id = :uid
+                 AND me.status = 'accepted'
+                 AND me.role IN ('owner','admin')
+            )
+            SELECT s.room_id, s.room_name, u.username
+            FROM servable s
+            JOIN chat_room_members m ON m.room_id = s.room_id AND m.status = 'accepted'
+            JOIN users u ON u.id = m.user_id
+            LEFT JOIN chat_room_keys k ON k.room_id = m.room_id AND k.user_id = m.user_id
+            WHERE k.id IS NULL
+              AND m.user_id <> :uid
+              AND (:rid = 0 OR s.room_id = :rid)
+            ORDER BY s.room_id, u.username
+            LIMIT :lim
+        """, "uid", "lim", "rid"), params)
+        rows = res2.mappings().all()
+
+    # One row over the limit tells us there is more without a second COUNT(*).
+    truncated = len(rows) > limit
+    return {
+        "gaps": [
+            {
+                "room_id": int(r["room_id"]),
+                "room_name": r["room_name"],
+                "username": r["username"],
+            }
+            for r in rows[:limit]
+        ],
+        "truncated": truncated,
     }
 
 @app.post("/rooms", status_code=201)
@@ -4539,6 +4651,10 @@ async def rooms_join_approve(room_id: int, username: str, request: Request, auth
         "username": username,
     })
 
+    # Newly accepted member, no room key yet — same reasoning as invite accept.
+    # The approver already knows (their own UI acts on the HTTP response).
+    await _notify_room_key_providers(int(room_id), exclude_user_ids={admin_id, int(target_user_id)})
+
     # (optional) presence refresh for UI
     await manager.broadcast(str(room_id), {
         "type": "presence",
@@ -4650,6 +4766,11 @@ async def rooms_invite_accept(room_id: int, authorization: str | None = Header(d
         "action": "invite_accepted",
         "username": actor_username or None,
     })
+
+    # The accepting user is now an accepted member with no room key. The
+    # broadcast above only reaches clients holding this room's socket, so wake
+    # every provider on their always-on /ws-notify socket too.
+    await _notify_room_key_providers(int(room_id), exclude_user_ids={int(u["user_id"])})
 
     await manager.broadcast(str(room_id), {
         "type": "presence",
@@ -6098,6 +6219,45 @@ async def _notify_room_members(room_id: int, room_name: str, sender_username: st
     for uid in member_ids:
         if uid not in exclude:
             await notify_manager.notify(uid, payload)
+
+
+async def _notify_room_key_providers(room_id: int, exclude_user_ids: set | None = None):
+    """
+    Wake the owner and admins of a room so they backfill missing room keys.
+
+    /ws-notify is the only always-on per-user socket; the room socket reaches at
+    most the one room a client currently has open, which is why the old
+    broadcast-on-accept missed an owner who was simply elsewhere.
+
+    Payload is metadata only — deliberately no username. The recipient must
+    re-query /crypto/rooms/key-gaps, because by the time it sweeps another
+    provider may have filled the gap or the user may have been kicked. This is a
+    wake-up, not data.
+    """
+    if not notify_manager.connections:
+        return
+    async with SessionLocal() as session:
+        res = await session.execute(sql_i("""
+            SELECT user_id FROM chat_room_members
+            WHERE room_id = :rid AND status = 'accepted' AND role IN ('owner','admin')
+        """, "rid"), {"rid": room_id})
+        provider_ids = {int(r["user_id"]) for r in res.mappings().all()}
+        # Owners are not guaranteed to have a members row.
+        res2 = await session.execute(sql_i(
+            "SELECT owner_user_id FROM chat_rooms WHERE id = :rid", "rid"
+        ), {"rid": room_id})
+        owner_row = res2.mappings().first()
+        if owner_row:
+            provider_ids.add(int(owner_row["owner_user_id"]))
+
+    provider_ids -= (exclude_user_ids or set())
+    if not provider_ids:
+        return
+    await notify_manager.notify_many(provider_ids, {
+        "type": "notify_key_gap",
+        "room_id": int(room_id),
+        "ts": int(time.time()),
+    })
 
 
 async def _notify_dm_thread(thread_id: int, sender_user_id: int):

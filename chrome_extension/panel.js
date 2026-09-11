@@ -75,6 +75,11 @@ let __authNotLoggedTimer = null;
 let __pendingHistoryRoomId = null;
 let __pendingHistorySince = 0;
 
+// Room we are an accepted member of but hold no key for. Distinct from
+// __pendingHistoryRoomId, which means "crypto is locked, retry after unlock":
+// here the crypto is fine and we are waiting on a provider to deliver.
+let __pendingKeyRoomId = null;
+
 let __pendingDmThreadId = null;
 let __pendingDmPeer = "";
 let __pendingDmSince = 0;
@@ -148,8 +153,8 @@ async function retryPendingHistoryAfterUnlock() {
   await new Promise(r => setTimeout(r, 50));
 
   try {
-    const ok = await loadRoomKey(rid);
-    if (!ok) {
+    const res = await loadRoomKey(rid);
+    if (!res.ok) {
       __pendingHistoryRoomId = rid;
       __pendingHistorySince = Date.now();
       return;
@@ -157,6 +162,29 @@ async function retryPendingHistoryAfterUnlock() {
 
     try { requestRoomHistory?.(rid); } catch {}
   } catch {}
+}
+
+/**
+ * Retry a room key we are waiting on a provider to deliver. Cheap and silent:
+ * called whenever something suggests the key may have landed.
+ */
+async function retryPendingRoomKey(roomId) {
+  const rid = Number(roomId);
+  if (!rid) return;
+
+  try {
+    const res = await loadRoomKey(rid);
+    if (!res.ok) return;
+
+    if (__pendingKeyRoomId === rid) __pendingKeyRoomId = null;
+    console.log(`Room key for room ${rid} arrived; reloading history`);
+    if (activeRoomId === rid) {
+      renderedHistoryRoomId = null;
+      safePost({ type: "history_get", roomId: rid, limit: HISTORY_PAGE_SIZE });
+    }
+  } catch (e) {
+    console.warn("retryPendingRoomKey failed:", e?.message || e);
+  }
 }
 
 function __captureOlderScrollRestore(kind, id) {
@@ -1421,6 +1449,8 @@ async function handlePortMessage(msg) {
     if (msg.ok) {
       try { retryPendingHistoryAfterUnlock?.(); } catch {}
 	  try { retryPendingDmAfterUnlock?.(); } catch {}
+      // Sweeps skipped while locked resume here.
+      try { scheduleRoomKeySweep("unlock"); } catch {}
     }
     return;
   }
@@ -1431,26 +1461,24 @@ if (msg.type === "members_changed") {
     roomMembersById[rid] = null;
     if (membersPanelOpen) requestRoomMembers(Number(rid));
 
-    // The room key cannot be shared at invite time: the server requires the
-    // target to be an accepted member, and an invitee is still 'pending'.
-    // Share it here, when they accept, or they can never decrypt the room.
-    if (String(msg.action || "") === "invite_accepted") {
-      const uname = String(msg.username || "").trim();
-      const isOwner = !!roomOwnerById[rid];
-      if (uname && isOwner) {
-        (async () => {
-          try {
-            await shareRoomKeyToUser(Number(rid), uname);
-            console.log("Room key shared to", uname, "after invite accept");
-          } catch (e) {
-            const emsg = e?.message || String(e);
-            console.warn("Auto key share after invite accept failed:", emsg);
-            if (/verification|verify/i.test(emsg)) {
-              try { await __ui.alert("Key share to " + uname + " needs verification: " + emsg); } catch {}
-            }
-          }
-        })();
-      }
+    // Someone just became an accepted member, so they have no room key yet.
+    // Sweep rather than sharing to msg.username directly: the sweep asks the
+    // server who is actually missing a key, works for admins as well as the
+    // owner, and does not depend on this client being the one that happened to
+    // receive the event.
+    const action = String(msg.action || "");
+    if (action === "invite_accepted" || action === "join_approved") {
+      // Skip when we already know we cannot serve this room. The server is the
+      // real authority (and answers a non-provider with an empty list rather
+      // than an error), this just avoids a pointless round trip per member.
+      const role = String(roomRoleById[rid] || "").toLowerCase();
+      const mayServe = !!roomOwnerById[rid] || role === "owner" || role === "admin" || !role;
+      if (mayServe) scheduleRoomKeySweep(action, { roomId: Number(rid) });
+    }
+
+    // We may be the one waiting: a membership change is a good moment to retry.
+    if (__pendingKeyRoomId && Number(rid) === __pendingKeyRoomId) {
+      retryPendingRoomKey(Number(rid));
     }
   }
   return;
@@ -1626,22 +1654,36 @@ if (msg.type === "presence") {
       renderedHistoryRoomId = null;
       __resetRoomHistoryPaging(rid);
       __roomHistoryLimitByRoom.set(rid, HISTORY_PAGE_SIZE);
-      let keyOk = false;
+      let keyRes = { ok: false, error: true };
       try {
-        keyOk = await loadRoomKey(rid);
+        keyRes = await loadRoomKey(rid);
       } catch (err) {
         console.error("Failed to load room key:", err);
       }
 
-if (!keyOk) {
-  __pendingHistoryRoomId = Number(msg.room_id || msg.roomId || activeRoomId || 0) || __pendingHistoryRoomId;
-  __pendingHistorySince = Date.now();
+if (!keyRes.ok) {
+  if (keyRes.notFound) {
+    // We are an accepted member with no key yet — nothing to unlock. Asking for
+    // a password here was the old behaviour and it was simply wrong.
+    __pendingKeyRoomId = rid;
+    console.warn(`No room key for room ${rid} yet; waiting for a provider`);
+    try { showRoomKeyPendingNotice(rid); } catch {}
+  } else {
+    __pendingHistoryRoomId = Number(msg.room_id || msg.roomId || activeRoomId || 0) || __pendingHistoryRoomId;
+    __pendingHistorySince = Date.now();
 
-  console.warn("Room key not loaded (crypto locked). Will retry after unlock.");
+    console.warn("Room key not loaded (crypto locked). Will retry after unlock.");
 
-  try { window.onCryptoLockedNeedUnlock?.("history"); } catch {}
+    try { window.onCryptoLockedNeedUnlock?.("history"); } catch {}
+  }
 
   return;
+}
+
+// Owners and admins: opening a room is a good moment to close any gaps in it.
+const myRole = String(roomRoleById[String(rid)] || "").toLowerCase();
+if (roomOwnerById[String(rid)] || myRole === "owner" || myRole === "admin") {
+  scheduleRoomKeySweep("room_open", { roomId: rid });
 }
       safePost({ type: "history_get", roomId: rid, limit: HISTORY_PAGE_SIZE });
     }
@@ -1969,6 +2011,9 @@ if (msg.type === "error") {
     lastRoomsMine = lastMineRooms;
     renderRooms(lastMineRooms, lastPublicRooms);
 	window.__refreshUnreadFromServer?.();
+    // Deliver any room keys owed across every room we can serve. Delayed so it
+    // does not contend with history and key loading for the room being opened.
+    try { scheduleRoomKeySweep("startup", { delayMs: 2500 }); } catch {}
     return;
   }
 
@@ -2628,6 +2673,16 @@ if (msg.type === "notify_room_msg") {
     // Not the currently open room — mark unread
     if (typeof __markRoomUnread === "function") __markRoomUnread(rid);
   }
+  return;
+}
+
+// Someone in a room we can serve is missing its key. /ws-notify reaches us
+// wherever we are, unlike the room socket, which only covers the room we
+// currently have open. The payload is a wake-up, not data: the sweep re-asks
+// the server who is actually missing a key.
+if (msg.type === "notify_key_gap") {
+  const rid = Number(msg.room_id) || 0;
+  if (rid) scheduleRoomKeySweep("notify", { roomId: rid });
   return;
 }
 
