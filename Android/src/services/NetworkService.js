@@ -38,6 +38,7 @@ import mitt from 'mitt';
 import { AppState, Linking } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import StorageService from './StorageService';
+import EP from './endpoints';
 
 // @noble/hashes — used for HMAC-SHA256 in sendDmUd
 // (react-native-quick-crypto does not support HMAC via subtle.sign)
@@ -53,9 +54,24 @@ const crypto = {
 const DEFAULT_API_BASE = 'https://imagine-1-ws.xyz';
 const DEFAULT_WS_BASE  = 'wss://imagine-1-ws.xyz';
 const SERVER_CONFIG_KEY = 'com.wsmessenger.server_config';
+const EP_DEFAULTS = { defaultApiBase: DEFAULT_API_BASE, defaultWsBase: DEFAULT_WS_BASE };
+const PROBE_TIMEOUT_MS = 4000;
 
 let _apiBase = DEFAULT_API_BASE;
 let _wsBase  = DEFAULT_WS_BASE;
+
+// One island may be reachable through several entry points. _serverCfg holds
+// the whole list; _apiBase/_wsBase mirror the active one so that every call
+// site in this file keeps reading a plain string. _selector decides when to
+// move to another entry point — see endpoints.js.
+let _serverCfg = EP.normalizeServerConfig(null, EP_DEFAULTS);
+let _selector  = null;
+
+function _applyCfg(cfg) {
+  _serverCfg = cfg;
+  _apiBase = cfg.apiBase || DEFAULT_API_BASE;
+  _wsBase  = cfg.wsBase  || DEFAULT_WS_BASE;
+}
 
 // ============================
 // Helpers
@@ -178,6 +194,13 @@ class NetworkService {
     this._notifyReconnectAttempts = 0;
     this._manualNotifyDisconnect = false;
     this._notifyGeneration = 0; // стражник от гонки concurrent open (как _roomGeneration/_dmGeneration)
+
+    // --- Entry-point failover ---
+    // Set to false on every rotation and back to true as soon as an
+    // authenticated request succeeds on the new entry point. A 401 that the
+    // refresh cannot fix while this is false means we landed on a server that
+    // is not this island (a typo), not that the session died.
+    this._endpointAuthProved = true;
 
     // --- AppState ---
     this._appStateSub = null;
@@ -314,6 +337,10 @@ class NetworkService {
   _onForeground() {
     if (!this._isBackground) return;
     this._isBackground = false;
+    // Running on a fallback entry point? The network may well have changed
+    // while we were backgrounded; see whether the preferred one is back.
+    // Throttled internally, and a no-op when we are already on the first one.
+    this.maybeComeHome().catch(() => {});
     // Reconnect room WS if connection was lost while in background
     if ((this._wsRoomTarget || this._wsRoomId) && (!this._ws || this._ws.readyState > 1)) {
       this._reconnectAttempts = 0;
@@ -582,6 +609,7 @@ class NetworkService {
     timeoutMs = 30_000,
   } = {}) {
     const url = _apiBase + path;
+    const epGen = this._epGen();
     const reqHeaders = { ...headers };
 
     if (!noAuth && this._token) {
@@ -607,16 +635,33 @@ class NetworkService {
       const msg = controller.signal.aborted ? `Request timed out (${timeoutMs}ms)` : (e?.message || 'network_error');
       const err = new Error(msg);
       err.status = 0;
+      // status 0 means the request never reached a server: DNS, TLS, refused,
+      // reset or timeout. That is the entry point failing, not the app.
+      this._reportEndpointFailure(EP.classifyHttpFailure(err), epGen);
       throw err;
     } finally {
       clearTimeout(timer);
     }
+
+    // A response proves this entry point is up — 4xx included, since the server
+    // had to parse the request to reject it. 5xx is deliberately excluded: a
+    // bare 502/503/504 is the edge answering for a backend it cannot reach,
+    // which is what the strike counter below is for.
+    if (resp.status < 500) this._noteEndpointAlive(epGen);
+    if (resp.status !== 401 && !noAuth && this._token) this._endpointAuthProved = true;
 
     // 401 → попытка обновить токен, один раз
     if (resp.status === 401 && !_retried && !noAuth) {
       const refreshed = await this._doRefresh();
       if (refreshed) {
         return this._fetch(path, { method, body, headers, noAuth, formData, _retried: true });
+      }
+      // Before declaring the session dead, rule out having just rotated onto a
+      // server that is not this island at all.
+      if (await this._handleForeignIslandOn401()) {
+        const retriable = new Error('endpoint_rejected_session');
+        retriable.status = 0;
+        throw retriable;
       }
       this._handleSessionExpired();
       const err = new Error('session_expired');
@@ -643,6 +688,7 @@ class NetworkService {
       const err = new Error(rawMsg);
       err.status  = resp.status;
       err.body    = data;
+      this._reportEndpointFailure(EP.classifyHttpFailure(err), epGen);
       throw err;
     }
 
@@ -653,14 +699,23 @@ class NetworkService {
   // Room WebSocket
   // ============================
 
-  async connectRoom(roomIdOrAlias, roomPass = '') {
-    this.disconnectRoom(); // Закрываем предыдущее соединение
-
+  /**
+   * The room WS URL, built from the ACTIVE entry point at call time.
+   * Single source of truth: the reconnect timer and the failover re-dial must
+   * not keep addressing the entry point we just left.
+   */
+  _roomWsUrl(roomIdOrAlias) {
     const isNumeric = /^\d+$/.test(String(roomIdOrAlias));
     const qp = isNumeric
       ? `room_id=${encodeURIComponent(roomIdOrAlias)}`
       : `room_alias=${encodeURIComponent(roomIdOrAlias)}`;
-    const url = `${_wsBase}/ws?${qp}`;
+    return `${_wsBase}/ws?${qp}`;
+  }
+
+  async connectRoom(roomIdOrAlias, roomPass = '') {
+    this.disconnectRoom(); // Закрываем предыдущее соединение
+
+    const url = this._roomWsUrl(roomIdOrAlias);
 
     this._wsRoomTarget    = roomIdOrAlias;
     this._wsRoomPass      = roomPass;
@@ -682,11 +737,7 @@ class NetworkService {
     console.log('[NS] connectRoomAuto:', roomIdOrAlias);
     this.disconnectRoom();
 
-    const isNumeric = /^\d+$/.test(String(roomIdOrAlias));
-    const qp = isNumeric
-      ? `room_id=${encodeURIComponent(roomIdOrAlias)}`
-      : `room_alias=${encodeURIComponent(roomIdOrAlias)}`;
-    const url = `${_wsBase}/ws?${qp}`;
+    const url = this._roomWsUrl(roomIdOrAlias);
 
     this._wsRoomTarget    = roomIdOrAlias;
     this._wsRoomPass      = roomPass;
@@ -709,6 +760,7 @@ class NetworkService {
     }
 
     console.log('[NS] _openWs:', url);
+    const epGen = this._epGen();
     try {
       const ws = new WebSocket(url, null, { headers: { Origin: 'react-native://com.wsmessenger' } });
       this._ws = ws;
@@ -719,6 +771,7 @@ class NetworkService {
         console.log('[NS] ws onopen:', url);
         this._wsConnectedAt = Date.now();
         this._reconnectAttempts = 0;
+        this._noteEndpointAlive(epGen);
 
         // Auth handshake
         ws.send(JSON.stringify({
@@ -843,17 +896,24 @@ class NetworkService {
           return;
         }
 
-        // 1006 с коротким uptime → вероятно неверный пароль комнаты
-        const uptime = Date.now() - this._wsConnectedAt;
-        if (event.code === 1006 && this._wsConnectedAt > 0 && uptime < 5000) {
-          this._post({ type: 'ws_closed', likely_bad_pass: true });
-          return;
-        }
-
+        // Everything left is transport. 1006 in particular is generated
+        // locally when the connection dies without a close frame — a server
+        // never sends it, and a wrong room password is not it either: /ws
+        // carries no password in the URL and the server rejects with 1008,
+        // handled above. This used to be reported as `likely_bad_pass` and,
+        // worse, returned without scheduling a reconnect.
+        const opened = this._wsConnectedAt > 0;
+        const verdict = EP.classifyWsClose({
+          code: event.code,
+          opened,
+          uptimeMs: opened ? Date.now() - this._wsConnectedAt : 0,
+        });
+        this._reportEndpointFailure(verdict, epGen);
         this._scheduleReconnect();
       };
     } catch (e) {
       console.warn('[NS] WebSocket open error:', e?.message);
+      this._reportEndpointFailure('rotate', epGen);
       this._scheduleReconnect();
     }
   }
@@ -867,6 +927,8 @@ class NetworkService {
     const attempts = this._reconnectAttempts++;
     if (attempts >= MAX_RECONNECT_ATTEMPTS) {
       console.warn('[NS] Room WS: max reconnect attempts reached, giving up');
+      // Backoff exhausted on this entry point — worth trying another door.
+      this._reportEndpointFailure('rotate', this._epGen());
       this._post({ type: 'status', online: false, reconnecting: false, gaveUp: true });
       return;
     }
@@ -880,11 +942,9 @@ class NetworkService {
       const target = this._wsRoomTarget ?? this._wsRoomId;
       if (!target || this._manualDisconnect) return;
       const gen = this._roomGeneration;
-      const isNumeric = /^\d+$/.test(String(target));
-      const qp = isNumeric
-        ? `room_id=${encodeURIComponent(target)}`
-        : `room_alias=${encodeURIComponent(target)}`;
-      this._openWs(`${_wsBase}/ws?${qp}`, gen).catch(() => {});
+      // URL rebuilt at fire time, so a rotation that happened while this timer
+      // was pending is picked up instead of re-dialing the dead entry point.
+      this._openWs(this._roomWsUrl(target), gen).catch(() => {});
     }, delay);
   }
 
@@ -952,6 +1012,8 @@ class NetworkService {
 
     const url = `${_wsBase}/ws-dm?thread_id=${encodeURIComponent(this._dmThreadId)}`;
     console.log('[DM-WS] opening WS url:', url);
+    const epGen = this._epGen();
+    let openedAt = 0;
     try {
       const ws = new WebSocket(url, null, { headers: { Origin: 'react-native://com.wsmessenger' } });
       this._dmWs = ws;
@@ -959,6 +1021,8 @@ class NetworkService {
       ws.onopen = () => {
         console.log('[DM-WS] onopen gen:', gen, 'current:', this._dmGeneration);
         if (gen !== this._dmGeneration) { ws.close(); return; }
+        openedAt = Date.now();
+        this._noteEndpointAlive(epGen);
         ws.send(JSON.stringify({ type: 'auth', token: this._token }));
         this._dmReconnectAttempts = 0;
         this._post({ type: 'dm_status', online: true, thread_id: this._dmThreadId });
@@ -1011,11 +1075,17 @@ class NetworkService {
         if (gen !== this._dmGeneration) return;
         this._post({ type: 'dm_status', online: false, code: event.code, thread_id: this._dmThreadId });
         if (!this._manualDmDisconnect) {
+          this._reportEndpointFailure(EP.classifyWsClose({
+            code: event.code,
+            opened: openedAt > 0,
+            uptimeMs: openedAt > 0 ? Date.now() - openedAt : 0,
+          }), epGen);
           this._scheduleDmReconnect(gen);
         }
       };
     } catch (e) {
       console.warn('[DM-WS] WebSocket constructor threw:', e?.message);
+      this._reportEndpointFailure('rotate', epGen);
       this._scheduleDmReconnect(gen);
     }
   }
@@ -1080,6 +1150,8 @@ class NetworkService {
 
     const url = `${_wsBase}/ws-notify`;
     console.log('[NOTIFY-WS] opening:', url);
+    const epGen = this._epGen();
+    let openedAt = 0;
     try {
       const ws = new WebSocket(url, null, { headers: { Origin: 'react-native://com.wsmessenger' } });
       this._notifyWs = ws;
@@ -1088,6 +1160,8 @@ class NetworkService {
         // Stale connection: a newer notify WS is already opening or open, close this one
         if (gen !== this._notifyGeneration || ws !== this._notifyWs) { ws.close(); return; }
         console.log('[NOTIFY-WS] onopen');
+        openedAt = Date.now();
+        this._noteEndpointAlive(epGen);
         this._notifyReconnectAttempts = 0;
         ws.send(JSON.stringify({ type: 'auth', token: this._token }));
         // Ping every 25s
@@ -1124,11 +1198,17 @@ class NetworkService {
         clearInterval(this._notifyPingInterval);
         this._notifyPingInterval = null;
         if (!this._manualNotifyDisconnect) {
+          this._reportEndpointFailure(EP.classifyWsClose({
+            code: event?.code,
+            opened: openedAt > 0,
+            uptimeMs: openedAt > 0 ? Date.now() - openedAt : 0,
+          }), epGen);
           this._scheduleNotifyReconnect(gen);
         }
       };
     } catch (e) {
       console.warn('[NOTIFY-WS] constructor threw:', e?.message);
+      this._reportEndpointFailure('rotate', epGen);
       this._scheduleNotifyReconnect(gen);
     }
   }
@@ -1457,6 +1537,7 @@ class NetworkService {
     // POST без Authorization header (sealed sender — no JWT)
     const _udCtrl = new AbortController();
     const _udTimer = setTimeout(() => _udCtrl.abort(), 30_000);
+    const _udEpGen = this._epGen();
     let resp;
     try {
       resp = await fetch(`${_apiBase}/ud/dm/send`, {
@@ -1471,9 +1552,19 @@ class NetworkService {
           tag_b64:        this._toBase64Url(tag),
         }),
       });
+    } catch (e) {
+      // This is the real DM send path (it bypasses _fetch because sealed sender
+      // forbids an Authorization header), so its failures are the ones that
+      // matter most — and until now they were invisible to failover.
+      const err = new Error(_udCtrl.signal.aborted ? 'UD send timed out' : (e?.message || 'network_error'));
+      err.status = 0;
+      this._reportEndpointFailure(EP.classifyHttpFailure(err), _udEpGen);
+      throw err;
     } finally {
       clearTimeout(_udTimer);
     }
+
+    if (resp.status < 500) this._noteEndpointAlive(_udEpGen);
 
     if (!resp.ok) {
       const raw = await resp.text().catch(() => '');
@@ -1487,6 +1578,8 @@ class NetworkService {
 
       const err = new Error(`UD send failed: ${detail || `HTTP ${resp.status}`}`);
       err.status = resp.status;
+      err.body = detail;
+      this._reportEndpointFailure(EP.classifyHttpFailure(err), _udEpGen);
       throw err;
     }
     return true;
@@ -1941,16 +2034,21 @@ class NetworkService {
 
   /** Fetch server broadcast notice (MOTD). Returns {active, message, type} or null. */
   async fetchNotice() {
+    const epGen = this._epGen();
     try {
       const _ctrl = new AbortController();
       const _t = setTimeout(() => _ctrl.abort(), 10_000);
       const r = await fetch(`${_apiBase}/api/notice`, { cache: 'no-store', signal: _ctrl.signal });
       clearTimeout(_t);
+      if (r.ok) this._noteEndpointAlive(epGen);
       if (!r.ok) return null;
       const data = await r.json();
       if (data.active && data.message) return data;
       return null;
     } catch (_e) {
+      // A missing MOTD is not evidence that the entry point is dead: report it
+      // as a strike at most, never as a rotation trigger on its own.
+      this._reportEndpointFailure('strike', epGen);
       return null;
     }
   }
@@ -1961,47 +2059,267 @@ class NetworkService {
 
   /** Apply server config in-memory (does not persist). */
   setServerConfig(apiBase, wsBase) {
-    _apiBase = (apiBase || DEFAULT_API_BASE).replace(/\/$/, '');
-    _wsBase  = (wsBase  || _apiBase.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://')).replace(/\/$/, '');
+    _applyCfg(EP.normalizeServerConfig({ apiBase, wsBase }, EP_DEFAULTS));
+    if (_selector) _selector.setConfig(_serverCfg);
   }
 
-  /** Persist config to AsyncStorage and apply it. Disconnects all WebSockets (they belong to the old server). */
+  /**
+   * Persist config to AsyncStorage and apply it.
+   *
+   * Legacy single-address form. Kept because the login/profile screens and any
+   * saved caller still speak it; it means "this is the island now", so it keeps
+   * the full teardown.
+   */
   async saveServerConfig(apiBase, wsBase) {
-    this.setServerConfig(apiBase, wsBase);
-    // Delivery secrets are scoped to a server — invalidate them on config change
-    this._deliverySecretCache.clear();
-    this._deliverySecretPending.clear();
-    // Close all WS connections — they point to the old server
-    this.disconnectRoom();
-    this.disconnectDm();
-    this.disconnectNotify();
-    await AsyncStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify({ apiBase: _apiBase, wsBase: _wsBase }));
+    return this.saveIsland(EP.normalizeServerConfig({ apiBase, wsBase }, EP_DEFAULTS));
+  }
+
+  /**
+   * Save a whole island (an ordered list of entry points).
+   *
+   * Whether the session survives is decided by comparing entry-point SETS, not
+   * by any name the user typed: if the new list shares an entry point with the
+   * old one it is the same backend and the same database, so tokens, delivery
+   * secrets and keys all stay valid. Only a disjoint list is a different
+   * island, and only then is everything torn down.
+   */
+  async saveIsland(nextCfg) {
+    const cfg = EP.normalizeServerConfig(nextCfg, EP_DEFAULTS);
+    const change = EP.classifyConfigChange(_serverCfg, cfg);
+
+    _applyCfg(cfg);
+    if (_selector) _selector.setConfig(cfg);
+
+    if (change === 'island') {
+      // Delivery secrets are scoped to a server — invalidate them, and drop the
+      // sockets: they point at a different backend entirely.
+      this._deliverySecretCache.clear();
+      this._deliverySecretPending.clear();
+      this.disconnectRoom();
+      this.disconnectDm();
+      this.disconnectNotify();
+    } else if (change === 'endpoints') {
+      // Same island reached by a different door: keep every cache, just make
+      // the sockets follow the active entry point.
+      this._redialAllSockets('island-endpoints-changed');
+    }
+
+    await AsyncStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify(cfg));
+    this._post({ type: 'endpoint_changed', apiBase: _apiBase, change });
+    return change;
   }
 
   /** Load persisted config from AsyncStorage and apply it. Call once at startup. */
   async loadServerConfig() {
+    let raw = null;
     try {
-      const raw = await AsyncStorage.getItem(SERVER_CONFIG_KEY);
-      if (raw) {
-        const cfg = JSON.parse(raw);
-        if (cfg?.apiBase) this.setServerConfig(cfg.apiBase, cfg.wsBase || '');
-      }
+      const stored = await AsyncStorage.getItem(SERVER_CONFIG_KEY);
+      if (stored) raw = JSON.parse(stored);
     } catch { /* use defaults */ }
+
+    const cfg = EP.normalizeServerConfig(raw, EP_DEFAULTS);
+    _applyCfg(cfg);
+    if (_selector) _selector.setConfig(cfg);
+
+    // This is the one place in this client that persists a schema upgrade, so
+    // a legacy {apiBase, wsBase} blob is rewritten in schema 2 exactly once.
+    if (raw && Number(raw.schema) !== 2) {
+      try { await AsyncStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify(cfg)); } catch {}
+    }
   }
 
   /** Reset to the official server and remove persisted config. */
   async clearServerConfig() {
-    _apiBase = DEFAULT_API_BASE;
-    _wsBase  = DEFAULT_WS_BASE;
-    // Delivery secrets are scoped to a server — invalidate them on config change
+    // Reverting to the bundled default is an island change like any other:
+    // sockets and delivery secrets belong to the server we are leaving.
+    _applyCfg(EP.normalizeServerConfig(null, EP_DEFAULTS));
+    if (_selector) _selector.setConfig(_serverCfg);
     this._deliverySecretCache.clear();
     this._deliverySecretPending.clear();
+    this.disconnectRoom();
+    this.disconnectDm();
+    this.disconnectNotify();
     await AsyncStorage.removeItem(SERVER_CONFIG_KEY);
+    this._post({ type: 'endpoint_changed', apiBase: _apiBase, change: 'island' });
   }
 
-  /** Returns the currently active server config. */
+  /** Returns the currently active server config, including the whole entry-point list. */
   getServerConfig() {
-    return { apiBase: _apiBase, wsBase: _wsBase, isDefault: _apiBase === DEFAULT_API_BASE };
+    return {
+      apiBase: _apiBase,
+      wsBase: _wsBase,
+      isDefault: _apiBase === DEFAULT_API_BASE,
+      islandId: _serverCfg.islandId,
+      endpoints: _serverCfg.endpoints.map(e => ({ ...e })),
+      activeIdx: _serverCfg.activeIdx,
+    };
+  }
+
+  // ============================
+  // Entry-point failover
+  // ============================
+
+  _epSelector() {
+    if (!_selector) {
+      _selector = EP.createSelector({
+        cfg: _serverCfg,
+        probe: (ep) => this._probeEndpoint(ep),
+        log: (msg, data) => console.log('[EP]', msg, data || ''),
+      });
+    }
+    return _selector;
+  }
+
+  /** Generation of the currently selected entry point; carried by failure reports. */
+  _epGen() {
+    return this._epSelector().epGen();
+  }
+
+  /** Unauthenticated liveness probe. Owns its own timeout; never throws. */
+  async _probeEndpoint(ep) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const r = await fetch(ep.apiBase + '/health', { cache: 'no-store', signal: ctrl.signal });
+      return !!r.ok;
+    } catch (_e) {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** The active entry point answered — it is reachable. */
+  _noteEndpointAlive(epGen) {
+    if (!_selector) return;
+    _selector.noteAlive(epGen);
+  }
+
+  /**
+   * Report a transport failure. `kind` comes from EP.classifyHttpFailure or
+   * EP.classifyWsClose, and `epGen` is the generation observed when the request
+   * or socket started — a report about an entry point we already left is
+   * dropped, so three sockets dying together still cause one rotation.
+   */
+  async _reportEndpointFailure(kind, epGen) {
+    if (!kind || kind === 'ignore') return null;
+    if (_serverCfg.endpoints.length < 2) return null; // nowhere to go
+    try {
+      const r = await this._epSelector().reportFailure(kind, epGen);
+      if (r && r.rotated) await this._applyRotation(r, 'failover');
+      else if (r && r.exhausted) {
+        this._post({ type: 'endpoint_exhausted', retryAfterMs: r.retryAfterMs });
+      }
+      return r;
+    } catch (e) {
+      console.warn('[EP] rotation failed:', e?.message || e);
+      return null;
+    }
+  }
+
+  /** Switch to another entry point of the SAME island. Clears no cache — see saveIsland. */
+  async _applyRotation(result, reason) {
+    _applyCfg(result.config);
+    this._endpointAuthProved = false;
+    try { await AsyncStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify(_serverCfg)); } catch {}
+    console.log('[EP] switched to', _apiBase, '(', reason, ')');
+    this._post({ type: 'endpoint_changed', apiBase: _apiBase, change: 'endpoints', reason });
+    this._redialAllSockets(reason);
+  }
+
+  /** While running on a fallback, check whether a preferred entry point is back. */
+  async maybeComeHome() {
+    if (_serverCfg.endpoints.length < 2) return null;
+    try {
+      const r = await this._epSelector().maybeComeHome();
+      if (r && r.rotated) await this._applyRotation(r, 'come-home');
+      return r;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /**
+   * Re-dial all three sockets at the current entry point.
+   *
+   * Deliberately does NOT call disconnectRoom/disconnectDm/disconnectNotify:
+   * each of those sets its _manual*Disconnect flag, and every _schedule*Reconnect
+   * bails out while that flag is set — reusing them here would silently kill
+   * reconnection for the rest of the session.
+   */
+  _redialAllSockets(reason) {
+    console.log('[EP] redialing sockets:', reason, '->', _wsBase);
+
+    // --- room ---
+    clearTimeout(this._reconnectTimer);
+    clearInterval(this._wsPingInterval);
+    this._reconnectTimer = null;
+    this._wsPingInterval = null;
+    this._roomGeneration++;
+    const roomGen = this._roomGeneration;
+    if (this._ws) {
+      const old = this._ws;
+      this._ws = null;                       // makes the stale onclose a no-op
+      try { old.close(); } catch (_e) {}
+    }
+    this._manualDisconnect = false;
+    this._reconnectAttempts = 0;
+    this._wsConnectedAt = 0;
+    const target = this._wsRoomTarget ?? this._wsRoomId;
+    if (target && this._token) this._openWs(this._roomWsUrl(target), roomGen).catch(() => {});
+
+    // --- DM ---
+    clearTimeout(this._dmReconnectTimer);
+    clearInterval(this._dmPingInterval);
+    this._dmReconnectTimer = null;
+    this._dmPingInterval = null;
+    this._dmGeneration++;
+    const dmGen = this._dmGeneration;
+    if (this._dmWs) {
+      const old = this._dmWs;
+      this._dmWs = null;
+      try { old.close(); } catch (_e) {}
+    }
+    this._manualDmDisconnect = false;
+    this._dmReconnectAttempts = 0;
+    if (this._dmThreadId && this._token) this._openDmWs(dmGen).catch(() => {});
+
+    // --- notify ---
+    clearTimeout(this._notifyReconnectTimer);
+    clearInterval(this._notifyPingInterval);
+    this._notifyReconnectTimer = null;
+    this._notifyPingInterval = null;
+    this._notifyGeneration++;
+    const notifyGen = this._notifyGeneration;
+    if (this._notifyWs) {
+      const old = this._notifyWs;
+      this._notifyWs = null;
+      try { old.close(); } catch (_e) {}
+    }
+    this._manualNotifyDisconnect = false;
+    this._notifyReconnectAttempts = 0;
+    if (this._token) this._openNotifyWs(notifyGen).catch(() => {});
+  }
+
+  /**
+   * A 401 that survived a refresh attempt, on an entry point that has never
+   * yet served us an authenticated response. The likeliest cause is a mistyped
+   * address that happens to run WS Messenger: our token is simply unknown
+   * there. Blacklist it and go back rather than destroying a valid session.
+   * Returns true if we rotated away.
+   */
+  async _handleForeignIslandOn401() {
+    if (this._endpointAuthProved) return false;
+    if (_serverCfg.endpoints.length < 2) return false;
+    const sel = this._epSelector();
+    sel.markUnusable(_apiBase, 'foreignIsland');
+    console.warn('[EP] entry point rejected our session, blacklisting:', _apiBase);
+    const r = await sel.reportFailure('rotate', sel.epGen());
+    if (r && r.rotated) {
+      await this._applyRotation(r, 'foreign-island');
+      return true;
+    }
+    return false;
   }
 
   // FCM token registration stub (endpoint may not exist on backend)

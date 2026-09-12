@@ -14,7 +14,15 @@ let API_BASE = "https://imagine-1-ws.xyz";
 // crypto endpoints (/keys/*, /crypto/*) and file transfer silently address the
 // default host instead of the self-hosted one.
 let __apiBaseReady = Promise.resolve();
-function __applyServerConfig(cfg) {
+const __EP = globalThis.WSEndpoints;
+const __EP_DEFAULTS = { defaultApiBase: API_BASE, defaultWsBase: API_BASE.replace(/^https:/, "wss:") };
+
+function __applyServerConfig(raw) {
+  // The stored config now holds a whole island (an ordered list of entry
+  // points) with apiBase mirroring the active one — so this keeps working
+  // unchanged and, for free, follows a failover the worker performed: every
+  // rotation rewrites `server_config`, which lands in the listener below.
+  const cfg = __EP ? __EP.normalizeServerConfig(raw, __EP_DEFAULTS) : raw;
   const api = String(cfg?.apiBase || "").trim().replace(/\/$/, "");
   if (api) API_BASE = api;
   return API_BASE;
@@ -29,13 +37,29 @@ try {
     }
     return API_BASE;
   })();
-  // Keep in sync if the user changes servers while the panel is open.
+  // Keep in sync if the user changes servers — or if the worker fails over to
+  // another entry point — while the panel is open.
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !changes.server_config) return;
     __applyServerConfig(changes.server_config.newValue);
   });
 } catch (e) {
   console.warn("server_config bootstrap unavailable:", e?.message || e);
+}
+
+/**
+ * Tell the worker that a request died at the network level.
+ *
+ * The panel never rotates by itself: the worker owns WS_BASE and the dialing,
+ * so a panel that rotated on its own would simply disagree with it. Shared with
+ * panel-ui.js and panel-crypto.js, which live in this script scope.
+ */
+function reportNetFail(err) {
+  try {
+    const kind = __EP ? __EP.classifyHttpFailure(err) : "rotate";
+    if (kind === "ignore") return;
+    safePost({ type: "net_fail", apiBase: API_BASE, kind });
+  } catch {}
 }
 
 let port = null;
@@ -800,7 +824,13 @@ function getAliasPass(alias) {
   });
 }
 
-function initPort() {
+async function initPort() {
+  // The stored server config must be applied before anything goes out: until
+  // __apiBaseReady settles, API_BASE is still the bundled default, so an early
+  // request would address the wrong host. This promise existed but nothing
+  // ever awaited it.
+  try { await __apiBaseReady; } catch {}
+
   // Delegated to rpc.js. It auto-reconnects and fans out messages.
   try {
     if (typeof window.connectPort !== "function") throw new Error("rpc.js not loaded");

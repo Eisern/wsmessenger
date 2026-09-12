@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NetworkService from '../services/NetworkService';
 import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
+import ServerSetup from '../components/ServerSetup';
 import { useApp } from '../contexts/AppContext';
 import { Colors, Spacing, Radii, Typography } from '../theme';
 
@@ -81,11 +82,7 @@ export default function ProfileScreen() {
 
   // Server config
   const [showServerSetup, setShowServerSetup] = useState(false);
-  const [setupApiBase, setSetupApiBase] = useState('');
-  const [setupWsBase, setSetupWsBase] = useState('');
-  const [setupStatus, setSetupStatus] = useState('');
-  const [setupTestLoading, setSetupTestLoading] = useState(false);
-  const [setupSaveLoading, setSetupSaveLoading] = useState(false);
+  const [serverCfg, setServerCfg] = useState(() => NetworkService.getServerConfig());
 
   const myUsername = state.username;
   const profile = state.myProfile;
@@ -120,13 +117,13 @@ export default function ProfileScreen() {
     }
   }, [profile]);
 
-  // Load current server config into server setup fields
+  // The server form lives in <ServerSetup/>, shared with LoginScreen; this only
+  // keeps the collapsed summary line in sync (failover moves the active entry
+  // point without any user action).
   useEffect(() => {
-    const cfg = NetworkService.getServerConfig();
-    if (!cfg.isDefault) {
-      setSetupApiBase(cfg.apiBase);
-      setSetupWsBase(cfg.wsBase);
-    }
+    const onChanged = () => setServerCfg(NetworkService.getServerConfig());
+    NetworkService.on('endpoint_changed', onChanged);
+    return () => NetworkService.off('endpoint_changed', onChanged);
   }, []);
 
   async function handleSaveProfile() {
@@ -145,68 +142,6 @@ export default function ProfileScreen() {
     }
   }
 
-  function _deriveWsBase(api) {
-    return api.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
-  }
-
-  async function handleTestServer() {
-    const api = setupApiBase.trim().replace(/\/$/, '');
-    if (!api) { setSetupStatus('Enter API base URL first'); return; }
-    setSetupTestLoading(true);
-    setSetupStatus('Testing…');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    try {
-      const r = await fetch(api + '/health', { cache: 'no-store', signal: controller.signal });
-      setSetupStatus(r.ok ? 'Connected ✓' : `Server returned HTTP ${r.status}`);
-    } catch (e) {
-      setSetupStatus(e.name === 'AbortError' ? 'Connection timed out' : 'Connection failed: ' + e.message);
-    } finally {
-      clearTimeout(timer);
-      setSetupTestLoading(false);
-    }
-  }
-
-  async function handleSaveServer() {
-    const api = setupApiBase.trim().replace(/\/$/, '');
-    if (!api) {
-      await NetworkService.clearServerConfig();
-      setSetupStatus('Reverted to default server');
-      setShowServerSetup(false);
-      return;
-    }
-    let parsed;
-    try { parsed = new URL(api); } catch {
-      setSetupStatus('Invalid URL'); return;
-    }
-    if (!['https:', 'http:'].includes(parsed.protocol)) {
-      setSetupStatus('URL must start with https://'); return;
-    }
-    if (parsed.protocol === 'http:' && !['localhost', '127.0.0.1'].includes(parsed.hostname)) {
-      setSetupStatus('HTTP only allowed for localhost'); return;
-    }
-    const cleanApi = parsed.origin;
-    const ws = (setupWsBase.trim().replace(/\/$/, '')) || _deriveWsBase(cleanApi);
-    setSetupSaveLoading(true);
-    setSetupStatus('Saving…');
-    try {
-      await NetworkService.saveServerConfig(cleanApi, ws);
-      setSetupWsBase(ws);
-      setSetupStatus('Saved ✓ — sign out and log in on the new server');
-    } catch (e) {
-      setSetupStatus('Save failed: ' + e.message);
-    } finally {
-      setSetupSaveLoading(false);
-    }
-  }
-
-  async function handleClearServer() {
-    await NetworkService.clearServerConfig();
-    setSetupApiBase('');
-    setSetupWsBase('');
-    setSetupStatus('Using default server');
-    setTimeout(() => setShowServerSetup(false), 800);
-  }
 
   async function handleLogout() {
     Alert.alert('Sign Out', 'Are you sure?', [
@@ -577,73 +512,21 @@ export default function ProfileScreen() {
           <View style={{ flex: 1 }}>
             <Text style={styles.sectionTitle}>Server</Text>
             <Text style={styles.privacyHint}>
-              {NetworkService.getServerConfig().isDefault
+              {serverCfg.isDefault
                 ? 'Default server (imagine-1-ws.xyz)'
-                : NetworkService.getServerConfig().apiBase.replace(/^https?:\/\//, '')}
+                : serverCfg.apiBase.replace(/^https?:\/\//, '') +
+                  (serverCfg.endpoints.length > 1
+                    ? ` — ${serverCfg.endpoints.length} entry points`
+                    : '')}
             </Text>
           </View>
           <Text style={styles.serverChevron}>{showServerSetup ? '▴' : '▾'}</Text>
         </TouchableOpacity>
         {showServerSetup && (
-          <View style={{ gap: Spacing.sm }}>
-            <TextInput
-              style={styles.input}
-              placeholder="API base (e.g. https://your-server.example)"
-              placeholderTextColor={Colors.textMuted}
-              value={setupApiBase}
-              onChangeText={v => { setSetupApiBase(v); if (v.trim()) setSetupWsBase(_deriveWsBase(v.trim())); }}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-            />
-            <TextInput
-              style={styles.input}
-              placeholder="WS base (auto-derived if empty)"
-              placeholderTextColor={Colors.textMuted}
-              value={setupWsBase}
-              onChangeText={setSetupWsBase}
-              autoCapitalize="none"
-              autoCorrect={false}
-              keyboardType="url"
-            />
-            {!!setupStatus && (
-              <Text style={[
-                styles.privacyHint,
-                setupStatus.includes('✓') && { color: Colors.success || '#28a745' },
-                (setupStatus.includes('failed') || setupStatus.includes('Invalid') || setupStatus.includes('timed out')) && { color: Colors.danger },
-              ]}>
-                {setupStatus}
-              </Text>
-            )}
-            <View style={styles.serverBtns}>
-              <TouchableOpacity
-                style={[styles.serverBtn, setupTestLoading && styles.btnDisabled]}
-                onPress={handleTestServer}
-                disabled={setupTestLoading || setupSaveLoading}
-              >
-                {setupTestLoading
-                  ? <ActivityIndicator color="#fff" size="small" />
-                  : <Text style={styles.serverBtnText}>Test</Text>}
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.serverBtn, styles.serverBtnSave, setupSaveLoading && styles.btnDisabled]}
-                onPress={handleSaveServer}
-                disabled={setupTestLoading || setupSaveLoading}
-              >
-                {setupSaveLoading
-                  ? <ActivityIndicator color="#fff" size="small" />
-                  : <Text style={styles.serverBtnText}>Save</Text>}
-              </TouchableOpacity>
-              {!NetworkService.getServerConfig().isDefault && (
-                <TouchableOpacity
-                  style={[styles.serverBtn, styles.serverBtnClear]}
-                  onPress={handleClearServer}
-                >
-                  <Text style={styles.serverBtnText}>Reset</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          </View>
+          <ServerSetup
+            savedHint="Saved OK - different server, sign out and sign in there"
+            onSaved={() => setServerCfg(NetworkService.getServerConfig())}
+          />
         )}
       </View>
 
@@ -1172,23 +1055,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   serverChevron: { color: Colors.textMuted, fontSize: Typography.sm, marginLeft: Spacing.sm },
-  serverBtns: { flexDirection: 'row', gap: Spacing.sm },
-  serverBtn: {
-    flex: 1,
-    paddingVertical: Spacing.sm,
-    borderRadius: Radii.md,
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.07)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  serverBtnSave: {
-    backgroundColor: '#1a7a3a',
-    borderColor: '#28a745',
-  },
-  serverBtnClear: {
-    backgroundColor: 'rgba(248,81,73,0.15)',
-    borderColor: Colors.danger,
-  },
-  serverBtnText: { color: Colors.textMain, fontSize: Typography.sm, fontWeight: '600' },
+  // The form itself (inputs, buttons, status) now lives in ServerSetup.js,
+  // which carries its own styles.
 });

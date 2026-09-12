@@ -2384,6 +2384,30 @@ body.is-dm-mode #presence{
   font-size: 11px;
 }
 .login-setup-input:focus { outline: none; border-color: rgba(255,255,255,.28); }
+/* Entry-point list: several addresses for the same island */
+.login-setup-list { display: flex; flex-direction: column; gap: 4px; margin-bottom: 6px; }
+.login-setup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: rgba(255,255,255,.045);
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 7px;
+  font-size: 11px;
+}
+.login-setup-row-idx { width: 12px; text-align: center; color: #3aa0ff; }
+.login-setup-row-host { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.login-setup-row-del {
+  border: none;
+  background: none;
+  color: #dc3545;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.setup-btn-add { flex: 0 0 auto; padding: 6px 12px; }
 .login-setup-actions { display: flex; gap: 6px; }
 .setup-btn {
   flex: 1;

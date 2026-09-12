@@ -387,33 +387,46 @@ A single per-user WebSocket that receives lightweight notifications for **all** 
 
 Users can point the Android app at any self-hosted server at runtime.
 
-**Storage:** `AsyncStorage` key `com.wsmessenger.server_config` → `{ apiBase, wsBase }`. Loaded once at startup in `App.tsx` before auth restore (`NetworkService.loadServerConfig()`).
+**Storage:** `AsyncStorage` key `com.wsmessenger.server_config` → schema 2, an **island** (one backend, one database) with an ordered list of entry points:
 
-**Module-level state:** `let _apiBase/_wsBase` at the top of `NetworkService.js`. All `_fetch()` / `fetch()` calls inside the class access them via closure — no `this.` needed on every reference.
+```js
+{ schema: 2, islandId, endpoints: [{apiBase, wsBase, label}], activeIdx,
+  apiBase, wsBase }   // the last two MIRROR endpoints[activeIdx]
+```
+
+Loaded once at startup in `App.tsx` before auth restore (`NetworkService.loadServerConfig()`), which is also the one place that persists the upgrade from the legacy `{apiBase, wsBase}` shape. The mirrored `apiBase`/`wsBase` mean every existing reader keeps working and transparently reads the active entry point.
+
+**Module-level state:** `let _apiBase/_wsBase` (mirror of the active entry point) plus `_serverCfg` and `_selector` at the top of `NetworkService.js`. All `_fetch()` / `fetch()` calls access them via closure — no `this.` needed on every reference.
 
 **NetworkService methods:**
 
 | Method | Description |
 |---|---|
 | `setServerConfig(apiBase, wsBase)` | Apply in-memory only (no persist) |
-| `async saveServerConfig(apiBase, wsBase)` | Apply + persist to AsyncStorage; clears delivery secret cache |
-| `async loadServerConfig()` | Read AsyncStorage and apply; call once at startup |
-| `async clearServerConfig()` | Reset to defaults + remove from AsyncStorage; clears delivery secret cache |
-| `getServerConfig()` | Returns `{ apiBase, wsBase, isDefault }` |
+| `async saveServerConfig(apiBase, wsBase)` | Legacy single-address wrapper over `saveIsland` |
+| `async saveIsland(cfg)` | Persist an entry-point list; tears the session down **only** if the new list is disjoint from the old one (`EP.classifyConfigChange`) |
+| `async loadServerConfig()` | Read AsyncStorage, normalize, apply; call once at startup |
+| `async clearServerConfig()` | Reset to defaults, drop sockets and delivery secrets (it is an island change) |
+| `getServerConfig()` | Returns `{ apiBase, wsBase, isDefault, islandId, endpoints, activeIdx }` |
+| `_applyRotation(result, reason)` | Move to another entry point of the same island — **clears no cache** |
+| `_reportEndpointFailure(kind, epGen)` / `_noteEndpointAlive(epGen)` | Feed the selector; `epGen` drops reports about an entry point already left |
+| `_redialAllSockets(reason)` | Re-dial all three sockets without `disconnect*()` (those set `_manual*Disconnect`, which kills reconnection) |
+| `async maybeComeHome()` | Probe more-preferred entry points while running on a fallback |
 
-**LoginScreen UI:** collapsible "Connect to another server" section at the bottom of the login form.
-- Two inputs: API base URL + WS base (auto-derived if empty)
-- **Test** button: `fetch(api + '/health')` with 5 s `AbortController` timeout; independent `setupTestLoading` state
-- **Save** button: validates URL (HTTPS only; `http://localhost` allowed), strips to origin, calls `NetworkService.saveServerConfig()`; independent `setupSaveLoading` state
-- **Reset** button (shown when non-default): calls `NetworkService.clearServerConfig()`
-- Both buttons disable while either is loading (prevents concurrent Test + Save)
+**Failover:** `src/services/endpoints.js` (byte-identical to `chrome_extension/endpoints.js`, enforced by `src/services/__tests__/endpoints-parity.test.js`) holds the selector. `_fetch` reports `err.status === 0` and bare 5xx; `sendDmUd` reports its own failures (it bypasses `_fetch` because sealed sender forbids an `Authorization` header); all three WS `onclose` handlers classify via `EP.classifyWsClose`. Rotations are single-flight, generation-guarded and cooled down, and a full failed pass backs off **without ever logging the user out**. A rotation must never route through `login()` — the `RateLimiter` guards there would lock the user out of their own failover.
+
+`_roomWsUrl(target)` is the single room-WS URL builder (previously three copies, one of them inside the reconnect timer, which would have kept dialing the dead entry point after a rotation).
+
+**Wrong-password misclassification (fixed):** a `1006` close used to be reported as `likely_bad_pass` **and** skipped the reconnect. `1006` is a local code — a server never sends it, `/ws` carries no password in the URL, and a policy rejection arrives as `1008`. It is now classified as transport, exactly as the extension already documented.
+
+**LoginScreen / ProfileScreen UI:** both render the shared `src/components/ServerSetup.js` (previously two byte-identical copies of the form, its validation and its `/health` probe). It edits the ordered list — add, remove, promote — with **Test all** probing each address sequentially, and a `●` marking the active one. Saving reports whether the session was kept.
 
 **URL validation rules (both clients):**
 - Scheme must be `https:` (or `http:` for `localhost`/`127.0.0.1` only)
 - Path/query stripped — only `parsed.origin` is stored
-- WS base: `https://` → `wss://`, `http://` → `ws://`
+- WS base: `https://` → `wss://`, `http://` → `ws://` (derived; an explicit legacy `wsBase` is still honoured)
 
-**Delivery secret cache:** `saveServerConfig` and `clearServerConfig` both call `this._deliverySecretCache.clear()` + `this._deliverySecretPending.clear()` — prevents secrets from one server being used against another.
+**Delivery secret cache:** cleared on an **island** change only (`saveIsland`, `clearServerConfig`) — prevents secrets from one server being used against another. A rotation between entry points of the same island must **not** clear it: same backend, same database, same valid secrets.
 
 ### Server Broadcast Notice (MOTD)
 
@@ -422,7 +435,7 @@ Users can point the Android app at any self-hosted server at runtime.
 ### Security Hardening
 
 Applied security measures:
-1. `network_security_config.xml` — cleartext blocked; certificate pinning (pins valid until 2027-01-01)
+1. `network_security_config.xml` — cleartext blocked (except localhost/emulator); system CAs only, **no certificate pinning** (pinning is per-hostname and would block the multi-entry-point failover described in `docs/internal/federation-assessment.md`)
 2. Rate limiting — login/register/verify2fa (5/60s), crypto unlock (5/60s)
 3. KDF minimum — 600k iterations, only SHA-256/384/512
 4. `FLAG_SECURE` — screenshot blocking on main Activity window AND all Dialog/Modal windows via `SecureWindowManager` Kotlin delegate in `MainActivity.kt`
@@ -460,7 +473,7 @@ Issues found in the Android client security audit. Listed by severity.
 
 - **Ed25519 signature not required for DM receive**: FIXED. `sigValid === null` with a known sender (from ≠ null, from ≠ self) now sets `_sealedSenderUnverified: true` on the message. DMChatScreen renders `(unverified)` in muted italic style below the message, distinct from the yellow `⚠ Signature verification failed` for `sigValid === false`.
 
-- **Certificate pinning expiry (2027-01-01)**: `network_security_config.xml` pins expire on 2027-01-01. Set a calendar reminder well before that date to rotate pins; expired pins cause all HTTPS to fail silently on Android 9+.
+- **Certificate pinning removed**: `network_security_config.xml` no longer pins any host. Pinning is declared per-hostname, so a pinned build can only reach hostnames baked into the APK — incompatible with a user-configurable list of entry points (and with volunteer bridges, whose names are unknown at build time). The former pins were also set to expire 2027-01-01, which would have failed silently on Android 9+. Trust now rests on system CAs; the compromised-CA threat is accepted and is covered at the application layer by E2EE plus TOFU key pinning (`__known_fp` / Keychain `fp_*`), which a TLS-level attacker cannot forge.
 
 - **`FLAG_SECURE` not applied to `Modal` overlays**: FIXED. `MainActivity.kt` overrides `getSystemService(WINDOW_SERVICE)` to return a `SecureWindowManager` Kotlin delegate that ORs `FLAG_SECURE` into every `WindowManager.addView()` call — including the separate Dialog window created by RN's `Modal`. All overlays (safety number, recovery phrase, change password) are now protected.
 

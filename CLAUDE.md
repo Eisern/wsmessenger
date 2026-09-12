@@ -120,7 +120,55 @@ The author's backend hosts are baked into `chrome_extension/manifest.json` `host
 
 Both support HTTPS and WSS. These are **defaults only** — both clients switch backends at runtime (Login screen → "Connect to another server"), with no manifest edit or rebuild.
 
-The chosen backend lives in `chrome.storage.local` under `server_config` (`{apiBase, wsBase}`). `login.js` writes it and requests the host permission via `optional_host_permissions`; `background.js` reads it once at service-worker start and re-reads on a `server_config_updated` port message; `panel.js` resolves it at parse time and follows `chrome.storage.onChanged` (`panel-crypto.js` and `panel-ui.js` share that script scope, so key and file operations follow too). A self-hosted backend must be HTTPS: the extension CSP permits only `https:`/`wss:`, and `optional_host_permissions` covers `https://*/*`.
+The chosen backend lives in `chrome.storage.local` under `server_config`. `login.js` writes it and requests the host permission via `optional_host_permissions`; `background.js` reads it once at service-worker start and re-reads on a `server_config_updated` port message; `panel.js` resolves it at parse time and follows `chrome.storage.onChanged` (`panel-crypto.js` and `panel-ui.js` share that script scope, so key and file operations follow too). A self-hosted backend must be HTTPS: the extension CSP permits only `https:`/`wss:`, and `optional_host_permissions` covers `https://*/*`.
+
+### Entry Points and Failover
+
+One backend with one database is an **island**; it may answer on several
+addresses (its own domains today, volunteer TCP-passthrough bridges later).
+`server_config` therefore holds an ordered list, schema 2:
+
+```js
+{ schema: 2, islandId, endpoints: [{apiBase, wsBase, label}], activeIdx,
+  apiBase, wsBase }   // the last two MIRROR endpoints[activeIdx]
+```
+
+The mirrored `apiBase`/`wsBase` are what keeps every pre-existing reader working
+unchanged — including `panel.js`, which follows `chrome.storage.onChanged` and
+so picks up a rotation the worker performed with no new message type. A legacy
+`{apiBase, wsBase}` blob is upgraded in place, and in each client exactly one
+place persists that upgrade (`background.js` / `NetworkService.loadServerConfig`).
+
+`chrome_extension/endpoints.js` and `Android/src/services/endpoints.js` are the
+selector, duplicated **byte-for-byte** (enforced by
+`Android/src/services/__tests__/endpoints-parity.test.js`) and free of platform
+imports: the probe and the clock are injected. It classifies failures as
+`rotate` (transport: `TypeError`/`status 0`, timeout, WS `1006` before `onopen`,
+backoff exhausted), `strike` (a short-lived socket, a bare 502/503/504 — rotate
+on the second) or `ignore` (the server answered: any 4xx, 5xx with a JSON body,
+WS 1008/1009/1013, including a wrong room password). Rotations are single-flight,
+generation-guarded and cooled down, so three sockets dying together cause one
+rotation, and a full unsuccessful pass backs off without ever logging anyone out.
+
+Two rules carry the whole design:
+
+- **Rotating between entry points of one island clears nothing** — same backend,
+  same database, so the JWT, the delivery secrets, the room keys and the open
+  room all stay. Only a *disjoint* entry-point list is a different island, and
+  only then does the old teardown run (`applyIslandChange` in `background.js`,
+  `saveIsland` in `NetworkService.js`). The decision is made by comparing entry
+  point **sets** (`classifyConfigChange`), never by a user-visible name.
+- **The worker is the only rotation authority** in the extension. Panels report
+  a failed request with `{type:"net_fail"}` and follow; they never rotate.
+
+MV3 constraint: `chrome.permissions.request` needs a user gesture, so **Save**
+on the login page requests every endpoint's origin in a single call, and
+`background.js` checks `chrome.permissions.contains` before selecting an entry
+point. Host permissions gate `fetch` but not WebSocket, so skipping that check
+yields a client that looks connected and fails every HTTP call.
+
+Full reasoning, threat model and what this deliberately does *not* buy:
+[`docs/internal/federation-assessment.md`](docs/internal/federation-assessment.md).
 
 ## Key File Roles
 
@@ -133,6 +181,7 @@ The chosen backend lives in `chrome.storage.local` under `server_config` (`{apiB
 | `chrome_extension/crypto-utils.js` | Raw crypto primitives (X25519, AES-GCM, PBKDF2, HKDF, BIP39, safety numbers) |
 | `chrome_extension/crypto-manager.js` | CryptoKey lifecycle, room key versioning/archival |
 | `chrome_extension/rpc.js` | chrome.runtime port transport with reconnect/backoff; exposes `window.{connectPort,safePost,rpcOnMessage,rpcOffMessage,rpcOnConnect,rpcOnDisconnect,rpcDisconnect,rpcGetPort}` |
+| `chrome_extension/endpoints.js` | Entry-point list, failure classification and rotation state machine — byte-identical to `Android/src/services/endpoints.js` |
 | `chrome_extension/notifications.js` | Badge management; exposes `window.Notifications` singleton |
 | `chrome_extension/login.js` | Login, registration, 2FA, BIP39 recovery form, KEK derivation → background handoff |
 | `chrome_extension/argon2-selftest.js` | WASM integrity check (pinned SHA-256) + KDF test vector; blocks unlock on failure |

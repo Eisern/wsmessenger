@@ -4,6 +4,12 @@
 
 // background.js (MV3 service worker)
 
+// Entry-point selection for the configured island. Pure logic, no platform
+// calls — see endpoints.js. The worker owns WS_BASE and does the dialing, so
+// it is the only context allowed to rotate; panels report failures and follow.
+importScripts("endpoints.js");
+const EP = self.WSEndpoints;
+
 let _unlockKekKey = null; // CryptoKey AES-GCM
 let _unlockKekTs = 0;
 
@@ -167,7 +173,10 @@ async function handleBannedLogout(message) {
   const msg = String(message || "User is banned");
 
   try { await clearAuth(); } catch {}
-  try { disconnectWs(true); } catch {}
+  // Was `disconnectWs(true)` — a function that does not exist anywhere in the
+  // extension, so the ReferenceError was swallowed by the try/catch and a
+  // banned user's room socket stayed open.
+  try { closeWs({ manual: true }); } catch {}
   try { closeDmWs({ manual: true }); } catch {}
   try { closeNotifyWs({ manual: true }); } catch {}
 
@@ -521,23 +530,213 @@ function stopWsPing() {
   }
 }
 
-let API_BASE = "https://imagine-1-ws.xyz";
-let WS_BASE  = "wss://imagine-1-ws.xyz";
+const EP_DEFAULTS = {
+  defaultApiBase: "https://imagine-1-ws.xyz",
+  defaultWsBase:  "wss://imagine-1-ws.xyz",
+};
+const PROBE_TIMEOUT_MS = 4000;
+
+// API_BASE/WS_BASE stay plain mutable strings holding the ACTIVE entry point,
+// so all ~60 existing call sites keep working untouched; rotation simply
+// reassigns them from one place.
+let API_BASE = EP_DEFAULTS.defaultApiBase;
+let WS_BASE  = EP_DEFAULTS.defaultWsBase;
+let serverCfg = EP.normalizeServerConfig(null, EP_DEFAULTS);
+let epSelector = null;
 const CTX_MENU_ID = "ws-messenger-create-room-from-selection";
 
+function _applyServerCfg(cfg) {
+  serverCfg = cfg;
+  API_BASE = cfg.apiBase || EP_DEFAULTS.defaultApiBase;
+  WS_BASE  = cfg.wsBase  || EP_DEFAULTS.defaultWsBase;
+  if (epSelector) epSelector.setConfig(cfg);
+}
+
 async function _loadServerConfig() {
+  let raw = null;
   try {
     const r = await chrome.storage.local.get("server_config");
-    const cfg = r.server_config;
-    if (cfg?.apiBase) {
-      API_BASE = cfg.apiBase.replace(/\/$/, "");
-      WS_BASE  = cfg.wsBase ? cfg.wsBase.replace(/\/$/, "")
-                            : API_BASE.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://");
-    }
+    raw = r.server_config || null;
   } catch { /* use defaults */ }
+
+  _applyServerCfg(EP.normalizeServerConfig(raw, EP_DEFAULTS));
+
+  // The worker is the single place that persists a schema upgrade, so a legacy
+  // {apiBase, wsBase} blob is rewritten once and the three readers (worker,
+  // panel, login page) never race each other over the same key.
+  if (raw && Number(raw.schema) !== 2) {
+    try { await chrome.storage.local.set({ server_config: serverCfg }); } catch {}
+  }
+  auditEndpointPermissions().catch(() => {});
 }
 // Store the promise so message handlers can await it before making network calls
 const _serverConfigReady = _loadServerConfig();
+
+// =======================
+// Entry-point failover
+// =======================
+
+function selector() {
+  if (!epSelector) {
+    epSelector = EP.createSelector({
+      cfg: serverCfg,
+      probe: probeEndpoint,
+      log: (msg, data) => slog("[EP] " + msg, data || {}),
+    });
+  }
+  return epSelector;
+}
+
+function epGen() {
+  return selector().epGen();
+}
+
+function originPattern(apiBase) {
+  try { return new URL(apiBase).origin + "/*"; } catch { return null; }
+}
+
+/**
+ * Host permissions gate fetch() but NOT WebSocket (which the CSP alone allows).
+ * Without this check a rotation onto an ungranted origin produces a client that
+ * looks connected and fails every HTTP call — and the permission cannot be
+ * requested here, because chrome.permissions.request needs a user gesture.
+ */
+async function hasHostPermission(apiBase) {
+  const origins = originPattern(apiBase);
+  if (!origins) return false;
+  try { return await chrome.permissions.contains({ origins: [origins] }); } catch { return false; }
+}
+
+async function auditEndpointPermissions() {
+  const sel = selector();
+  for (const ep of serverCfg.endpoints) {
+    if (await hasHostPermission(ep.apiBase)) continue;
+    sel.markUnusable(ep.apiBase, "permissionMissing");
+    if (ep.apiBase === API_BASE) {
+      broadcastToPanels({ type: "endpoint_permission_missing", apiBase: ep.apiBase });
+    }
+  }
+}
+
+async function probeEndpoint(ep) {
+  if (!(await hasHostPermission(ep.apiBase))) {
+    selector().markUnusable(ep.apiBase, "permissionMissing");
+    broadcastToPanels({ type: "endpoint_permission_missing", apiBase: ep.apiBase });
+    return false;
+  }
+  try {
+    const r = await fetch(ep.apiBase + "/health", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    return !!r.ok;
+  } catch {
+    return false;
+  }
+}
+
+function noteEndpointAlive(gen) {
+  if (epSelector) epSelector.noteAlive(gen);
+}
+
+/**
+ * kind comes from EP.classifyHttpFailure / EP.classifyWsClose; gen is the
+ * entry-point generation observed when the request or socket started, so a
+ * report about an entry point we already left is dropped. All three sockets
+ * dying together is therefore one rotation, not three.
+ */
+async function reportEndpointFailure(kind, gen) {
+  if (!kind || kind === "ignore") return null;
+  if (serverCfg.endpoints.length < 2) return null;
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return null;
+  try {
+    const r = await selector().reportFailure(kind, gen);
+    if (r && r.rotated) await applyEndpointRotation(r, "failover");
+    else if (r && r.exhausted) {
+      broadcastToPanels({ type: "endpoint_exhausted", retry_in_ms: r.retryAfterMs });
+    }
+    return r;
+  } catch (e) {
+    swarn("entry-point rotation failed", { error: e?.message });
+    return null;
+  }
+}
+
+/**
+ * Move to another entry point of the SAME island.
+ *
+ * Clears nothing: the token, the delivery secrets and every key are still valid
+ * because it is the same backend and the same database. Persisting the config
+ * is also how the panel learns — panel.js already follows chrome.storage
+ * changes for `server_config`.
+ */
+async function applyEndpointRotation(result, reason) {
+  _applyServerCfg(result.config);
+  endpointAuthProved = false;
+  try { await chrome.storage.local.set({ server_config: serverCfg }); } catch {}
+  slog("entry point switched", { apiBase: API_BASE, reason });
+  broadcastToPanels({ type: "endpoint_changed", api_base: API_BASE, reason });
+  redialAllSockets(reason);
+}
+
+/**
+ * Re-dial all three sockets at the current entry point.
+ *
+ * closeWs({manual:true}) is deliberately NOT used: it sets the module-level
+ * manualDisconnect, and scheduleReconnect() returns immediately while that is
+ * set — reusing it here would silently kill room reconnection for good.
+ */
+function redialAllSockets(reason) {
+  try {
+    closeWs({ manual: false });
+    manualDisconnect = false;
+    reconnectAttempt = 0;
+  } catch {}
+  try { closeDmWs({ manual: true }); } catch {}
+  try { closeNotifyWs({ manual: true }); } catch {}
+
+  if (wsState.token && wsState.roomName) {
+    connectWs({ roomName: wsState.roomName, roomPass: wsState.roomPass || "", force: true, source: "rotate" });
+  }
+  if (wsState.token && dmState.threadId) {
+    // Note: connectDmWs has no reconnect path of its own, so a rotation is the
+    // only thing that ever re-dials it.
+    connectDmWs({ threadId: dmState.threadId });
+  }
+  if (wsState.token) connectNotifyWs();
+  slog("sockets re-dialed", { reason, wsBase: WS_BASE });
+}
+
+/**
+ * False until an authenticated request succeeds at the current entry point.
+ * Reset on every rotation; see handleForeignIslandOn401.
+ */
+let endpointAuthProved = true;
+
+async function handleForeignIslandOn401() {
+  if (endpointAuthProved) return false;
+  if (serverCfg.endpoints.length < 2) return false;
+  const sel = selector();
+  sel.markUnusable(API_BASE, "foreignIsland");
+  swarn("entry point rejected our session, blacklisting", { apiBase: API_BASE });
+  broadcastToPanels({ type: "endpoint_foreign", api_base: API_BASE });
+  const r = await sel.reportFailure("rotate", sel.epGen());
+  if (r && r.rotated) {
+    await applyEndpointRotation(r, "foreign-island");
+    return true;
+  }
+  return false;
+}
+
+/** The user pointed the client at a different island: everything goes. */
+async function applyIslandChange() {
+  await _loadServerConfig();
+  if (epSelector) epSelector.clearUnusable();
+  try { closeWs({ manual: true }); } catch {}
+  try { closeDmWs({ manual: true }); } catch {}
+  try { closeNotifyWs({ manual: true }); } catch {}
+  try { dmDeliverySecrets.clear(); } catch {}
+}
 
 chrome.action.onClicked.addListener(tab => {
   chrome.sidePanel.open({ tabId: tab.id });
@@ -612,11 +811,17 @@ async function connectNotifyWs() {
   _notifyWs = null;
 
   const gen = ++_notifyWsGen;
+  const dialEpGen = epGen();
+  let opened = false;
+  let openedAt = 0;
   const ws = new WebSocket(`${WS_BASE}/ws-notify`);
   _notifyWs = ws;
 
   ws.onopen = () => {
     if (ws !== _notifyWs) { ws.close(); return; }
+    opened = true;
+    openedAt = Date.now();
+    noteEndpointAlive(dialEpGen);
     _notifyReconnectDelay = 2_000; // reset backoff on success
     try { ws.send(JSON.stringify({ type: "auth", token: wsState.token })); } catch {}
     _notifyPingInterval = setInterval(() => {
@@ -639,6 +844,11 @@ async function connectNotifyWs() {
     if (ws !== _notifyWs) return;
     if (_notifyPingInterval) { clearInterval(_notifyPingInterval); _notifyPingInterval = null; }
     _notifyWs = null;
+    reportEndpointFailure(EP.classifyWsClose({
+      code: ev?.code ?? 0,
+      opened,
+      uptimeMs: opened ? Date.now() - openedAt : 0,
+    }), dialEpGen);
     // Auto-reconnect as long as we're still logged in
     if (wsState.token) _scheduleNotifyReconnect();
   };
@@ -677,6 +887,9 @@ async function connectDmWs({ threadId }) {
     dmState.threadId = Number(threadId);
 
     const url = `${WS_BASE}/ws-dm?thread_id=${encodeURIComponent(threadId)}`;
+    const dialEpGen = epGen();
+    let opened = false;
+    let openedAt = 0;
 
     dmWs = new WebSocket(url);
 
@@ -686,6 +899,9 @@ async function connectDmWs({ threadId }) {
       try {
         dmWs.send(JSON.stringify({ type: "auth", token: wsState.token }));
       } catch {}
+      opened = true;
+      openedAt = Date.now();
+      noteEndpointAlive(dialEpGen);
       dmState.connected = true;
       broadcastToPanels({ type: "dm_status", online: true, thread_id: dmState.threadId });
     };
@@ -748,6 +964,12 @@ async function connectDmWs({ threadId }) {
         handleBannedLogout(reason || "User is banned").catch(() => {});
         return;
       }
+
+      reportEndpointFailure(EP.classifyWsClose({
+        code,
+        opened,
+        uptimeMs: opened ? Date.now() - openedAt : 0,
+      }), dialEpGen);
 
       broadcastToPanels({
         type: "dm_status",
@@ -812,11 +1034,20 @@ function clearReconnectTimer() {
   }
 }
 
+const ROOM_RECONNECT_ROTATE_AFTER = 4;
+
 function scheduleReconnect(reason = "") {
   if (manualDisconnect) return;
 
   clearReconnectTimer();
   reconnectAttempt++;
+
+  // Several failed reconnects in a row at the same entry point: the backoff is
+  // not going to fix a blocked domain, so ask for a rotation. Reporting is
+  // generation-guarded, so this is a no-op once we have already moved.
+  if (reconnectAttempt === ROOM_RECONNECT_ROTATE_AFTER) {
+    reportEndpointFailure("rotate", epGen());
+  }
 
   const base = Math.min(30000, 1000 * (2 ** (reconnectAttempt - 1)));
   const jitter = Math.floor(Math.random() * 500); // 0..500ms
@@ -1249,6 +1480,12 @@ wsState._lastDial = {
   ts: Date.now()
 };
 
+    // Captured per dial: whether this socket ever reached onopen, and which
+    // entry point it was dialed against. onclose classification needs both.
+    let wsOpened = false;
+    let wsOpenedAt = 0;
+    const dialEpGen = epGen();
+
     ws = new WebSocket(url);
 
   ws.onopen = () => {
@@ -1260,6 +1497,9 @@ wsState._lastDial = {
       room_pass: wsState.roomPass || ""   // or roomPass || ""
     }));
 
+    wsOpened = true;
+    wsOpenedAt = Date.now();
+    noteEndpointAlive(dialEpGen);
     wsState.connected = true;
     reconnectAttempt = 0;
     clearReconnectTimer();
@@ -1376,10 +1616,6 @@ ws.onclose = (ev) => {
 
   const md = !!manualDisconnect;
   const last = wsState._lastDial;
-  const looksLikeHandshakeFail =
-    closeCode === 1006 &&
-    last &&
-    (Date.now() - (last.ts || 0)) < 5000;
 
   // 1006 is a LOCAL code meaning "connection closed without a close frame"; a
   // server never sends it. It signals a transport failure (server restart,
@@ -1387,13 +1623,26 @@ ws.onclose = (ev) => {
   // /ws takes no password (the URL carries only room_id/alias) and rejects on
   // policy with 1008. Treating it as an auth failure produced a bogus password
   // prompt for passwordless rooms and, worse, skipped the reconnect entirely.
-  // Log it and fall through to the normal backoff reconnect below.
-  if (!md && looksLikeHandshakeFail) {
+  //
+  // `wsOpened` is the real signal, and it is not the same thing as "closed
+  // soon after we dialed": a socket that opened and lived four seconds matches
+  // the clock test too. Never having opened means this entry point did not
+  // answer at all, which is worth rotating away from; a short-lived open
+  // socket is only suspicious.
+  if (!md && !wsOpened && closeCode === 1006) {
     swarn("WS closed before open (transport failure); will retry", {
       roomName: last?.roomName,
       code: closeCode,
       reason: closeReason,
     });
+  }
+
+  if (!md) {
+    reportEndpointFailure(EP.classifyWsClose({
+      code: closeCode,
+      opened: wsOpened,
+      uptimeMs: wsOpened ? Date.now() - wsOpenedAt : 0,
+    }), dialEpGen);
   }
 
   const shouldReconnect = !md && !isPolicyOrAuthClose;
@@ -1551,20 +1800,41 @@ port.onMessage.addListener((msg) => {
       };
 
       // 1) first try
-      let r = await fetch(url, opts);
+      const dialEpGen = epGen();
+      let r;
+      try {
+        r = await fetch(url, opts);
+      } catch (e) {
+        // fetch rejects with TypeError on DNS/TLS/refused/reset — the entry
+        // point failed, not the request.
+        reportEndpointFailure(EP.classifyHttpFailure(e), dialEpGen);
+        throw e;
+      }
       let body = await readBody(r);
+      // Any response below 500 proves the entry point is up; a bare 5xx is the
+      // edge answering for a backend it cannot reach, which counts as a strike.
+      if (r.status < 500) noteEndpointAlive(dialEpGen);
+      else reportEndpointFailure(EP.classifyHttpFailure({ status: r.status, body }), dialEpGen);
 
       // 2) if unauthorized once -> refresh -> retry once
       if (r.status === 401 && !opts.__retried401) {
+        let refreshed = false;
         try {
-          const ok = await refreshNowOnce(); // updates wsState + session on success
-          if (ok && wsState.token) {
+          refreshed = await refreshNowOnce(); // updates wsState + session on success
+          if (refreshed && wsState.token) {
             const opts2 = { ...(opts || {}), __retried401: true };
             r = await fetch(url, withAuth(opts2, wsState.token));
             body = await readBody(r);
           }
         } catch {}
+        // A 401 the refresh cannot fix, on an entry point that has never served
+        // us an authenticated response, most likely means we are talking to a
+        // different server that happens to run WS Messenger (a mistyped
+        // address) — our token is simply unknown there. Blacklist it and go
+        // back instead of treating a valid session as dead.
+        if (!refreshed) await handleForeignIslandOn401();
       }
+      if (r.ok && wsState.token) endpointAuthProved = true;
 
       if (!r.ok) {
         const detail =
@@ -1602,13 +1872,42 @@ port.onMessage.addListener((msg) => {
       }
 
       // --- server config reload ---
+      // Two different things arrive here. Adding or reordering entry points of
+      // the SAME island must keep the session (same backend, same database);
+      // only a disjoint list is a different server. Deciding by comparing the
+      // entry-point sets needs no extra UI and cannot be fooled by a name.
       if (msg.type === "server_config_updated") {
-        await _loadServerConfig();
-        // Drop any open WS connections — they point at the old server
-        try { closeWs({ manual: true }); } catch {}
-        try { closeDmWs({ manual: true }); } catch {}
-        try { closeNotifyWs({ manual: true }); } catch {}
-        try { dmDeliverySecrets.clear(); } catch {}
+        const prev = serverCfg;
+        let raw = null;
+        try {
+          const r = await chrome.storage.local.get("server_config");
+          raw = r.server_config || null;
+        } catch {}
+        const next = EP.normalizeServerConfig(raw, EP_DEFAULTS);
+        const change = EP.classifyConfigChange(prev, next);
+
+        if (change === "island") {
+          await applyIslandChange();
+        } else {
+          _applyServerCfg(next);
+          // The click that saved this config is also the click that granted the
+          // host permissions, so any "permissionMissing" mark from before may
+          // be stale. Re-audit from scratch rather than skipping an entry point
+          // for the rest of the session.
+          if (epSelector) epSelector.clearUnusable();
+          await auditEndpointPermissions();
+          if (change === "endpoints") redialAllSockets("island-endpoints-changed");
+        }
+        broadcastToPanels({ type: "endpoint_changed", api_base: API_BASE, change });
+        return;
+      }
+
+      // --- a panel saw a request fail at the network level ---
+      // Panels never rotate: they report, the worker decides. That is what
+      // keeps the two contexts from disagreeing about the active entry point.
+      if (msg.type === "net_fail") {
+        const at = String(msg.apiBase || "");
+        if (!at || at === API_BASE) reportEndpointFailure(msg.kind || "rotate", epGen());
         return;
       }
 

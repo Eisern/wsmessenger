@@ -24,6 +24,16 @@ module.exports = {
       resolver: '<rootDir>/jest-noble-resolver.js',
     },
     {
+      // Селектор точек входа — pure JS без платформенных импортов, поэтому
+      // node-окружение; RN-проект его игнорирует, чтобы тесты не шли дважды.
+      displayName: 'selector',
+      testEnvironment: 'node',
+      testMatch: ['<rootDir>/src/services/__tests__/**/*.test.[jt]s?(x)'],
+      transform: {
+        '^.+\\.[jt]sx?$': 'babel-jest',
+      },
+    },
+    {
       // RN-тесты — компоненты, экраны и т.д.
       displayName: 'react-native',
       preset: 'react-native',
@@ -31,6 +41,7 @@ module.exports = {
         '<rootDir>/__tests__/**/*.test.[jt]s?(x)',
         '<rootDir>/src/**/!(crypto)/**/__tests__/**/*.test.[jt]s?(x)',
       ],
+      testPathIgnorePatterns: ['<rootDir>/src/services/__tests__/'],
       transformIgnorePatterns: [
         'node_modules/(?!(react-native|@react-native|@react-navigation|react-native-quick-crypto|react-native-screens|react-native-gesture-handler|react-native-safe-area-context)/)',
       ],

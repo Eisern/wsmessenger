@@ -30,13 +30,17 @@
           <div class="login-setup-badge">Connect</div>
           <div class="panel-block-title login-setup-title">Server Setup</div>
         </div>
-        <div class="panel-hint login-setup-sub">Set your self-hosted backend before login.</div>
+        <div class="panel-hint login-setup-sub">
+          Set your self-hosted backend before login. You can add several addresses for the
+          same server — if one is blocked, the extension moves to the next one.
+        </div>
+        <div id="serverSetupList" class="login-setup-list"></div>
         <div class="login-setup-inputs-row">
-          <input id="setupApiBase" class="login-setup-input" placeholder="API base (e.g. https://your-se…)">
-          <input id="setupWsBase" class="login-setup-input" placeholder="WS base (e.g. wss://your-ser…)">
+          <input id="setupApiBase" class="login-setup-input" placeholder="https://your-server.example">
+          <button id="setupAddBtn" class="setup-btn setup-btn-add" type="button">Add</button>
         </div>
         <div class="buttons login-setup-actions">
-          <button id="setupTestBtn" class="setup-btn setup-btn-test" type="button">Test</button>
+          <button id="setupTestBtn" class="setup-btn setup-btn-test" type="button">Test all</button>
           <button id="setupSaveBtn" class="setup-btn setup-btn-save" type="button">Save</button>
           <button id="setupReloadBtn" class="setup-btn setup-btn-reload" type="button">Reload</button>
         </div>
@@ -63,6 +67,7 @@
   <script src="crypto-utils.js"></script>
   <script src="crypto-manager.js"></script>
   <script src="rpc.js"></script>
+  <script src="endpoints.js"></script>
   <script src="login.js"></script>
 </body>
 </html>

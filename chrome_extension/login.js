@@ -9,22 +9,31 @@
   // === Server config ===
   const DEFAULT_API_BASE = "https://imagine-1-ws.xyz";
   const DEFAULT_WS_BASE  = "wss://imagine-1-ws.xyz";
+  const EP = globalThis.WSEndpoints;
+  const EP_DEFAULTS = { defaultApiBase: DEFAULT_API_BASE, defaultWsBase: DEFAULT_WS_BASE };
   let _apiBase = DEFAULT_API_BASE;
   let _wsBase  = DEFAULT_WS_BASE;
+  // The island being edited: an ordered list of entry points, all reaching the
+  // same backend. _apiBase/_wsBase mirror the active one for the rest of this file.
+  let _serverCfg = EP.normalizeServerConfig(null, EP_DEFAULTS);
+  let _draftEndpoints = [];
 
   function _deriveWsBase(apiBase) {
-    return apiBase.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://");
+    return EP.deriveWsBase(apiBase);
   }
 
   async function _loadServerConfig() {
+    let raw = null;
     try {
       const r = await chrome.storage.local.get("server_config");
-      const cfg = r.server_config;
-      if (cfg?.apiBase) {
-        _apiBase = cfg.apiBase.replace(/\/$/, "");
-        _wsBase  = cfg.wsBase ? cfg.wsBase.replace(/\/$/, "") : _deriveWsBase(_apiBase);
-      }
+      raw = r.server_config || null;
     } catch { /* storage unavailable, use defaults */ }
+    // Read-only normalization: background.js is the single writer of the schema
+    // upgrade, so this page never races it over the same key.
+    _serverCfg = EP.normalizeServerConfig(raw, EP_DEFAULTS);
+    _apiBase = _serverCfg.apiBase;
+    _wsBase  = _serverCfg.wsBase;
+    _draftEndpoints = _serverCfg.endpoints.map(e => e.apiBase);
   }
 
   function _setSetupStatus(el, text, color) {
@@ -33,32 +42,91 @@
     el.style.color = color || "";
   }
 
+  /** Shared validation: https only, http for localhost, origin only. */
+  function _validateApiBase(raw) {
+    const api = String(raw || "").trim().replace(/\/$/, "");
+    if (!api) return { error: "Enter a server address" };
+    let parsed;
+    try { parsed = new URL(api); } catch { return { error: "Invalid URL" }; }
+    if (!["https:", "http:"].includes(parsed.protocol)) return { error: "URL must start with https://" };
+    if (parsed.protocol === "http:" && !["localhost", "127.0.0.1"].includes(parsed.hostname)) {
+      return { error: "HTTP only allowed for localhost" };
+    }
+    return { apiBase: parsed.origin };
+  }
+
   function initServerSetupUI() {
     const toggle      = document.getElementById("serverSetupToggle");
     const panel       = document.getElementById("serverSetupPanel");
     const chevron     = document.getElementById("serverSetupChevron");
     const toggleState = document.getElementById("serverSetupToggleState");
     const apiInput    = document.getElementById("setupApiBase");
-    const wsInput     = document.getElementById("setupWsBase");
+    const listEl      = document.getElementById("serverSetupList");
+    const addBtn      = document.getElementById("setupAddBtn");
     const testBtn     = document.getElementById("setupTestBtn");
     const saveBtn     = document.getElementById("setupSaveBtn");
     const reloadBtn   = document.getElementById("setupReloadBtn");
     const statusEl    = document.getElementById("serverSetupStatus");
     if (!toggle) return;
 
-    // Reflect current config in UI
     const isCustom = _apiBase !== DEFAULT_API_BASE;
     if (toggleState) {
-      toggleState.textContent = isCustom ? _apiBase : "Not configured";
-      toggleState.style.color  = isCustom ? "#28a745" : "#dc3545";
+      toggleState.textContent = isCustom
+        ? _apiBase + (_draftEndpoints.length > 1 ? ` (+${_draftEndpoints.length - 1})` : "")
+        : "Not configured";
+      toggleState.style.color = isCustom ? "#28a745" : "#dc3545";
     }
-    if (apiInput) apiInput.value = isCustom ? _apiBase : "";
-    if (wsInput)  wsInput.value  = isCustom ? _wsBase  : "";
 
-    // Auto-derive WS base when API base is typed
-    apiInput?.addEventListener("input", () => {
-      const v = (apiInput.value || "").trim();
-      if (v && wsInput) wsInput.value = _deriveWsBase(v);
+    function renderList() {
+      if (!listEl) return;
+      listEl.textContent = "";
+      _draftEndpoints.forEach((apiBase, i) => {
+        const row = document.createElement("div");
+        row.className = "login-setup-row";
+
+        const mark = document.createElement("span");
+        mark.className = "login-setup-row-idx";
+        mark.textContent = apiBase === _apiBase ? "●" : String(i + 1);
+
+        const host = document.createElement("span");
+        host.className = "login-setup-row-host";
+        host.textContent = apiBase.replace(/^https?:\/\//, "");
+
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "login-setup-row-del";
+        del.textContent = "×";
+        del.title = "Remove this entry point";
+        del.addEventListener("click", () => {
+          _draftEndpoints = _draftEndpoints.filter(e => e !== apiBase);
+          renderList();
+        });
+
+        row.append(mark, host, del);
+        listEl.appendChild(row);
+      });
+    }
+    renderList();
+
+    function addFromInput() {
+      const v = _validateApiBase(apiInput?.value);
+      if (v.error) { _setSetupStatus(statusEl, v.error, "#dc3545"); return false; }
+      if (_draftEndpoints.includes(v.apiBase)) {
+        _setSetupStatus(statusEl, "Already in the list", "#dc3545"); return false;
+      }
+      if (_draftEndpoints.length >= EP.MAX_ENDPOINTS) {
+        _setSetupStatus(statusEl, `At most ${EP.MAX_ENDPOINTS} entry points`, "#dc3545"); return false;
+      }
+      _draftEndpoints.push(v.apiBase);
+      if (apiInput) apiInput.value = "";
+      renderList();
+      _setSetupStatus(statusEl, "", "");
+      return true;
+    }
+
+    addBtn?.addEventListener("click", addFromInput);
+    apiInput?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); addFromInput(); }
     });
 
     // Toggle panel open/close
@@ -76,63 +144,84 @@
       }
     });
 
-    // Test connection
+    // Test every entry point, in order — sequentially, so a censored island's
+    // whole domain list is not lit up in one burst.
     testBtn?.addEventListener("click", async () => {
-      const api = (apiInput?.value || "").trim().replace(/\/$/, "");
-      if (!api) { _setSetupStatus(statusEl, "Enter API base URL first", ""); return; }
-      _setSetupStatus(statusEl, "Testing…", "");
-      try {
-        const r = await fetch(api + "/health", { cache: "no-store", signal: AbortSignal.timeout(5000) });
-        if (r.ok) _setSetupStatus(statusEl, "Connected ✓", "#28a745");
-        else      _setSetupStatus(statusEl, `Server returned HTTP ${r.status}`, "#dc3545");
-      } catch (e) {
-        _setSetupStatus(statusEl, "Connection failed: " + e.message, "#dc3545");
+      const list = _draftEndpoints.slice();
+      if (!list.length) {
+        const v = _validateApiBase(apiInput?.value);
+        if (v.apiBase) list.push(v.apiBase);
       }
+      if (!list.length) { _setSetupStatus(statusEl, "Add a server address first", ""); return; }
+
+      let ok = 0;
+      for (const api of list) {
+        _setSetupStatus(statusEl, `Testing ${api.replace(/^https?:\/\//, "")}…`, "");
+        try {
+          const r = await fetch(api + "/health", { cache: "no-store", signal: AbortSignal.timeout(5000) });
+          if (r.ok) ok++;
+        } catch { /* counted as unreachable */ }
+      }
+      _setSetupStatus(
+        statusEl,
+        ok ? `${ok} of ${list.length} reachable ✓` : "None reachable",
+        ok ? "#28a745" : "#dc3545",
+      );
     });
 
     // Save
     saveBtn?.addEventListener("click", async () => {
-      const api = (apiInput?.value || "").trim().replace(/\/$/, "");
-      if (!api) {
-        // Empty input = revert to default server
+      // A typed-but-not-added address still counts — losing it to a forgotten
+      // "Add" click is the kind of paper cut nobody reports.
+      if ((apiInput?.value || "").trim() && !addFromInput()) return;
+
+      if (!_draftEndpoints.length) {
+        // Empty list = revert to the default server
         await chrome.storage.local.remove("server_config");
-        _apiBase = DEFAULT_API_BASE;
-        _wsBase  = DEFAULT_WS_BASE;
+        await _loadServerConfig();
+        renderList();
         _setSetupStatus(statusEl, "Using default server", "");
         if (toggleState) { toggleState.textContent = "Not configured"; toggleState.style.color = "#dc3545"; }
         port?.postMessage?.({ type: "server_config_updated" });
         return;
       }
-      let _parsed;
-      try { _parsed = new URL(api); } catch {
-        _setSetupStatus(statusEl, "Invalid URL", "#dc3545"); return;
-      }
-      if (!["https:", "http:"].includes(_parsed.protocol)) {
-        _setSetupStatus(statusEl, "URL must start with https://", "#dc3545"); return;
-      }
-      if (_parsed.protocol === "http:" && !["localhost", "127.0.0.1"].includes(_parsed.hostname)) {
-        _setSetupStatus(statusEl, "HTTP only allowed for localhost", "#dc3545"); return;
-      }
-      // Strip path/query — persist origin only
-      const cleanApi = _parsed.origin;
-      const ws = ((wsInput?.value || "").trim().replace(/\/$/, "")) || _deriveWsBase(cleanApi);
-      // Request optional host permission before saving
-      const origin = cleanApi + "/*";
+
+      // ONE permission request covering every entry point. chrome.permissions
+      // .request needs a user gesture, so this click is the only chance to get
+      // them: a background failover can never ask.
+      const origins = _draftEndpoints
+        .map(a => { try { return new URL(a).origin + "/*"; } catch { return null; } })
+        .filter(Boolean);
       _setSetupStatus(statusEl, "Requesting permission…", "");
       let granted = false;
       try {
-        granted = await chrome.permissions.request({ origins: [origin] });
+        granted = await chrome.permissions.request({ origins });
       } catch (e) {
         _setSetupStatus(statusEl, "Permission error: " + e.message, "#dc3545"); return;
       }
       if (!granted) {
         _setSetupStatus(statusEl, "Permission denied — server not saved", "#dc3545"); return;
       }
-      _apiBase = cleanApi;
-      _wsBase  = ws;
-      await chrome.storage.local.set({ server_config: { apiBase: cleanApi, wsBase: ws } });
+
+      // Keep using the entry point we are on, if it survived the edit.
+      const activeIdx = Math.max(0, _draftEndpoints.indexOf(_apiBase));
+      const cfg = EP.normalizeServerConfig(
+        { schema: 2, endpoints: _draftEndpoints.map(apiBase => ({ apiBase })), activeIdx },
+        EP_DEFAULTS,
+      );
+      await chrome.storage.local.set({ server_config: cfg });
+      _serverCfg = cfg;
+      _apiBase = cfg.apiBase;
+      _wsBase  = cfg.wsBase;
+      renderList();
       _setSetupStatus(statusEl, "Saved ✓", "#28a745");
-      if (toggleState) { toggleState.textContent = cleanApi; toggleState.style.color = "#28a745"; }
+      if (toggleState) {
+        toggleState.textContent = _apiBase + (_draftEndpoints.length > 1 ? ` (+${_draftEndpoints.length - 1})` : "");
+        toggleState.style.color = "#28a745";
+      }
+      // The worker compares the old and new entry-point sets and decides for
+      // itself whether this is a new island (tear down) or another door to the
+      // same one (keep the session).
       port?.postMessage?.({ type: "server_config_updated" });
     });
 

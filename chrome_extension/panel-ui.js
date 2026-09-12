@@ -889,9 +889,17 @@ async function apiJson(path, opts = {}) {
   if (hasBody && !(opts.body instanceof FormData) && !headers["Content-Type"]) {
     headers["Content-Type"] = "application/json";
   }
-  const r = await fetch(API_BASE + path, Object.assign({}, opts, { headers }));
+  let r;
+  try {
+    r = await fetch(API_BASE + path, Object.assign({}, opts, { headers }));
+  } catch (e) {
+    // Network-level failure: tell the worker, which owns entry-point selection.
+    reportNetFail(e);
+    throw e;
+  }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) {
+    if (r.status >= 500) reportNetFail({ status: r.status, body: data });
     const msg = data?.detail || data?.message || `HTTP ${r.status}`;
     throw new Error(msg);
   }
