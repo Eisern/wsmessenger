@@ -13,7 +13,37 @@
  */
 
 const crypto = require('crypto');
-const { sealEnvelope, openResponse, envelopeFields } = require('./helpers/relayEnvelope');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+import AND_UTILS from '../../../crypto/CryptoUtils';
+
+// The envelope is built by the REAL client code, not by a test helper. A third
+// implementation living in the test directory is exactly the thing that let
+// fingerprintPublicKey drift unnoticed.
+function loadExtensionUtils() {
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', '..', '..', '..', '..', 'chrome_extension', 'crypto-utils.js'),
+    'utf8',
+  );
+  const sandbox = { crypto: globalThis.crypto, TextEncoder, TextDecoder, atob, btoa, console, URL };
+  sandbox.globalThis = sandbox;
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(src, sandbox, { filename: 'crypto-utils.js' });
+  return sandbox.__wsCrypto.utils;
+}
+
+const EXT_UTILS = loadExtensionUtils();
+
+/** Everything a client must add to a /ud/dm/send body before sealing it. */
+function envelopeFields() {
+  return {
+    env_ts: Date.now(),
+    env_nonce_b64: crypto.randomBytes(16).toString('base64'),
+  };
+}
 
 const ISLAND = process.env.RELAY_TEST_ISLAND || 'http://127.0.0.1:8000';
 const RELAY = process.env.RELAY_TEST_RELAY || 'http://127.0.0.1:18800';
@@ -76,16 +106,22 @@ function makeDmBody(text) {
   };
 }
 
-async function sendThroughRelay(body, { next = ISLAND_ID } = {}) {
+async function sendThroughRelay(body, { next = ISLAND_ID, utils = AND_UTILS } = {}) {
   const inner = { ...body, ...envelopeFields() };
-  const { envelope, keyResp } = sealEnvelope(islandPubB64, inner);
+  const { envelope, responseKey } = await utils.sealRelayEnvelope(islandPubB64, inner);
+  const bytes = Buffer.from(Array.from(envelope, Number));
   const r = await fetch(RELAY + '/forward', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ next, blob: envelope.toString('base64') }),
+    body: JSON.stringify({ next, blob: bytes.toString('base64') }),
   });
   const raw = Buffer.from(await r.arrayBuffer());
-  return { httpStatus: r.status, raw, keyResp, envelope };
+  return { httpStatus: r.status, raw, responseKey, envelope: bytes, utils };
+}
+
+/** Open the island's sealed answer with the same client that sealed the request. */
+function openAnswer({ utils, responseKey, raw }) {
+  return utils.openRelayResponse(responseKey, raw);
 }
 
 beforeAll(async () => {
@@ -131,26 +167,30 @@ beforeAll(async () => {
 describe('relay prototype', () => {
   jest.setTimeout(60000);
 
-  it('delivers a direct message through the relay', async () => {
-    const text = `through-the-relay-${Date.now()}`;
-    const { httpStatus, raw, keyResp } = await sendThroughRelay(makeDmBody(text));
+  it.each([['android', () => AND_UTILS], ['extension', () => EXT_UTILS]])(
+    'delivers a direct message through the relay (%s client)',
+    async (_name, getUtils) => {
+      const text = `through-the-relay-${_name}-${Date.now()}`;
+      const sent = await sendThroughRelay(makeDmBody(text), { utils: getUtils() });
 
-    expect(httpStatus).toBe(200);
-    const answer = openResponse(keyResp, raw);   // only the client can open this
-    expect(answer.status).toBe(200);
-    expect(answer.ok).toBe(true);
+      expect(sent.httpStatus).toBe(200);
+      // Only the client can open this: the relay never holds the response key.
+      const answer = await openAnswer(sent);
+      expect(answer.status).toBe(200);
+      expect(answer.ok).toBe(true);
 
-    const history = await api(`/dm/${threadId}/history?limit=20`, { token: tokenA });
-    expect(history.status).toBe(200);
-    const rows = history.data.messages || history.data.items || history.data;
-    const texts = (Array.isArray(rows) ? rows : []).map((m) => m.text);
-    expect(texts).toContain(b64(Buffer.from(text, 'utf8')));
-  });
+      const history = await api(`/dm/${threadId}/history?limit=20`, { token: tokenA });
+      expect(history.status).toBe(200);
+      const rows = history.data.messages || history.data.items || history.data;
+      const texts = (Array.isArray(rows) ? rows : []).map((m) => m.text);
+      expect(texts).toContain(b64(Buffer.from(text, 'utf8')));
+    },
+  );
 
   it('stores the relayed message with no sender, exactly like a direct one', async () => {
     const text = `sealed-through-relay-${Date.now()}`;
-    const { raw, keyResp } = await sendThroughRelay(makeDmBody(text));
-    expect(openResponse(keyResp, raw).status).toBe(200);
+    const sent = await sendThroughRelay(makeDmBody(text));
+    expect((await openAnswer(sent)).status).toBe(200);
 
     const history = await api(`/dm/${threadId}/history?limit=20`, { token: tokenA });
     const rows = history.data.messages || history.data.items || history.data;
@@ -166,7 +206,8 @@ describe('relay prototype', () => {
   it('hands the relay nothing it could correlate on', async () => {
     const body = makeDmBody('metadata-check');
     const inner = { ...body, ...envelopeFields() };
-    const { envelope } = sealEnvelope(islandPubB64, inner);
+    const sealedResult = await AND_UTILS.sealRelayEnvelope(islandPubB64, inner);
+    const envelope = Buffer.from(Array.from(sealedResult.envelope, Number));
 
     // Everything the relay receives: a destination NAME and opaque bytes.
     const asSeen = { next: ISLAND_ID, blob: envelope.toString('base64') };
@@ -197,7 +238,9 @@ describe('relay prototype', () => {
   it('rejects a replayed envelope before it reaches the database', async () => {
     const body = makeDmBody(`replay-me-${Date.now()}`);
     const inner = { ...body, ...envelopeFields() };
-    const { envelope, keyResp } = sealEnvelope(islandPubB64, inner);
+    const sealedResult = await AND_UTILS.sealRelayEnvelope(islandPubB64, inner);
+    const envelope = Buffer.from(Array.from(sealedResult.envelope, Number));
+    const responseKey = sealedResult.responseKey;
 
     const post = () =>
       fetch(RELAY + '/forward', {
@@ -206,11 +249,11 @@ describe('relay prototype', () => {
         body: JSON.stringify({ next: ISLAND_ID, blob: envelope.toString('base64') }),
       }).then(async (r) => Buffer.from(await r.arrayBuffer()));
 
-    expect(openResponse(keyResp, await post()).status).toBe(200);
+    expect((await AND_UTILS.openRelayResponse(responseKey, await post())).status).toBe(200);
 
     // Same bytes again: caught by the envelope's own nonce, in memory, not by
     // the DM-level dedup behind a database transaction.
-    const second = openResponse(keyResp, await post());
+    const second = await AND_UTILS.openRelayResponse(responseKey, await post());
     expect(second.status).toBe(409);
     expect(String(second.detail)).toContain('replay');
   });
@@ -223,7 +266,8 @@ describe('relay prototype', () => {
   it('refuses an unsigned or wrongly signed relay request at the island', async () => {
     const body = makeDmBody('unsigned');
     const inner = { ...body, ...envelopeFields() };
-    const { envelope } = sealEnvelope(islandPubB64, inner);
+    const sealedResult = await AND_UTILS.sealRelayEnvelope(islandPubB64, inner);
+    const envelope = Buffer.from(Array.from(sealedResult.envelope, Number));
 
     const bare = await fetch(`${ISLAND}/relay/in`, {
       method: 'POST',
@@ -251,7 +295,8 @@ describe('relay prototype', () => {
     const strangerPub = Buffer.from(x25519.getPublicKey(x25519.utils.randomSecretKey()));
 
     const inner = { ...makeDmBody('wrong-key'), ...envelopeFields() };
-    const { envelope } = sealEnvelope(strangerPub.toString('base64'), inner);
+    const sealedResult = await AND_UTILS.sealRelayEnvelope(strangerPub.toString('base64'), inner);
+    const envelope = Buffer.from(Array.from(sealedResult.envelope, Number));
 
     const r = await fetch(RELAY + '/forward', {
       method: 'POST',

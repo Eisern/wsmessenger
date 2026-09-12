@@ -23,8 +23,8 @@ only the browser-provided Web Crypto API.
 
 ## Backend (`server/`)
 
-Inferred from imports in `server/main.py` and `server/admin/`. There is no
-`requirements.txt`; the table below is informational.
+Pinned in [`server/requirements.txt`](server/requirements.txt); the table below
+lists the licenses.
 
 | Package | License (SPDX) | Project URL |
 |---------|----------------|-------------|
@@ -38,6 +38,19 @@ Inferred from imports in `server/main.py` and `server/admin/`. There is no
 | pyotp | MIT | https://github.com/pyauth/pyotp |
 | qrcode | BSD-3-Clause | https://github.com/lincolnloop/python-qrcode |
 | Jinja2 | BSD-3-Clause | https://github.com/pallets/jinja |
+| cryptography | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
+
+## Message relay (`relay/`)
+
+An optional, separately deployable component that forwards sealed direct
+messages and stores nothing. Pinned in
+[`relay/requirements.txt`](relay/requirements.txt).
+
+| Package | License (SPDX) | Project URL |
+|---------|----------------|-------------|
+| FastAPI | MIT | https://github.com/tiangolo/fastapi |
+| Uvicorn | BSD-3-Clause | https://github.com/encode/uvicorn |
+| httpx | BSD-3-Clause | https://github.com/encode/httpx |
 
 ## Android client (`Android/`)
 

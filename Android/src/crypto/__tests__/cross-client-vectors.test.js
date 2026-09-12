@@ -171,6 +171,110 @@ describe('round trips agree across clients', () => {
   });
 });
 
+describe('the relay envelope', () => {
+  // Random by nature, so the test injects the ephemeral key and the IV. That
+  // makes the whole construction deterministic: header layout, kid, HKDF with
+  // its two info strings, the AAD, and AES-GCM itself. If any one of them
+  // differed between the clients, these bytes would not match.
+  const EPH_PRIV = new Uint8Array(32).map((_, i) => (i * 7 + 3) & 0xff);
+  const IV = new Uint8Array(12).map((_, i) => 0xa0 + i);
+  const INNER = {
+    thread_id: 42,
+    ts: 1700000000000,
+    nonce_b64: 'AAECAwQFBgcICQoLDA0ODw==',
+    ciphertext_b64: 'aGVsbG8gcmVsYXk=',
+    tag_b64: 'dGFn',
+    env_ts: 1700000000123,
+    env_nonce_b64: 'EBESExQVFhcYGRobHB0eHw==',
+  };
+  // The island transport key the vectors are sealed to, and its matching
+  // private half, so the test can also open what the clients produced.
+  const ISLAND_PRIV = new Uint8Array(32).map((_, i) => (200 - i) & 0xff);
+
+  let islandPubB64;
+  let ephPubRaw;
+
+  beforeAll(() => {
+    const { x25519 } = require('@noble/curves/ed25519');
+    islandPubB64 = Buffer.from(x25519.getPublicKey(ISLAND_PRIV)).toString('base64');
+    ephPubRaw = x25519.getPublicKey(EPH_PRIV);
+  });
+
+  async function sealWith(U) {
+    const r = await U.sealRelayEnvelope(islandPubB64, INNER, {
+      ephemeralPrivateRaw: EPH_PRIV,
+      ephemeralPublicRaw: ephPubRaw,   // WebCrypto cannot derive it from an imported private key
+      iv: IV,
+    });
+    return r;
+  }
+
+  it('both clients produce byte-identical envelopes', async () => {
+    const a = await sealWith(EXT);
+    const b = await sealWith(AND);
+    expect(hex(a.envelope)).toBe(hex(b.envelope));
+
+    // Layout: version, kid, ephemeral public key, IV, then sealed bytes.
+    const bytes = Uint8Array.from(Array.from(a.envelope, Number));
+    expect(bytes[0]).toBe(0x03);
+    expect(hex(bytes.slice(5, 37))).toBe(hex(ephPubRaw));
+    expect(hex(bytes.slice(37, 49))).toBe(hex(IV));
+    expect(bytes.length).toBe(49 + new TextEncoder().encode(JSON.stringify(INNER)).length + 16);
+  });
+
+  it('the island can open what either client sealed', async () => {
+    const { x25519 } = require('@noble/curves/ed25519');
+    const { hkdf } = require('@noble/hashes/hkdf');
+    const { sha256 } = require('@noble/hashes/sha2');
+    const nodeCrypto = require('crypto');
+
+    for (const U of [EXT, AND]) {
+      const { envelope } = await sealWith(U);
+      const bytes = Buffer.from(Array.from(envelope, Number));
+
+      // The island side, done independently of either client implementation.
+      const shared = x25519.getSharedSecret(ISLAND_PRIV, bytes.subarray(5, 37));
+      const keyReq = Buffer.from(
+        hkdf(sha256, shared, bytes.subarray(5, 37), new TextEncoder().encode('ws-relay-seal-v1:req'), 32),
+      );
+      const sealed = bytes.subarray(49);
+      const d = nodeCrypto.createDecipheriv('aes-256-gcm', keyReq, bytes.subarray(37, 49));
+      d.setAAD(bytes.subarray(0, 37));
+      d.setAuthTag(sealed.subarray(sealed.length - 16));
+      const plain = Buffer.concat([d.update(sealed.subarray(0, sealed.length - 16)), d.final()]);
+      expect(JSON.parse(plain.toString('utf8'))).toEqual(INNER);
+    }
+  });
+
+  it('each client opens an answer sealed with the response key, and rejects the request key', async () => {
+    const { x25519 } = require('@noble/curves/ed25519');
+    const { hkdf } = require('@noble/hashes/hkdf');
+    const { sha256 } = require('@noble/hashes/sha2');
+    const nodeCrypto = require('crypto');
+
+    const shared = x25519.getSharedSecret(ISLAND_PRIV, ephPubRaw);
+    const mkAnswer = (info) => {
+      const key = Buffer.from(hkdf(sha256, shared, ephPubRaw, new TextEncoder().encode(info), 32));
+      const iv = Buffer.from(new Uint8Array(12).map((_, i) => i + 1));
+      const c = nodeCrypto.createCipheriv('aes-256-gcm', key, iv);
+      c.setAAD(Buffer.from([0x03]));
+      const ct = Buffer.concat([c.update(JSON.stringify({ status: 200, ok: true }), 'utf8'), c.final()]);
+      return Buffer.concat([Buffer.from([0x03]), iv, ct, c.getAuthTag()]);
+    };
+
+    const good = mkAnswer('ws-relay-seal-v1:resp');
+    const wrongDirection = mkAnswer('ws-relay-seal-v1:req');
+
+    for (const U of [EXT, AND]) {
+      const { responseKey } = await sealWith(U);
+      expect(await U.openRelayResponse(responseKey, good)).toEqual({ status: 200, ok: true });
+      // Request and response keys must be distinct - one key in both
+      // directions would reuse the AES-GCM IV space.
+      await expect(U.openRelayResponse(responseKey, wrongDirection)).rejects.toBeDefined();
+    }
+  });
+});
+
 describe('the fingerprint format that already diverged', () => {
   it('the legacy form is still recognisable, so old pins can be migrated', async () => {
     // The extension keeps the old function for exactly one purpose: telling a

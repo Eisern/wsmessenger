@@ -23,6 +23,12 @@ passlib[argon2]>=1.7.4,<2.0
 # JWT signing / verification.
 python-jose[cryptography]>=3.3,<4.0
 
+# X25519 / Ed25519 / AES-GCM for the signed island list and relay ingress.
+# It arrives transitively through python-jose's [cryptography] extra, but both
+# server/island_list.py and server/relay_ingress.py import it directly, so it
+# is pinned here rather than relied on as somebody else's dependency.
+cryptography>=42.0,<47.0
+
 # TOTP (2FA) + QR-code generation for authenticator app enrollment.
 pyotp>=2.9,<3.0
 qrcode>=7.4,<9.0

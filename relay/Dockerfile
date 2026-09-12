@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Yevgeniy Kropochev <y.kropochev87@gmail.com>
 # A relay holds no database, no user data and no island certificate.
 FROM python:3.12-slim
 

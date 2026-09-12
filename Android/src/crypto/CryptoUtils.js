@@ -1074,6 +1074,101 @@ const CryptoUtils = {
       return false;
     }
   },
+
+  // ============================
+  // Relay envelope (sealing a DM for an island, through a node that must not
+  // be able to read it)
+  // ============================
+  //
+  //   request  = 0x03 ‖ kid(4) ‖ eph_pub(32) ‖ iv(12) ‖ AES-GCM(ct‖tag)
+  //              AAD = 0x03 ‖ kid ‖ eph_pub
+  //   response = 0x03 ‖ iv(12) ‖ AES-GCM(ct‖tag)     AAD = 0x03
+  //
+  // Same X25519 + HKDF-SHA256 + AES-256-GCM shape as the room-key wrap, with
+  // its own info strings. Request and response use DIFFERENT keys from the same
+  // exchange: one key in both directions would reuse the AES-GCM IV space.
+  //
+  // Byte-identical to chrome_extension/crypto-utils.js, which implements it on
+  // WebCrypto rather than @noble. Pinned in
+  // src/crypto/__tests__/cross-client-vectors.test.js — do not change a byte of
+  // the layout without changing the version and the vectors.
+  _RELAY_VERSION: 0x03,
+  _RELAY_KID_LEN: 4,
+  _RELAY_INFO_REQ: 'ws-relay-seal-v1:req',
+  _RELAY_INFO_RESP: 'ws-relay-seal-v1:resp',
+
+  async _relayDeriveKey(sharedRaw, ephemeralPubRaw, info) {
+    const raw = hkdf(_sha256, sharedRaw, ephemeralPubRaw, new TextEncoder().encode(info), 32);
+    const key = await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+    raw.fill(0);
+    return key;
+  },
+
+  /** kid = sha256(island transport public key)[:4] — self-certifying, survives rotation. */
+  async _relayKid(islandPubRaw) {
+    const h = new Uint8Array(await crypto.subtle.digest('SHA-256', islandPubRaw));
+    return h.slice(0, this._RELAY_KID_LEN);
+  },
+
+  /**
+   * @param {string} islandTransportPubB64 32-byte X25519 key, from the SIGNED island list
+   * @param {object} inner the /ud/dm/send body plus env_ts and env_nonce_b64
+   * @param {object} [opts] test-only: {ephemeralPrivateRaw, iv} to make output deterministic
+   * @returns {{envelope: Uint8Array, responseKey: CryptoKey}}
+   */
+  async sealRelayEnvelope(islandTransportPubB64, inner, opts = {}) {
+    const islandPubRaw = new Uint8Array(this.base64ToArrayBuffer(islandTransportPubB64));
+    if (islandPubRaw.length !== 32) throw new Error('island transport key must be 32 bytes');
+
+    const ephPrivRaw = opts.ephemeralPrivateRaw
+      ? new Uint8Array(opts.ephemeralPrivateRaw)
+      : x25519.utils.randomSecretKey();
+    const ephPubRaw = x25519.getPublicKey(ephPrivRaw);
+    const sharedRaw = x25519.getSharedSecret(ephPrivRaw, islandPubRaw);
+    if (!opts.ephemeralPrivateRaw) ephPrivRaw.fill(0);
+
+    const keyReq = await this._relayDeriveKey(sharedRaw, ephPubRaw, this._RELAY_INFO_REQ);
+    const keyResp = await this._relayDeriveKey(sharedRaw, ephPubRaw, this._RELAY_INFO_RESP);
+    sharedRaw.fill(0);
+
+    const kid = await this._relayKid(islandPubRaw);
+    const header = new Uint8Array(1 + this._RELAY_KID_LEN + 32);
+    header[0] = this._RELAY_VERSION;
+    header.set(kid, 1);
+    header.set(ephPubRaw, 1 + this._RELAY_KID_LEN);
+
+    const iv = opts.iv ? new Uint8Array(opts.iv) : crypto.getRandomValues(new Uint8Array(12));
+    const plaintext = new TextEncoder().encode(JSON.stringify(inner));
+    const sealed = new Uint8Array(
+      await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: header }, keyReq, plaintext),
+    );
+
+    const envelope = new Uint8Array(header.length + iv.length + sealed.length);
+    envelope.set(header, 0);
+    envelope.set(iv, header.length);
+    envelope.set(sealed, header.length + iv.length);
+
+    return { envelope, responseKey: keyResp };
+  },
+
+  /**
+   * Open the island's answer. A relay cannot forge one: it never holds this key.
+   * Every outcome after the island opened the envelope arrives sealed, so a
+   * relay cannot tell a duplicate from a delivery, nor fake either.
+   */
+  async openRelayResponse(responseKey, bytes) {
+    const buf = new Uint8Array(bytes);
+    if (buf.length < 1 + 12 + 16 || buf[0] !== this._RELAY_VERSION) {
+      throw new Error('bad sealed response');
+    }
+    const iv = buf.slice(1, 13);
+    const sealed = buf.slice(13);
+    const aad = new Uint8Array([this._RELAY_VERSION]);
+    const plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv, additionalData: aad }, responseKey, sealed,
+    );
+    return JSON.parse(new TextDecoder().decode(plain));
+  },
 };
 
 export default CryptoUtils;
