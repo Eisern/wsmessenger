@@ -903,7 +903,14 @@ const CryptoService = {
             try {
               const peerPubKey = await CryptoService._fetchPeerEd25519PubKey(from);
               if (peerPubKey) {
-                const sigMsg  = CryptoUtils._dmSigMessage(threadId, from, String(inner.body));
+                // v2 when the envelope carries its place in the sender's chain,
+                // v1 otherwise. Which one was signed is inside the signature
+                // (the domain prefix differs), so stripping sq/pv to force a v1
+                // check does not downgrade anything - it just fails.
+                const chained = Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || '');
+                const sigMsg = chained
+                  ? CryptoUtils._dmSigMessageV2(threadId, inner.sq, inner.pv, from, String(inner.body))
+                  : CryptoUtils._dmSigMessage(threadId, from, String(inner.body));
                 const sigBytes = new Uint8Array(CryptoUtils.base64ToArrayBuffer(sig));
                 sigValid = CryptoUtils.ed25519Verify(peerPubKey, sigBytes, sigMsg);
                 if (!sigValid) {
@@ -915,7 +922,12 @@ const CryptoService = {
             }
           }
 
-          return { text: String(inner.body), from, sigValid };
+          // Chain position travels with the message so the caller can check it
+          // against what it has already seen from this sender.
+          const chain = (Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || ''))
+            ? { seq: inner.sq, prev: inner.pv }
+            : null;
+          return { text: String(inner.body), from, sigValid, chain };
         }
       } catch (_e) {}
 

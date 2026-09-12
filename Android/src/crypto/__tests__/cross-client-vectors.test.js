@@ -293,3 +293,50 @@ describe('the fingerprint format that already diverged', () => {
     expect(await AND._fingerprintPublicKeyLegacy(PUB_B64)).toBe(legacy);
   });
 });
+
+describe('v1 and v2 signatures do not substitute for one another', () => {
+  // The migration rule this enforces: readers must accept both before any
+  // writer emits v2, and a message signed under one variant must never verify
+  // under the other. The domain prefix differs, so the variant is inside the
+  // signature - which is what makes stripping sq/pv a failure rather than a
+  // downgrade.
+  const PREV = 'bb'.repeat(32);
+
+  it('a v2 signature does not verify as v1', async () => {
+    for (const U of [EXT, AND]) {
+      const seed = await U.deriveEd25519Seed(PRIV);
+      const pub = await U.ed25519GetPublicKey(seed);
+      const v2 = await U._dmSigMessageV2(9, 3, PREV, 'alice', 'hello');
+      const sig = await U.ed25519Sign(seed, v2);
+      const sigBytes = Uint8Array.from(
+        Buffer.from(String(sig).replace(/-/g, '+').replace(/_/g, '/'), 'base64'),
+      );
+
+      const v1 = await U._dmSigMessage(9, 'alice', 'hello');
+      expect(await U.ed25519Verify(Uint8Array.from(pub), sigBytes, Uint8Array.from(v2))).toBe(true);
+      expect(await U.ed25519Verify(Uint8Array.from(pub), sigBytes, Uint8Array.from(v1))).toBe(false);
+    }
+  });
+
+  it('moving a message to another position breaks its signature', async () => {
+    // seq and prev are inside the signed bytes, so re-filing a genuine message
+    // at a different height is not something an operator can do quietly.
+    const U = AND;
+    const seed = await U.deriveEd25519Seed(PRIV);
+    const pub = await U.ed25519GetPublicKey(seed);
+    const atThree = await U._dmSigMessageV2(9, 3, PREV, 'alice', 'hello');
+    const sig = await U.ed25519Sign(seed, atThree);
+    const sigBytes = Uint8Array.from(
+      Buffer.from(String(sig).replace(/-/g, '+').replace(/_/g, '/'), 'base64'),
+    );
+
+    const atFour = await U._dmSigMessageV2(9, 4, PREV, 'alice', 'hello');
+    expect(await U.ed25519Verify(Uint8Array.from(pub), sigBytes, Uint8Array.from(atFour))).toBe(false);
+  });
+
+  it('rejects a prev that is not 32 bytes of hex', async () => {
+    for (const U of [EXT, AND]) {
+      await expect(async () => U._dmSigMessageV2(1, 1, 'short', 'a', 'b')).rejects.toBeDefined();
+    }
+  });
+});

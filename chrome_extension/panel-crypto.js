@@ -1840,7 +1840,14 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
             const peerPub = await fetchPeerEd25519PubKey(from);
             if (peerPub) {
               const cu = CU();
-              const sigMsg  = cu._dmSigMessage(threadId, from, inner.body);
+              // v2 when the envelope carries its place in the sender's chain,
+              // v1 otherwise. Which one was signed is inside the signature (the
+              // domain prefix differs), so stripping sq/pv to force a v1 check
+              // does not downgrade anything - it just fails.
+              const chained = Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || "");
+              const sigMsg = chained
+                ? cu._dmSigMessageV2(threadId, inner.sq, inner.pv, from, inner.body)
+                : cu._dmSigMessage(threadId, from, inner.body);
               const sigBytes = new Uint8Array(cu.base64ToArrayBuffer(inner.sig));
               sigValid = await cu.ed25519Verify(peerPub, sigBytes, sigMsg);
               if (sigValid === true && fromLower) {
