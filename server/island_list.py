@@ -114,6 +114,14 @@ class IslandListConfig:
         return self.signing_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
 
 
+# The document changes only when the operator changes the configuration, but
+# `issued_at` moves with the clock. Re-signing on every request would make an
+# unauthenticated endpoint do public-key work on demand, which is a cheap way to
+# burn someone else's CPU. Sign at most this often; freshness at this
+# granularity is far finer than the staleness window clients apply.
+LIST_CACHE_S = 60
+
+
 def build_router(*, transport_keys: list[dict] | None = None) -> APIRouter:
     """
     transport_keys: [{"kid": "<b64>", "public_key_b64": "<b64>"}] - the relay
@@ -122,11 +130,16 @@ def build_router(*, transport_keys: list[dict] | None = None) -> APIRouter:
     """
     router = APIRouter()
     cfg = IslandListConfig()
+    cached: dict[str, Any] = {"at": 0.0, "doc": None}
 
     @router.get("/.well-known/wsapp-island")
     async def island_list() -> dict[str, Any]:
         if not cfg.enabled:
             raise HTTPException(status_code=404, detail="island list not configured")
+
+        nowf = time.time()
+        if cached["doc"] is not None and nowf - cached["at"] < LIST_CACHE_S:
+            return cached["doc"]
 
         payload: dict[str, Any] = {
             "island_id": cfg.island_id,
@@ -140,7 +153,7 @@ def build_router(*, transport_keys: list[dict] | None = None) -> APIRouter:
         }
 
         sig = cfg.signing_key.sign(signing_message(payload))
-        return {
+        doc = {
             "payload": payload,
             "sig_b64": b64e(sig),
             # Present for trust-on-first-use only. After the first contact a
@@ -149,5 +162,8 @@ def build_router(*, transport_keys: list[dict] | None = None) -> APIRouter:
             # an attacker would simply ship their own key alongside it.
             "signing_key_b64": b64e(cfg.public_key_bytes()),
         }
+        cached["at"] = nowf
+        cached["doc"] = doc
+        return doc
 
     return router

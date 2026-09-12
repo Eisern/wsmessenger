@@ -160,6 +160,40 @@ describe('payload normalization', () => {
     expect(p.transportKeys.length).toBe(4);
   });
 
+  it('drops addresses the client must never dial', () => {
+    // The document is signed, so a value like this means the island is
+    // attacking its own users - but "signed" is not "safe to hand to fetch()",
+    // and a caller may use the list without looking at it.
+    const p = IL.normalizePayload({
+      island_id: 'x',
+      version: 1,
+      entry_points: [
+        { apiBase: 'javascript:alert(1)' },
+        { apiBase: 'file:///etc/passwd' },
+        { apiBase: 'data:text/html,hi' },
+        { apiBase: 'not a url at all' },
+        { apiBase: 'https://ok.example', wsBase: 'javascript:alert(2)' },
+      ],
+      relays: [
+        { id: 'bad', url: 'javascript:alert(3)' },
+        { id: 'good', url: 'https://relay.example' },
+      ],
+    });
+
+    expect(p.entryPoints.map((e) => e.apiBase)).toEqual(['https://ok.example']);
+    expect(p.entryPoints[0].wsBase).toBe('');        // a ws address must be ws/wss
+    expect(p.relays.map((r) => r.id)).toEqual(['good']);
+  });
+
+  it('keeps only the origin, so a path cannot smuggle anything', () => {
+    const p = IL.normalizePayload({
+      island_id: 'x',
+      version: 1,
+      entry_points: [{ apiBase: 'https://a.example/some/path?q=1#frag' }],
+    });
+    expect(p.entryPoints[0].apiBase).toBe('https://a.example');
+  });
+
   it('derives wsBase nothing and keeps labels short', () => {
     const p = IL.normalizePayload({
       island_id: 'x',

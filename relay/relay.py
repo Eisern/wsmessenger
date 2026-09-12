@@ -35,7 +35,7 @@ import os
 import time
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 
 MAX_ENVELOPE_BYTES = 64 * 1024
 UPSTREAM_TIMEOUT_S = 15.0
@@ -75,8 +75,16 @@ async def health() -> dict:
     return {"status": "ok", "relay_id": RELAY_ID, "islands": sorted(ISLANDS)}
 
 
+# A base64 envelope inside a JSON object: allow for the encoding overhead and
+# the wrapper, and nothing more.
+MAX_FORWARD_BODY = (MAX_ENVELOPE_BYTES * 4) // 3 + 1024
+
+
 @app.post("/forward")
-async def forward(request: Request) -> Response:
+async def forward(
+    request: Request,
+    content_length: int | None = Header(default=None, alias="Content-Length"),
+) -> Response:
     """
     { "next": "<island id>", "blob": "<base64 envelope>" }  ->  sealed answer.
 
@@ -84,6 +92,11 @@ async def forward(request: Request) -> Response:
     operator's own list, so a client cannot point this relay at an arbitrary
     host.
     """
+    # Reject from the declared length before reading: request.json() buffers
+    # the whole body first, so a size check afterwards has already paid for it.
+    if content_length is not None and content_length > MAX_FORWARD_BODY:
+        raise HTTPException(status_code=413, detail="too big")
+
     try:
         body = await request.json()
     except Exception:

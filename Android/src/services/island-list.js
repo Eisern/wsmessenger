@@ -53,6 +53,23 @@
   }
 
   /**
+   * An address the client may actually dial.
+   *
+   * The document is signed, so a bad value here means the island is attacking
+   * its own users - but "signed" is not "safe to hand to fetch()". Only http
+   * and https get through, which keeps javascript:, file: and data: out of a
+   * list that a caller might use without looking.
+   */
+  function safeUrl(raw, schemes) {
+    const v = str(raw).replace(/\/+$/, "");
+    if (!v) return "";
+    let u;
+    try { u = new URL(v); } catch (e) { return ""; }
+    if (schemes.indexOf(u.protocol) < 0) return "";
+    return u.origin;
+  }
+
+  /**
    * Canonical JSON — must be byte-identical to what the island signed.
    *
    * Constraints the island enforces on its side and this mirrors: no floats
@@ -176,12 +193,12 @@
     for (let i = 0; i < rawEp.length && entryPoints.length < MAX_ENTRY_POINTS; i++) {
       const e = rawEp[i];
       if (!isPlainObject(e)) continue;
-      const apiBase = str(e.apiBase).replace(/\/+$/, "");
+      const apiBase = safeUrl(e.apiBase, ["http:", "https:"]);
       if (!apiBase || seenEp[apiBase]) continue;
       seenEp[apiBase] = true;
       entryPoints.push({
         apiBase: apiBase,
-        wsBase: str(e.wsBase).replace(/\/+$/, ""),
+        wsBase: safeUrl(e.wsBase, ["ws:", "wss:"]),
         label: str(e.label).slice(0, 40),
       });
     }
@@ -193,7 +210,7 @@
       const r = rawRelays[i];
       if (!isPlainObject(r)) continue;
       const id = str(r.id);
-      const url = str(r.url).replace(/\/+$/, "");
+      const url = safeUrl(r.url, ["http:", "https:"]);
       if (!id || !url || seenRelay[id]) continue;
       seenRelay[id] = true;
       relays.push({ id: id, url: url, label: str(r.label).slice(0, 40) });

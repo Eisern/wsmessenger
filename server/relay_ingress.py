@@ -30,7 +30,7 @@ import os
 import time
 from typing import Any, Awaitable, Callable
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
@@ -168,9 +168,19 @@ def build_router(
         }
 
     @router.post("/relay/in")
-    async def relay_in(request: Request) -> Response:
+    async def relay_in(
+        request: Request,
+        content_length: int | None = Header(default=None, alias="Content-Length"),
+    ) -> Response:
         if not cfg.enabled:
             raise HTTPException(status_code=404, detail="relay ingress disabled")
+
+        # Refuse an oversized body from the declared length, BEFORE reading it.
+        # request.body() buffers whatever arrives, so checking the size after
+        # the read is checking it too late - the memory is already spent. The
+        # upload routes in main.py use the same guard.
+        if content_length is not None and content_length > MAX_ENVELOPE_BYTES:
+            raise HTTPException(status_code=413, detail="envelope too big")
 
         now_ms = int(time.time() * 1000)
 
