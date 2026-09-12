@@ -562,7 +562,9 @@ class NetworkService {
     }
 
     this._refreshInProgress = true;
+    const epGenAtRefresh = this._epGen();
     let ok = false;
+    let unauthorized = false;
     try {
       const resp = await this._fetch('/auth/refresh', {
         method: 'POST',
@@ -586,11 +588,22 @@ class NetworkService {
       ok = true;
     } catch (e) {
       console.warn('[NS] token refresh failed: status', e?.status || 'unknown');
-      if (e?.status === 401) this._handleSessionExpired();
+      if (e?.status === 401) unauthorized = true;
     } finally {
       this._refreshInProgress = false;
       this._refreshWaiters.forEach(fn => fn(ok));
       this._refreshWaiters = [];
+    }
+
+    if (unauthorized) {
+      // A 401 on the refresh itself is the last line before the session is
+      // destroyed, so the foreign-island check has to happen HERE and not only
+      // in _fetch: an entry point that answers 401 to everything (a mistyped
+      // address leading to another instance) would otherwise take the session
+      // with it. Deliberately after the finally block, so the rotation's own
+      // requests do not queue behind this refresh.
+      const rotated = await this._handleForeignIslandOn401(epGenAtRefresh);
+      if (!rotated) this._handleSessionExpired();
     }
     return ok;
   }
@@ -658,7 +671,7 @@ class NetworkService {
       }
       // Before declaring the session dead, rule out having just rotated onto a
       // server that is not this island at all.
-      if (await this._handleForeignIslandOn401()) {
+      if (await this._handleForeignIslandOn401(epGen)) {
         const retriable = new Error('endpoint_rejected_session');
         retriable.status = 0;
         throw retriable;
@@ -2308,13 +2321,20 @@ class NetworkService {
    * there. Blacklist it and go back rather than destroying a valid session.
    * Returns true if we rotated away.
    */
-  async _handleForeignIslandOn401() {
+  async _handleForeignIslandOn401(observedGen) {
+    // One 401 travels through two layers (_fetch and the refresh it triggers),
+    // so this can be called twice for the same rejection. Without the
+    // generation guard the second call would blacklist the entry point we just
+    // rotated TO - the healthy one.
+    if (observedGen != null && observedGen !== this._epGen()) return true;
     if (this._endpointAuthProved) return false;
     if (_serverCfg.endpoints.length < 2) return false;
     const sel = this._epSelector();
     sel.markUnusable(_apiBase, 'foreignIsland');
     console.warn('[EP] entry point rejected our session, blacklisting:', _apiBase);
-    const r = await sel.reportFailure('rotate', sel.epGen());
+    // force: the cooldown from the rotation that just landed us here must not
+    // pin us to an entry point that will never accept this session.
+    const r = await sel.reportFailure('rotate', sel.epGen(), { force: true });
     if (r && r.rotated) {
       await this._applyRotation(r, 'foreign-island');
       return true;

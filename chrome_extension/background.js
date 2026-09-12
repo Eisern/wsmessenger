@@ -713,14 +713,20 @@ function redialAllSockets(reason) {
  */
 let endpointAuthProved = true;
 
-async function handleForeignIslandOn401() {
+async function handleForeignIslandOn401(observedGen) {
+  // One 401 can reach this twice — from the request and from the refresh it
+  // triggers. Without the generation guard the second call would blacklist the
+  // entry point we just rotated TO, i.e. the healthy one.
+  if (observedGen != null && observedGen !== epGen()) return true;
   if (endpointAuthProved) return false;
   if (serverCfg.endpoints.length < 2) return false;
   const sel = selector();
   sel.markUnusable(API_BASE, "foreignIsland");
   swarn("entry point rejected our session, blacklisting", { apiBase: API_BASE });
   broadcastToPanels({ type: "endpoint_foreign", api_base: API_BASE });
-  const r = await sel.reportFailure("rotate", sel.epGen());
+  // force: the cooldown from the rotation that just landed us here must not
+  // pin us to an entry point that will never accept this session.
+  const r = await sel.reportFailure("rotate", sel.epGen(), { force: true });
   if (r && r.rotated) {
     await applyEndpointRotation(r, "foreign-island");
     return true;
@@ -1176,6 +1182,7 @@ function scheduleTokenRefresh(accessToken) {
 async function doRefresh() {
   if (_refreshing) return;
   _refreshing = true;
+  const dialEpGen = epGen();
 
   try {
     if (!wsState.refreshToken) {
@@ -1191,7 +1198,11 @@ async function doRefresh() {
 
     if (!resp.ok) {
       if (resp.status === 401) {
-        await handleSessionExpired();
+        // A 401 on the refresh is the last step before the session is
+        // destroyed, so the foreign-island check has to happen here too: an
+        // entry point that 401s everything (a mistyped address leading to a
+        // different instance) would otherwise take a valid session with it.
+        if (!(await handleForeignIslandOn401(dialEpGen))) await handleSessionExpired();
       } else {
         // Transient error, retry in 10s
         _refreshTimer = setTimeout(() => doRefresh(), 10_000);
@@ -1224,6 +1235,7 @@ async function doRefresh() {
 // Returns true if tokens were refreshed (or became available due to another in-flight refresh).
 async function refreshNowOnce() {
 	console.warn("[refreshNowOnce] called");
+  const nowOnceEpGen = epGen();
   // Ensure we have latest auth state
   await ensureAuthLoaded();
 
@@ -1248,9 +1260,10 @@ async function refreshNowOnce() {
     });
 
     if (!resp.ok) {
-      // Refresh token invalid / reuse detected / etc.
+      // Refresh token invalid / reuse detected / etc. - or we are simply
+      // talking to a server that is not this island; see doRefresh above.
       if (resp.status === 401) {
-        await handleSessionExpired();
+        if (!(await handleForeignIslandOn401(nowOnceEpGen))) await handleSessionExpired();
       }
       return false;
     }
@@ -1832,7 +1845,7 @@ port.onMessage.addListener((msg) => {
         // different server that happens to run WS Messenger (a mistyped
         // address) — our token is simply unknown there. Blacklist it and go
         // back instead of treating a valid session as dead.
-        if (!refreshed) await handleForeignIslandOn401();
+        if (!refreshed) await handleForeignIslandOn401(dialEpGen);
       }
       if (r.ok && wsState.token) endpointAuthProved = true;
 

@@ -260,6 +260,22 @@ describe('createSelector', () => {
     expect(allowed.rotated).toBe(true);
   });
 
+  // A verdict that re-trying cannot change ("this entry point rejected our
+  // session") must not be pinned by the cooldown of the rotation that landed
+  // us there. It cannot storm: the entry point is blacklisted first.
+  it('lets a forced report bypass the cooldown', async () => {
+    const { sel } = make(['a.example', 'b.example', 'c.example'], () => Promise.resolve(true));
+    await sel.reportFailure('rotate', 0);
+    expect(sel.activeIndex()).toBe(1);
+
+    sel.markUnusable('https://b.example', 'foreignIsland');
+    const forced = await sel.reportFailure('rotate', sel.epGen(), { force: true });
+    expect(forced.rotated).toBe(true);
+    // Back to the preferred entry point, not merely the next one in the list.
+    expect(sel.activeEndpoint().apiBase).toBe('https://a.example');
+    expect(sel.isUnusable('https://b.example')).toBe('foreignIsland');
+  });
+
   it('reports exhaustion with a growing backoff and never moves or clears anything', async () => {
     const { sel } = make(['a.example', 'b.example'], () => Promise.resolve(false));
 

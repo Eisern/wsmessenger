@@ -340,7 +340,11 @@
       },
 
       // kind: 'rotate' | 'strike' | 'ignore' (the caller classifies first).
-      reportFailure: function (kind, observedGen) {
+      // opts.force skips the cooldown — for verdicts that re-trying cannot
+      // change, such as "this entry point rejected our session". Those cannot
+      // storm either, because the entry point is blacklisted before the call.
+      reportFailure: function (kind, observedGen, opts) {
+        var force = !!(opts && opts.force);
         if (kind === "ignore" || !kind) return Promise.resolve({ rotated: false, ignored: true });
 
         // Stale report: it describes an entry point we already left. Three
@@ -358,7 +362,7 @@
         }
 
         let since = now() - lastRotateTs;
-        if (lastRotateTs && since < ROTATE_COOLDOWN_MS) {
+        if (!force && lastRotateTs && since < ROTATE_COOLDOWN_MS) {
           return Promise.resolve({ rotated: false, cooldown: true, retryAfterMs: ROTATE_COOLDOWN_MS - since });
         }
         if (!candidates().length) {

@@ -10,7 +10,8 @@
     "start": "react-native start",
     "test": "jest",
     "test:crypto": "jest src/crypto --verbose",
-    "keygen": "keytool -genkeypair -v -storetype PKCS12 -keystore android/app/release.keystore -alias wsapp -keyalg RSA -keysize 2048 -validity 10000"
+    "keygen": "keytool -genkeypair -v -storetype PKCS12 -keystore android/app/release.keystore -alias wsapp -keyalg RSA -keysize 2048 -validity 10000",
+    "test:failover": "jest --selectProjects integration --runInBand --forceExit"
   },
   "dependencies": {
     "@noble/curves": "^2.0.1",
