@@ -54,6 +54,35 @@ describe('island-list.js parity between the two clients', () => {
   });
 });
 
+const OB_ANDROID = path.join(__dirname, '..', 'outbox.js');
+const OB_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'outbox.js');
+
+describe('outbox.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(OB_ANDROID)).toBe(true);
+    expect(fs.existsSync(OB_EXTENSION)).toBe(true);
+    expect(normalized(OB_ANDROID)).toBe(normalized(OB_EXTENSION));
+  });
+
+  it('both copies classify send outcomes identically', () => {
+    const a = require('../outbox');
+    const vm = require('vm');
+    const sandbox = { console, JSON, Date };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(OB_EXTENSION, 'utf8'), sandbox, { filename: 'outbox.js' });
+    const b = sandbox.WSOutbox;
+    expect(b).toBeTruthy();
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+
+    // Getting 409 wrong in one client only would either lose messages or
+    // deliver them twice, depending on which way it drifted.
+    const cases = [{ ok: true }, { status: 409 }, { status: 0 }, { status: 403 },
+                   { status: 400 }, { status: 503 }, { name: 'TypeError' }];
+    for (const c of cases) expect(a.classifySendOutcome(c)).toBe(b.classifySendOutcome(c));
+  });
+});
+
 describe('endpoints.js parity between the two clients', () => {
   it('both copies exist', () => {
     expect(fs.existsSync(ANDROID_PATH)).toBe(true);
