@@ -2515,6 +2515,46 @@ function addKeyChangeWarnings(usernames) {
   }
 }
 
+/**
+ * Shown when a message cannot be decrypted.
+ *
+ * The point is that this is NOT the same as "someone sent odd text". AES-GCM
+ * fails closed: a message that does not decrypt was either encrypted with a key
+ * we do not have, or its bytes were altered after the sender sealed them. The
+ * previous behaviour rendered the raw ciphertext JSON as if it were the message
+ * body, which made an integrity failure indistinguishable from noise - and left
+ * the only real signal in the console. Android already marks these; this brings
+ * the extension in line.
+ */
+function addDecryptFailWarning(fromUser) {
+  if (!chat) return;
+  lastMsgAuthor = "";
+  const banner = document.createElement("div");
+  banner.style.cssText = `
+    margin: 6px 8px;
+    padding: 8px 12px;
+    background: #3a2a0a;
+    border: 1px solid #c07a2b;
+    border-radius: 8px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    color: #e7a74c;
+    line-height: 1.4;
+  `;
+  const icon = document.createElement("span");
+  icon.textContent = "⚠";
+  icon.style.cssText = "font-size: 15px; flex-shrink: 0; margin-top: 1px;";
+  banner.appendChild(icon);
+  const textWrap = document.createElement("div");
+  textWrap.textContent =
+    `A message${fromUser ? ` from "${fromUser}"` : ""} could not be decrypted. ` +
+    "It may have been altered in storage, or it was encrypted with a key this device does not have.";
+  banner.appendChild(textWrap);
+  chat.appendChild(banner);
+}
+
 function addSigFailWarning(fromUser) {
   if (!chat) return;
   lastMsgAuthor = "";

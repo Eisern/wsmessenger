@@ -2558,7 +2558,14 @@ if (msg.type === "dm_history_res") {
         }
       }
     } catch (e) {
+      // A message that does not decrypt was either sealed with a key we do not
+      // have, or its bytes were altered after the sender sealed them. Rendering
+      // `text` here would put the raw ciphertext JSON in the conversation as if
+      // it were the message body, which hides an integrity failure behind what
+      // looks like noise.
       console.warn("DM decrypt failed (history):", e);
+      if (typeof addDecryptFailWarning === "function") addDecryptFailWarning(user || activeDmPeer);
+      continue;
     }
 
     // sealed-sender часто не даёт username -> используем peer треда
@@ -2623,7 +2630,10 @@ if (msg.type === "dm_message") {
         }
       }
     } catch (e) {
+      // See the history path: never render undecryptable bytes as message text.
       console.warn("DM decrypt failed (live):", e);
+      if (typeof addDecryptFailWarning === "function") addDecryptFailWarning(user || activeDmPeer);
+      return;
     }
     if (!user) user = activeDmPeer || "unknown";
     const msgTs = msg.ts || Date.now();

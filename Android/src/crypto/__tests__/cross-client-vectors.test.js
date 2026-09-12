@@ -87,6 +87,9 @@ const V = {
   ed25519Pub: '8070f93cd4bd6badc92dfab631fd390e2d976725cd49db539e9b2abdad22132f',
   ed25519Sig: 'ZjzuK99luiHyd2QNT9qtamPRBLcwT8-6DToCH8663m60hZOK121Vrko0AQ1VT5qhlOQI9s94jSV-7MqN8eIeDg',
 
+  dmSigMessageV2: '77732d646d2d7369672d76320000002a00000007' + 'aa'.repeat(32) + '0005616c69636568656c6c6f20776f726c64',
+  dmSigMessageV2Genesis: '77732d646d2d7369672d7632000000010000000100000000000000000000000000000000000000000000000000000000000000000000',
+
   padBucket1: 64,
   padBucket100: 128,
   stableJson: '{"a":[2,{"c":3,"d":4}],"b":1}',
@@ -106,6 +109,10 @@ const CASES = [
   ['_dmSigMessage', async (U) => hex(await U._dmSigMessage(42, 'alice', 'hello world')), V.dmSigMessage],
   ['_dmSigMessage (empty)', async (U) => hex(await U._dmSigMessage(0, '', '')), V.dmSigMessageEmpty],
   ['_dmSigMessage (unicode, max thread id)', async (U) => hex(await U._dmSigMessage(4294967295, 'ЖУК', 'ключ ⚡')), V.dmSigMessageUnicode],
+  // v2 binds the message to its place in the sender's chain. v1 above stays
+  // pinned forever: history signed before v2 existed must remain verifiable.
+  ['_dmSigMessageV2', async (U) => hex(await U._dmSigMessageV2(42, 7, 'aa'.repeat(32), 'alice', 'hello world')), V.dmSigMessageV2],
+  ['_dmSigMessageV2 (genesis)', async (U) => hex(await U._dmSigMessageV2(1, 1, '00'.repeat(32), '', '')), V.dmSigMessageV2Genesis],
   ['bip39Encode', async (U) => U.bip39Encode(PRIV), V.bip39],
   ['deriveEd25519Seed', async (U) => hex(await U.deriveEd25519Seed(PRIV)), V.deriveEd25519Seed],
   ['deriveRecoveryAuth', async (U) => hex(await U.deriveRecoveryAuth(PRIV)), V.deriveRecoveryAuth],

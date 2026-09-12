@@ -1025,6 +1025,44 @@ const CryptoUtils = {
    * @param {string} body  — plaintext message body
    * @returns {Uint8Array}
    */
+  /**
+   * Signed bytes, v2 — binds a message to its PLACE in the sender's chain.
+   *
+   *   "ws-dm-sig-v2" (12) | uint32BE threadId | uint32BE seq | prev (32)
+   *                       | uint16BE len(from) | from | body
+   *
+   * v1 below covers (threadId, from, body) and nothing else, which leaves the
+   * position unprotected: whoever holds the database can drop a message, or
+   * move a genuine one next to a different question, and every signature still
+   * verifies. `seq` and `prev` close that, and they are inside the signature
+   * precisely so the server cannot adjust them.
+   *
+   * v1 is kept forever: history signed before this existed must stay
+   * verifiable. Both are pinned in the cross-client vectors.
+   */
+  _dmSigMessageV2(threadId, seq, prevHex, from, body) {
+    const prefix    = new TextEncoder().encode('ws-dm-sig-v2'); // 12 bytes
+    const fromBytes = new TextEncoder().encode(String(from || ''));
+    const bodyBytes = new TextEncoder().encode(String(body || ''));
+
+    const hex = String(prevHex || '');
+    if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error('_dmSigMessageV2: prev must be 32 bytes of lowercase hex');
+    const prev = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) prev[i] = parseInt(hex.substr(i * 2, 2), 16);
+
+    const buf = new Uint8Array(12 + 4 + 4 + 32 + 2 + fromBytes.length + bodyBytes.length);
+    const dv  = new DataView(buf.buffer);
+    let off = 0;
+    buf.set(prefix, off);                          off += 12;
+    dv.setUint32(off, (parseInt(threadId, 10) >>> 0), false); off += 4;
+    dv.setUint32(off, (parseInt(seq, 10) >>> 0), false);      off += 4;
+    buf.set(prev, off);                            off += 32;
+    dv.setUint16(off, fromBytes.length, false);    off += 2;
+    buf.set(fromBytes, off);                       off += fromBytes.length;
+    buf.set(bodyBytes, off);
+    return buf;
+  },
+
   _dmSigMessage(threadId, from, body) {
     const enc = new TextEncoder();
     const domainB = enc.encode('ws-dm-sig-v1');   // 12 bytes exactly

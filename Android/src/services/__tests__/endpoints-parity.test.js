@@ -57,6 +57,47 @@ describe('island-list.js parity between the two clients', () => {
 const OB_ANDROID = path.join(__dirname, '..', 'outbox.js');
 const OB_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'outbox.js');
 
+const TC_ANDROID = path.join(__dirname, '..', 'thread-chain.js');
+const TC_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'thread-chain.js');
+
+describe('thread-chain.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(TC_ANDROID)).toBe(true);
+    expect(fs.existsSync(TC_EXTENSION)).toBe(true);
+    expect(normalized(TC_ANDROID)).toBe(normalized(TC_EXTENSION));
+  });
+
+  it('both copies reach the same verdicts', () => {
+    const a = require('../thread-chain');
+    const vm = require('vm');
+    const sandbox = { console, JSON, Date };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(TC_EXTENSION, 'utf8'), sandbox, { filename: 'thread-chain.js' });
+    const b = sandbox.WSThreadChain;
+    expect(b).toBeTruthy();
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+
+    const sha256 = () => new Uint8Array(32).fill(7);
+    const ca = a.createThreadChain({ sha256 });
+    const cb = b.createThreadChain({ sha256 });
+    const H = (n) => String(n).repeat(64).slice(0, 64).replace(/[^0-9a-f]/g, '0');
+
+    // One client calling a reordering a gap while the other calls it a break
+    // would mean the two show a user different things about the same history.
+    const cases = [
+      [{ seq: 0, hash: a.GENESIS_HEX }, { seq: 1, prev: a.GENESIS_HEX, link: H(1) }],
+      [{ seq: 1, hash: H(1) }, { seq: 3, prev: H(2), link: H(3) }],
+      [{ seq: 1, hash: H(1) }, { seq: 2, prev: H(9), link: H(2) }],
+      [{ seq: 5, hash: H(5) }, { seq: 2, prev: H(1), link: H(2) }],
+      [{ seq: 1, hash: H(1) }, { seq: 'x', prev: 'nope', link: null }],
+    ];
+    for (const [state, msg] of cases) {
+      expect(ca.accept(state, msg).verdict).toBe(cb.accept(state, msg).verdict);
+    }
+  });
+});
+
 describe('outbox.js parity between the two clients', () => {
   it('both copies exist and are identical', () => {
     expect(fs.existsSync(OB_ANDROID)).toBe(true);
