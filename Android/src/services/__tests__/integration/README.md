@@ -159,3 +159,50 @@ PY
 The list also republishes the relay transport key, and a test asserts it matches
 what `/relay/key` serves — the development endpoint and the signed document must
 not drift apart, because only the signed one may be trusted.
+
+---
+
+# Two independent islands
+
+`twoIslands.test.js` runs against **two** islands in two containers: two
+processes, two databases, two JWT secrets, two island signing keys, two relay
+transport keys. Run with `npm run test:two-islands`.
+
+That distinction is the point. The foreign-island guard - the highest-risk item
+in the entry-point work - was previously exercised against a proxy that returned
+401 on command, which proves the client copes with a 401, not that it copes with
+a different server.
+
+Cross-island direct messaging is designed but not implemented, so nothing here
+sends a message between users of the two islands.
+
+## Bringing up the second island
+
+Clone the working container rather than building one: it already has the venv.
+
+```sh
+docker commit wsapp-test wsapp-island-b:latest
+docker run -d --name wsapp-island-b -p 8001:8000 wsapp-island-b:latest sleep infinity
+docker exec wsapp-island-b bash -lc 'service postgresql start'
+```
+
+It is a clone, so it holds island A's accounts. An independent island must not:
+recreate the database empty.
+
+```sh
+docker exec wsapp-island-b bash -lc '
+  su postgres -c "psql -c \"DROP DATABASE IF EXISTS wsapp;\"" &&
+  su postgres -c "psql -c \"CREATE DATABASE wsapp OWNER wsapp;\"" &&
+  su postgres -c "psql -d wsapp -f /opt/src/server/schema.sql"'
+```
+
+Then give it its own secrets in `server/.env` - a **different** `JWT_SECRET`
+above all, or a token from A would still be accepted and the foreign-island test
+would pass for the wrong reason - plus `ISLAND_ID=island-b`, its own
+`ISLAND_SIGNING_KEY_B64`, its own `RELAY_TRANSPORT_KEY_B64` and its own
+`RELAY_PEERS` key. Start uvicorn the same way as on island A.
+
+Point the relay at both by listing them in `relay.config.json`, each with the
+key that island expects. The relay reads its config once at import, so restart
+it after editing - and kill it by port, since it is easy to leave the old
+process holding the socket with the old config.
