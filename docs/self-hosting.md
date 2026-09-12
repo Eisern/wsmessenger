@@ -323,6 +323,104 @@ sudo certbot --nginx -d messenger.example.com
 Certbot will modify the config to point at the issued cert and install
 a renewal timer.
 
+### 8.1. Several domains for one server
+
+Both clients keep an **ordered list of entry points** for your server and move
+to the next one when the current one stops answering — without dropping the
+session, because every entry point reaches the same backend and the same
+database. Several names for one server is therefore the cheapest protection
+against a domain-level block, and it costs one certificate.
+
+Put every name on the same `server_name` line and issue one multi-SAN cert:
+
+```nginx
+server_name messenger.example.com mirror.example.net;
+```
+
+```sh
+sudo certbot --nginx -d messenger.example.com -d mirror.example.net
+```
+
+`scripts/bootstrap.sh` does this for you with `WSAPP_EXTRA_DOMAINS`:
+
+```sh
+sudo WSAPP_DOMAIN=messenger.example.com \
+     WSAPP_EXTRA_DOMAINS=mirror.example.net \
+     WSAPP_LETSENCRYPT_EMAIL=admin@example.com \
+     bash scripts/bootstrap.sh
+```
+
+Two things to keep straight:
+
+- **`APP_BASE_URL` stays single and canonical.** It feeds the CSP of the pages
+  the server renders itself (the admin panel) and the absolute room-logo URL.
+- **`CORS_ORIGINS` must list every name** (`https://a,https://b`). The two
+  shipped clients pass the origin check by prefix (`chrome-extension://`,
+  `react-native://`) and do not need it, but the admin panel and any
+  browser-based client do.
+
+The WebSocket location block is regex-matched on the path, so it covers all
+names automatically — but re-read the warning above about `/ws`, `/ws-dm` and
+`/ws-notify`: with several names it is even easier to ship a half-copied config.
+
+### 8.2. Volunteer bridges (planned, not implemented yet)
+
+The next step beyond your own domains is an entry point held by someone else:
+a small VPS that forwards raw TCP to your server. Nothing in the clients needs
+to change for it — a bridge is just another address in the list — but the
+deployment has two traps worth writing down before anyone tries it.
+
+**The bridge must not terminate TLS.** If it does, it sees the plaintext of
+every request, including `Authorization: Bearer …`. That is not a metadata
+leak, it is account takeover; message *contents* stay safe (they are E2EE) and
+nothing else does. A bridge does TCP passthrough (`nginx stream`, or socat) and
+never holds a private key. The certificate for the bridge's own name is issued
+by **your** server, with the volunteer delegating
+`_acme-challenge.bridge.volunteer.net` by CNAME to your ACME account.
+
+**Real client IPs need PROXY protocol v2.** Under passthrough your nginx sees
+the bridge's IP as `$remote_addr` for every user coming through it, and the
+rate limiter is keyed by IP (`ws:connect:ip:…`, `uddm:msg:ip:…`, in-process, in
+`server/main.py`). Without PROXY protocol every user of one bridge shares one
+bucket, so a single busy user rate-limits all the others — and one ban by IP
+hits everyone on that bridge.
+
+On the bridge:
+
+```nginx
+# /etc/nginx/nginx.conf — `stream` is a top-level block, a sibling of `http`,
+# so it cannot live in sites-available/.
+stream {
+    server {
+        listen 443;
+        proxy_pass island.example.com:8443;
+        proxy_protocol on;
+    }
+}
+```
+
+On your server:
+
+```nginx
+server {
+    listen 8443 ssl proxy_protocol;      # bridged traffic only
+    set_real_ip_from 203.0.113.7;        # the bridge, and nothing else
+    real_ip_header proxy_protocol;
+    # …the rest identical to the 443 block…
+}
+```
+
+**The trap:** `proxy_protocol` on a listener makes the PROXY header
+*mandatory* there, so direct browser connections to that port break. Keep `443`
+plain for direct clients and give bridged traffic its own port, as above. And
+`set_real_ip_from` must name the bridges explicitly — a wildcard there lets
+anyone spoof any client IP.
+
+The trade-off is deliberate: with PROXY protocol your server learns the real
+client IP (the bridge is not an anonymizer), and in exchange rate limits and
+bans keep working per user. Without it the bridge hides client IPs from you and
+becomes a lever for denial of service against its own users.
+
 ---
 
 ## 9. Create the first admin
@@ -380,10 +478,23 @@ inserting a row into `admin_users`.
 
 No edit and no reload required. On the login screen open **"Connect to
 another server"**, enter your API base (`https://messenger.example.com`),
-and press **Save**. The extension asks Chrome for permission to talk to
-that origin, stores the choice in `chrome.storage.local` under
-`server_config`, and every later request follows it. **Test** checks
-`/health` before you commit to it.
+press **Add**, then **Save**. The extension asks Chrome for permission to talk
+to that origin, stores the choice in `chrome.storage.local` under
+`server_config`, and every later request follows it. **Test all** checks
+`/health` on each address before you commit to them.
+
+If your server has several addresses (§8.1), add them all — the list is
+ordered, the first one is preferred, and the extension moves down it when one
+stops answering. A failover between addresses of the same server keeps you
+logged in and keeps the open room and DM working; only pointing the client at a
+genuinely different server (no address in common with the previous list) tears
+the session down.
+
+**Add every address in one go.** Chrome only grants host permissions in
+response to a click, so the permission dialog you get when pressing **Save**
+covers exactly the addresses in the list at that moment. An address added later
+cannot be granted in the background, and the extension will skip it and show a
+banner asking you to press **Save** again.
 
 Your backend must be reachable over **HTTPS**. The extension's content
 security policy permits only `https:` and `wss:`, and its
@@ -411,8 +522,14 @@ grep -rn "imagine-1-ws.xyz\|chat-room.work" background.js login.js panel.js mani
 ### Android
 
 No rebuild required. On the Login screen tap **"Connect to another
-server"** and enter `https://messenger.example.com`. The URL is saved
-per-device.
+server"**, enter `https://messenger.example.com`, tap **+**, then **Save**.
+The list is saved per-device and is also reachable later from
+**Profile → Server**.
+
+As in the extension, the list is ordered and the app fails over down it without
+losing the session; **Test all** probes every address. There are no certificate
+pins, so any address with a certificate from a public CA works — including one
+added after the APK was built.
 
 ---
 

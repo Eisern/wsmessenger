@@ -16,6 +16,11 @@
 #          bash scripts/bootstrap.sh
 #
 # Other env vars (all optional):
+#     WSAPP_EXTRA_DOMAINS     more domains for THIS backend, comma-separated.
+#                             Clients keep an ordered list of entry points and
+#                             fail over between them without losing the session;
+#                             all names go on one multi-SAN certificate.
+#                             (e.g. "mirror.example.com,alt.example.net")
 #     WSAPP_USER              service account name       (default: wsapp)
 #     WSAPP_INSTALL_DIR       source checkout path       (default: /home/wsapp/wsmessenger)
 #     WSAPP_UPLOAD_DIR        media storage path         (default: /var/lib/wsapp/uploads)
@@ -68,6 +73,30 @@ if [[ -z "${WSAPP_DOMAIN}" ]]; then
     echo "error: WSAPP_DOMAIN is required." >&2
     exit 1
 fi
+
+# Additional domains pointing at this same backend (comma-separated, optional).
+# Clients keep an ordered list of entry points and fail over between them
+# without losing the session, so several names for one island are the cheapest
+# defence against a domain-level block. All names end up on ONE certificate.
+WSAPP_EXTRA_DOMAINS="${WSAPP_EXTRA_DOMAINS:-}"
+WSAPP_ALL_DOMAINS="${WSAPP_DOMAIN}"
+if [[ -n "${WSAPP_EXTRA_DOMAINS}" ]]; then
+    WSAPP_ALL_DOMAINS="${WSAPP_DOMAIN},${WSAPP_EXTRA_DOMAINS}"
+fi
+# Three forms of the same list: nginx server_name (space-separated),
+# CORS_ORIGINS (comma-separated origins) and certbot flags.
+WSAPP_SERVER_NAMES=""
+WSAPP_CORS_ORIGINS=""
+WSAPP_CERTBOT_DOMAINS=()
+IFS=',' read -ra _wsapp_domain_list <<< "${WSAPP_ALL_DOMAINS}"
+for _d in "${_wsapp_domain_list[@]}"; do
+    _d="$(echo -n "${_d}" | tr -d '[:space:]')"
+    [[ -z "${_d}" ]] && continue
+    WSAPP_SERVER_NAMES+="${WSAPP_SERVER_NAMES:+ }${_d}"
+    WSAPP_CORS_ORIGINS+="${WSAPP_CORS_ORIGINS:+,}https://${_d}"
+    WSAPP_CERTBOT_DOMAINS+=(-d "${_d}")
+done
+unset _d _wsapp_domain_list
 
 if [[ "${WSAPP_SKIP_CERTBOT}" != "1" && -z "${WSAPP_LETSENCRYPT_EMAIL:-}" ]]; then
     read -rp "Email for Let's Encrypt notices: " WSAPP_LETSENCRYPT_EMAIL
@@ -192,7 +221,10 @@ else
         "postgresql+asyncpg://${WSAPP_DB_USER}:${DB_PASS}@127.0.0.1:5432/${WSAPP_DB_NAME}"
     set_env_var JWT_SECRET          "${JWT_SECRET}"
     set_env_var APP_BASE_URL        "https://${WSAPP_DOMAIN}"
-    set_env_var CORS_ORIGINS        "https://${WSAPP_DOMAIN}"
+    # APP_BASE_URL stays single and canonical: it feeds the CSP of the pages the
+    # server renders itself (the admin panel) and the absolute room-logo URL.
+    # CORS_ORIGINS must list every entry point, for browser-based clients.
+    set_env_var CORS_ORIGINS        "${WSAPP_CORS_ORIGINS}"
     set_env_var ENV                 "prod"
     set_env_var UPLOAD_DIR          "${WSAPP_UPLOAD_DIR}"
     set_env_var TRUST_PROXY_HEADERS "1"
@@ -262,7 +294,7 @@ map \$http_upgrade \$connection_upgrade {
 
 server {
     listen 80;
-    server_name ${WSAPP_DOMAIN};
+    server_name ${WSAPP_SERVER_NAMES};
 
     # Uploads: backend caps at 100 MiB; give nginx some headroom.
     client_max_body_size 110m;
@@ -305,10 +337,11 @@ systemctl reload nginx
 # 8. TLS via Let's Encrypt
 # ---------------------------------------------------------------------------
 if [[ "${WSAPP_SKIP_CERTBOT}" != "1" ]]; then
-    log "Issuing Let's Encrypt certificate for ${WSAPP_DOMAIN}"
+    log "Issuing Let's Encrypt certificate for ${WSAPP_SERVER_NAMES}"
+    # One multi-SAN certificate covering every entry point of this island.
     certbot --nginx --non-interactive --agree-tos \
         --email "${WSAPP_LETSENCRYPT_EMAIL}" \
-        -d "${WSAPP_DOMAIN}" \
+        "${WSAPP_CERTBOT_DOMAINS[@]}" \
         --redirect
 else
     warn "WSAPP_SKIP_CERTBOT=1 — nginx is serving plain HTTP only. Clients require HTTPS."
@@ -337,6 +370,7 @@ cat <<EOF
  WS Messenger backend bootstrapped.
 
    Public URL:  ${PROTO}://${WSAPP_DOMAIN}
+   Entry points: ${WSAPP_SERVER_NAMES}
    Admin panel: ${PROTO}://${WSAPP_DOMAIN}/admin/
    Config:      ${ENV_FILE}     (mode 600, owner ${WSAPP_USER})
    Uploads:     ${WSAPP_UPLOAD_DIR}
