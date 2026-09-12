@@ -114,7 +114,8 @@ const _roomKeyLocks = new Map(); // roomId -> Promise (prevent concurrent key op
 
 // Ed25519 signing state (derived from X25519 private key on every unlock)
 let _ed25519Seed = null;                  // Uint8Array(32) | null — cleared on lock
-const _ed25519PubKeyCache = new Map();    // username_lower → Uint8Array(32) | null
+const _ed25519PubKeyCache = new Map();    // username_lower → { key: Uint8Array(32)|null, ts }
+const _ED25519_ABSENT_TTL_MS = 5 * 60 * 1000;
 
 // ==============================
 // Public API
@@ -822,12 +823,23 @@ const CryptoService = {
           const sigMsg = CryptoUtils._dmSigMessage(threadId, myUsername, text);
           envelopeObj.sig = CryptoUtils.ed25519Sign(_ed25519Seed, sigMsg);
         } catch (sigErr) {
-          console.warn('[CryptoService] Ed25519 sign failed, sending without sig:', sigErr?.message);
+          // Having a seed and failing to sign with it is not a normal
+          // condition; the "no signing key" case never reaches here, it is the
+          // guard above. Sending unsigned anyway downgraded authenticity where
+          // only the recipient could notice, as a quiet "unverified" marker.
+          console.warn('[CryptoService] Ed25519 sign failed:', sigErr?.message);
+          const err = new Error('Could not sign this message. Nothing was sent — unlock and try again.');
+          err.signingFailed = true;
+          throw err;
         }
       }
       return await cryptoManager.encryptMessage(rid, JSON.stringify(envelopeObj));
-    } catch (_e) {
-      console.warn('[CryptoService] encryptDm error:', _e?.message);
+    } catch (e) {
+      // A signing failure must reach the sender: returning null here would put
+      // it in the same bucket as "key not ready", and the UI would report a
+      // generic send error for what is an authenticity downgrade.
+      if (e?.signingFailed) throw e;
+      console.warn('[CryptoService] encryptDm error:', e?.message);
       return null;
     }
   },
@@ -1218,14 +1230,23 @@ const CryptoService = {
   async _fetchPeerEd25519PubKey(username) {
     const lower = (username || '').toLowerCase();
     if (!lower) return null;
-    if (_ed25519PubKeyCache.has(lower)) return _ed25519PubKeyCache.get(lower);
+
+    const cached = _ed25519PubKeyCache.get(lower);
+    if (cached) {
+      if (cached.key) return cached.key;
+      // "No key" is a real answer, but only for a while: the peer may register
+      // one at any moment, and a stale negative silently downgrades every DM
+      // from them to unverified for the rest of the session.
+      if (Date.now() - cached.ts < _ED25519_ABSENT_TTL_MS) return null;
+    }
+
     try {
       const data = await NetworkService.fetchPeerKey(username);
-      const b64 = data?.ed25519_public_key;
-      if (!b64) { _ed25519PubKeyCache.set(lower, null); return null; }
-      const bytes = new Uint8Array(CryptoUtils.base64ToArrayBuffer(b64));
-      const pubKey = bytes.length === 32 ? bytes : null;
-      _ed25519PubKeyCache.set(lower, pubKey);
+      if (!data) return null;                     // a failed request is not an answer
+      const b64 = data.ed25519_public_key;
+      const bytes = b64 ? new Uint8Array(CryptoUtils.base64ToArrayBuffer(b64)) : null;
+      const pubKey = bytes && bytes.length === 32 ? bytes : null;
+      _ed25519PubKeyCache.set(lower, { key: pubKey, ts: Date.now() });
       return pubKey;
     } catch (_e) {
       return null;
@@ -1576,6 +1597,18 @@ async function _checkPeerKeyChanged(peerUsername, { force = false, peerPublicKey
       // Same key — clear any stale :changed flag
       try { await StorageService.removeKeyChanged(me, peer); } catch (_e) {}
       return { changed: false, username: peer };
+    }
+
+    // Silent migration from the legacy fingerprint format. Every pin written
+    // by an older build hashed the base64 text rather than the key bytes; if
+    // the stored value is the legacy hash of THIS key, nothing changed but the
+    // format. Alerting here would cry wolf for every existing contact at once,
+    // which is the fastest way to teach users to ignore the warning.
+    const legacyFp = await CryptoUtils._fingerprintPublicKeyLegacy(peerPub);
+    if (knownFp === legacyFp) {
+      await StorageService.setKnownFingerprint(me, peer, peerFp);
+      try { await StorageService.removeKeyChanged(me, peer); } catch (_e) {}
+      return { changed: false, username: peer, migrated: true };
     }
 
     // *** KEY CHANGED ***

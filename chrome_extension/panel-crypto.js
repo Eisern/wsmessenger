@@ -169,7 +169,7 @@ async function ensureEd25519KeyRegistered() {
     });
     if (r.ok) {
       const username = await resolveActiveUsername();
-      if (username) _ed25519PubKeyCache.set(username, pubKey);
+      if (username) _ed25519PubKeyCache.set(username, { key: pubKey, ts: Date.now() });
       console.log("Ed25519 signing key registered");
     }
   } catch (e) {
@@ -178,18 +178,33 @@ async function ensureEd25519KeyRegistered() {
 }
 
 /** Fetch and cache peer's Ed25519 public key. Returns Uint8Array or null if none. */
+// "This peer has no Ed25519 key" is a real answer worth remembering, but only
+// briefly: the peer may register one at any moment, and a stale negative
+// silently downgrades every DM from them to unverified.
+const ED25519_ABSENT_TTL_MS = 5 * 60 * 1000;
+
 async function fetchPeerEd25519PubKey(username) {
-  if (_ed25519PubKeyCache.has(username)) return _ed25519PubKeyCache.get(username);
+  const cached = _ed25519PubKeyCache.get(username);
+  if (cached) {
+    if (cached.key) return cached.key;
+    if (Date.now() - cached.ts < ED25519_ABSENT_TTL_MS) return null;
+  }
   const token = await requestToken().catch(() => null);
   if (!token) return null;
   try {
     const r = await fetch(API_BASE + `/keys/${encodeURIComponent(username)}`, {
       headers: { "Authorization": "Bearer " + token },
     });
-    const body = await r.json().catch(() => ({}));
+    // A failed request is NOT an answer. This used to cache the resulting null,
+    // so one bad response disabled DM signature verification for the rest of
+    // the session — degrading the check silently, and precisely when the
+    // network was unreliable.
+    if (!r.ok) return null;
+    const body = await r.json().catch(() => null);
+    if (!body) return null;
     const b64 = String(body.ed25519_public_key || "").trim();
     const pubKey = b64 ? new Uint8Array(CU().base64ToArrayBuffer(b64)) : null;
-    _ed25519PubKeyCache.set(username, pubKey);
+    _ed25519PubKeyCache.set(username, { key: pubKey, ts: Date.now() });
     return pubKey;
   } catch {
     return null;
@@ -1764,7 +1779,13 @@ async function encryptDm(threadId, plaintext, peerUsername) {
       const sigMsg = CU()._dmSigMessage(threadId, myUsername, plaintext);
       envelopeObj.sig = await CU().ed25519Sign(seed, sigMsg);
     } catch (e) {
+      // Having a seed and failing to sign with it is not a normal condition -
+      // the "peer has no signing key yet" case never reaches here, it is the
+      // `seed` guard above. Swallowing this sent the message unsigned, and the
+      // only person who could have noticed was the recipient, as a quiet
+      // "unverified" marker. Fail loudly instead: the sender gets to decide.
       console.warn("DM Ed25519 sign failed:", e?.message || e);
+      throw new Error("Could not sign this message. Nothing was sent - unlock and try again.");
     }
   }
 

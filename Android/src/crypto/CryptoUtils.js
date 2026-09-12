@@ -744,7 +744,34 @@ const CryptoUtils = {
     return groups.join(' ');
   },
 
+  /**
+   * Fingerprint of a public KEY — the hash of the 32 raw key bytes.
+   *
+   * This used to hash the base64 TEXT instead, which made the same key produce
+   * a different fingerprint here than in the extension. The fingerprint is
+   * shown to the user, so comparing it between a phone and a browser compared
+   * two unrelated numbers. Pinned in
+   * src/crypto/__tests__/cross-client-vectors.test.js; do not change without a
+   * migration on both sides.
+   */
   async fingerprintPublicKey(publicKeyB64) {
+    const normalized = String(publicKeyB64 || '').trim();
+    const rawBytes = new Uint8Array(CryptoUtils.base64ToArrayBuffer(normalized));
+    const hash = await crypto.subtle.digest('SHA-256', rawBytes);
+    const arr = new Uint8Array(hash);
+    let hex = '';
+    for (let i = 0; i < 16; i++) {
+      hex += arr[i].toString(16).padStart(2, '0');
+    }
+    return hex;
+  },
+
+  /**
+   * The old (bugged) form, kept for one purpose only: telling a fingerprint
+   * stored by an older build apart from a genuine key change. Never use it to
+   * produce a new pin. Mirrors the extension's helper of the same name.
+   */
+  async _fingerprintPublicKeyLegacy(publicKeyB64) {
     const normalized = String(publicKeyB64 || '').trim();
     const bytes = new TextEncoder().encode(normalized);
     const hash = await crypto.subtle.digest('SHA-256', bytes);
