@@ -71,3 +71,47 @@ Worth knowing, because both produced a working-looking client:
    is generation-guarded, because one 401 reaches it twice (once from the
    request, once from the refresh) and the second call would otherwise
    blacklist the healthy entry point it had just rotated to.
+
+---
+
+# Relay prototype tests
+
+`relay.test.js` sends a direct message through a real relay process to the real
+island and asserts, among other things, that the relay is handed nothing it
+could correlate on. Run with `npm run test:relay`.
+
+## Extra setup
+
+**1. Island: enable relay ingress.** Generate a transport keypair and a shared
+key per relay (see `relay/README.md`), then in the container's `server/.env`:
+
+```
+RELAY_TRANSPORT_KEY_B64=<base64 x25519 private key>
+RELAY_PEERS='{"relay-alpha":"<base64 32-byte shared key>"}'
+```
+
+Single quotes matter: the file is sourced by a shell, which strips the double
+quotes and leaves invalid JSON. Restart uvicorn, then check:
+
+```sh
+curl -s http://127.0.0.1:8000/relay/key
+```
+
+**2. Relay: run one.** From `relay/`, with a config naming the island as
+`island-test` at `http://127.0.0.1:8000`:
+
+```sh
+RELAY_CONFIG=/path/to/relay.config.json python -m uvicorn relay:app \
+  --host 127.0.0.1 --port 18800
+```
+
+Override the endpoints with `RELAY_TEST_ISLAND` / `RELAY_TEST_RELAY` if you run
+them elsewhere.
+
+## A design bug these tests found
+
+The first version sealed only the *delivery* answer and returned errors in the
+clear. That let a relay tell "duplicate" from "delivered" by the status code —
+and, worse, forge a 409 so the client would stop retrying elsewhere. Every
+outcome after the envelope is opened is now sealed, and the outer HTTP status is
+always 200.

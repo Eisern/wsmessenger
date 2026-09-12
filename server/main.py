@@ -7264,21 +7264,44 @@ RL_UD_DM_MSG_IP_GLOBAL_PER_10S = 60
 
 @app.post("/ud/dm/send")
 async def ud_dm_send(payload: UdDmSendIn, request: Request):
+    """Direct path: the sender reached this island itself, so limit by its IP."""
+    return await accept_ud_dm(payload, {"kind": "ip", "ip": get_client_ip_request(request)})
+
+
+async def accept_ud_dm(payload: UdDmSendIn, source: dict):
+    """
+    Validate, de-duplicate and store one sealed DM.
+
+    `source` says how the request arrived, because that decides how it is rate
+    limited. A relayed message carries the relay's IP, so limiting by IP would
+    put every user of one relay into a single bucket - see
+    docs/internal/message-relay-assessment.md §7.7.
+    """
     thread_id = int(payload.thread_id)
     ts = int(payload.ts)
 
-    ip = get_client_ip_request(request)
-
 # rate limit unauth endpoint (critical)
+    if source.get("kind") == "relay":
+        # No usable client IP behind a relay: fall back to per-thread, which is
+        # tied to something an attacker cannot get cheaply (the delivery secret
+        # is only issued to a thread member), plus the per-relay quota already
+        # enforced at ingress.
+        retry = await rate_limiter.check(
+            f"uddm:msg:thread:{thread_id}", RL_UD_DM_MSG_IP_PER_10S, 10
+        )
+        if retry is not None:
+            raise HTTPException(status_code=429, detail=f"rate limited; retry_after={retry}")
+    else:
+        ip = source.get("ip") or "unknown"
 # 1) global per-IP (prevents bypass by rotating thread_id)
-    retry = await rate_limiter.check(f"uddm:msg:ip:{ip}", RL_UD_DM_MSG_IP_GLOBAL_PER_10S, 10)
-    if retry is not None:
-        raise HTTPException(status_code=429, detail=f"rate limited; retry_after={retry}")
+        retry = await rate_limiter.check(f"uddm:msg:ip:{ip}", RL_UD_DM_MSG_IP_GLOBAL_PER_10S, 10)
+        if retry is not None:
+            raise HTTPException(status_code=429, detail=f"rate limited; retry_after={retry}")
 
 # 2) per-IP+thread (protects a конкретный тред от долбёжки)
-    retry = await rate_limiter.check(f"uddm:msg:ip:{ip}:{thread_id}", RL_UD_DM_MSG_IP_PER_10S, 10)
-    if retry is not None:
-        raise HTTPException(status_code=429, detail=f"rate limited; retry_after={retry}")
+        retry = await rate_limiter.check(f"uddm:msg:ip:{ip}:{thread_id}", RL_UD_DM_MSG_IP_PER_10S, 10)
+        if retry is not None:
+            raise HTTPException(status_code=429, detail=f"rate limited; retry_after={retry}")
 
     now_ms = int(time.time() * 1000)
     if abs(now_ms - ts) > 5 * 60 * 1000:
@@ -7582,3 +7605,23 @@ async def feedback_send(
             mail_ok = False
 
     return {"ok": True, "mail": mail_ok, "stored": "db"}
+
+
+# =========================================================================
+# Relay ingress (optional)
+# =========================================================================
+# Mounted last, because the router is built around accept_ud_dm and the rate
+# limiter, both defined above. Disabled unless RELAY_TRANSPORT_KEY_B64 and
+# RELAY_PEERS are set, so an island that does not take relayed traffic carries
+# no extra surface at all.
+try:
+    from relay_ingress import build_router as _build_relay_router
+
+    app.include_router(
+        _build_relay_router(
+            accept_dm=lambda body, source: accept_ud_dm(UdDmSendIn(**body), source),
+            rate_limit=lambda key, limit, window: rate_limiter.check(key, limit, window),
+        )
+    )
+except Exception as _e:  # pragma: no cover - relay ingress is optional
+    logger.warning("relay ingress not mounted: %s", _e)
