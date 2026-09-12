@@ -19,6 +19,8 @@ import Clipboard from '@react-native-clipboard/clipboard';
 import NetworkService from './NetworkService';
 import StorageService from './StorageService';
 import { CryptoUtils, cryptoManager } from '../crypto';
+import TC from './thread-chain';
+import ChainStore from './chainStore';
 
 const { x25519 } = require('@noble/curves/ed25519');
 
@@ -114,6 +116,16 @@ const _roomKeyLocks = new Map(); // roomId -> Promise (prevent concurrent key op
 
 // Ed25519 signing state (derived from X25519 private key on every unlock)
 let _ed25519Seed = null;                  // Uint8Array(32) | null — cleared on lock
+// Emitting chained signatures is OFF until readers are deployed on both
+// clients. A reader that only knows v1 rejects a v2 signature outright, which
+// would show a forgery warning for an honest message. Flip this only after
+// both clients ship the reader that landed in a3f7d33.
+const CHAIN_WRITE_ENABLED = false;
+
+const _threadChain = TC.createThreadChain({
+  sha256: async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
+});
+
 const _ed25519PubKeyCache = new Map();    // username_lower → { key: Uint8Array(32)|null, ts }
 const _ED25519_ABSENT_TTL_MS = 5 * 60 * 1000;
 
@@ -818,10 +830,34 @@ const CryptoService = {
       const envelopeObj = { ss: 1, from: myUsername, body: text };
       // Sign the envelope so the recipient can verify the sender identity.
       // Signature covers (threadId, from, body) — prevents peer from forging `from`.
+      // With the chain enabled it also covers the message's place in this
+      // sender's run, so a message cannot be deleted or re-filed unnoticed.
       if (_ed25519Seed && myUsername) {
         try {
-          const sigMsg = CryptoUtils._dmSigMessage(threadId, myUsername, text);
+          let sigMsg;
+          let chained = null;
+          if (CHAIN_WRITE_ENABLED) {
+            const head = await ChainStore.get(threadId, 'out');
+            chained = { seq: head.seq + 1, prev: head.hash };
+            envelopeObj.sq = chained.seq;
+            envelopeObj.pv = chained.prev;
+            sigMsg = CryptoUtils._dmSigMessageV2(threadId, chained.seq, chained.prev, myUsername, text);
+          } else {
+            sigMsg = CryptoUtils._dmSigMessage(threadId, myUsername, text);
+          }
           envelopeObj.sig = CryptoUtils.ed25519Sign(_ed25519Seed, sigMsg);
+
+          if (chained) {
+            // Advance at signing time, not at delivery: a failed send is
+            // queued with this exact ciphertext and retried unchanged, so the
+            // seq it carries must already be spoken for. An abandoned send
+            // leaves a hole, which the peer reports as a GAP - the survivable
+            // verdict, not an accusation.
+            await ChainStore.set(threadId, 'out', {
+              seq: chained.seq,
+              hash: await _threadChain.linkFor(sigMsg),
+            });
+          }
         } catch (sigErr) {
           // Having a seed and failing to sign with it is not a normal
           // condition; the "no signing key" case never reaches here, it is the
@@ -899,6 +935,7 @@ const CryptoService = {
           // Verify Ed25519 signature when present.
           // sigValid: true = verified OK, false = bad sig (forgery), null = not checked.
           let sigValid = null;
+          let sigMsgBytes = null;
           if (sig && from) {
             try {
               const peerPubKey = await CryptoService._fetchPeerEd25519PubKey(from);
@@ -911,6 +948,7 @@ const CryptoService = {
                 const sigMsg = chained
                   ? CryptoUtils._dmSigMessageV2(threadId, inner.sq, inner.pv, from, String(inner.body))
                   : CryptoUtils._dmSigMessage(threadId, from, String(inner.body));
+                sigMsgBytes = chained ? sigMsg : null;
                 const sigBytes = new Uint8Array(CryptoUtils.base64ToArrayBuffer(sig));
                 sigValid = CryptoUtils.ed25519Verify(peerPubKey, sigBytes, sigMsg);
                 if (!sigValid) {
@@ -922,11 +960,22 @@ const CryptoService = {
             }
           }
 
-          // Chain position travels with the message so the caller can check it
-          // against what it has already seen from this sender.
-          const chain = (Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || ''))
-            ? { seq: inner.sq, prev: inner.pv }
-            : null;
+          // Chain position travels with the message. Deliberately reported
+          // rather than checked here: history arrives in pages and in no
+          // particular order, so verifying message by message would invent a
+          // gap on every load. The caller sorts a sender's run and checks it
+          // with verifyRun. The link is computed only for a message whose
+          // signature verified - otherwise a forgery could drag the chain
+          // forward.
+          let chain = null;
+          if (Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || '')) {
+            chain = { seq: inner.sq, prev: inner.pv, link: null };
+            if (sigValid === true && sigMsgBytes) {
+              try {
+                chain.link = await _threadChain.linkFor(sigMsgBytes);
+              } catch (_e) { /* leave link null; the run reports it as unchained */ }
+            }
+          }
           return { text: String(inner.body), from, sigValid, chain };
         }
       } catch (_e) {}

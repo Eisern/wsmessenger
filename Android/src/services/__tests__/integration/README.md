@@ -206,3 +206,29 @@ Point the relay at both by listing them in `relay.config.json`, each with the
 key that island expects. The relay reads its config once at import, so restart
 it after editing - and kill it by port, since it is easy to leave the old
 process holding the socket with the old config.
+
+---
+
+# Tampering with stored messages
+
+`chainTamper.test.js` builds messages with the real client crypto, sends them
+down the real send path into a real database, and then alters that database
+directly with psql - which is what an island's operator can do and what no
+amount of transport security prevents. Run it with the island up; it needs
+`docker exec` against the island's container (`ISLAND_A_CONTAINER`, default
+`wsapp-test`).
+
+It demonstrates the difference between the two guarantees:
+
+| The operator does | What happens |
+|---|---|
+| edits a message | the signature fails immediately, and the message never enters the chain |
+| deletes a message | every survivor still verifies, and a GAP appears where the message was |
+| re-files a genuine message at another position | its own signature is valid; only the chain notices |
+
+Note the third row. That is the case nothing before the chain could catch: the
+message is real, signed by the real sender, and unmodified - it is simply in
+the wrong place, next to a different question.
+
+Deleting is detected, not prevented. Nobody can stop the holder of a database
+from dropping a row; the chain only stops them from doing it quietly.

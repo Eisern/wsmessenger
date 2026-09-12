@@ -70,6 +70,46 @@ function CU() { return globalThis.__wsCrypto?.utils || null; }
 
 // ── Ed25519 helpers ────────────────────────────────────────────────────────────
 // username -> Uint8Array (pubkey) | null (no key on server) | undefined (not fetched)
+// Emitting chained signatures is OFF until readers are deployed on both
+// clients. A reader that only knows v1 rejects a v2 signature outright, which
+// would show a forgery warning for an honest message. Flip this only after
+// both clients ship the reader that landed in a3f7d33.
+const CHAIN_WRITE_ENABLED = false;
+
+const _threadChain = (globalThis.WSThreadChain || null) && globalThis.WSThreadChain.createThreadChain({
+  sha256: async (bytes) => new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+});
+
+// Where this device keeps a thread's two hash chains: the one it writes and
+// the one it verifies. Not secret - these are hashes of bytes the peer already
+// signed - so they sit in plain storage next to the rest of the thread state.
+const _chainPrefix = "__chain:";
+function _chainKey(threadId, who) {
+  return _chainPrefix + String(threadId) + ":" + String(who || "out");
+}
+async function _chainGet(threadId, who) {
+  const genesis = { seq: 0, hash: globalThis.WSThreadChain.GENESIS_HEX };
+  try {
+    const k = _chainKey(threadId, who);
+    const r = await chrome.storage.local.get(k);
+    const v = r && r[k];
+    if (v && typeof v.seq === "number" && /^[0-9a-f]{64}$/.test(v.hash || "")) {
+      return { seq: v.seq, hash: v.hash };
+    }
+  } catch { /* unreadable state is the same as no state */ }
+  return genesis;
+}
+async function _chainSet(threadId, who, state) {
+  if (!state || typeof state.seq !== "number") return;
+  try {
+    await chrome.storage.local.set({ [_chainKey(threadId, who)]: { seq: state.seq, hash: state.hash } });
+  } catch (e) {
+    // Failing to persist means the next message reports a gap: noisy but
+    // honest, and it must never block sending.
+    console.warn("chain state save failed:", e?.message || e);
+  }
+}
+
 const _ed25519PubKeyCache = new Map();
 
 // Per-peer "earliest signed message timestamp" marker. Once we have ever
@@ -1776,8 +1816,29 @@ async function encryptDm(threadId, plaintext, peerUsername) {
   const seed = CM()?.ed25519Seed;
   if (seed && myUsername) {
     try {
-      const sigMsg = CU()._dmSigMessage(threadId, myUsername, plaintext);
+      let sigMsg;
+      let chained = null;
+      if (CHAIN_WRITE_ENABLED && _threadChain) {
+        const head = await _chainGet(threadId, "out");
+        chained = { seq: head.seq + 1, prev: head.hash };
+        envelopeObj.sq = chained.seq;
+        envelopeObj.pv = chained.prev;
+        sigMsg = CU()._dmSigMessageV2(threadId, chained.seq, chained.prev, myUsername, plaintext);
+      } else {
+        sigMsg = CU()._dmSigMessage(threadId, myUsername, plaintext);
+      }
       envelopeObj.sig = await CU().ed25519Sign(seed, sigMsg);
+
+      if (chained) {
+        // Advance at signing time, not at delivery: a failed send is queued
+        // with this exact ciphertext and retried unchanged, so the seq it
+        // carries is already spoken for. An abandoned send leaves a hole,
+        // which the peer reports as a GAP - the survivable verdict.
+        await _chainSet(threadId, "out", {
+          seq: chained.seq,
+          hash: await _threadChain.linkFor(sigMsg),
+        });
+      }
     } catch (e) {
       // Having a seed and failing to sign with it is not a normal condition -
       // the "peer has no signing key yet" case never reaches here, it is the
@@ -1834,6 +1895,7 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
         const from = inner.from || null;
         const fromLower = from ? String(from).trim().toLowerCase() : "";
         let sigValid = null;
+        let chainInfo = null;
 
         if (inner.sig && from) {
           try {
@@ -1850,6 +1912,17 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
                 : cu._dmSigMessage(threadId, from, inner.body);
               const sigBytes = new Uint8Array(cu.base64ToArrayBuffer(inner.sig));
               sigValid = await cu.ed25519Verify(peerPub, sigBytes, sigMsg);
+              if (chained) {
+                // Reported, not checked here: history arrives in pages and in
+                // no particular order, so verifying message by message would
+                // invent a gap on every load. The caller sorts a sender's run
+                // and checks it with verifyRun. The link is computed only for
+                // a verified signature, or a forgery could drag the chain on.
+                chainInfo = { seq: inner.sq, prev: inner.pv, link: null };
+                if (sigValid === true && _threadChain) {
+                  try { chainInfo.link = await _threadChain.linkFor(sigMsg); } catch { /* stays null */ }
+                }
+              }
               if (sigValid === true && fromLower) {
                 // Record the earliest signed-message ts we've seen from
                 // this peer. Any LATER unsigned message will be flagged as
@@ -1884,7 +1957,7 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
           // else: leave sigValid === null (legacy / first-seen, allowed but warned)
         }
 
-        return { text: inner.body, sealedFrom: from, sealed: true, sigValid };
+        return { text: inner.body, sealedFrom: from, sealed: true, sigValid, chain: chainInfo };
       }
     }
   } catch {}
