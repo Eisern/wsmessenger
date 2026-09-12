@@ -32,6 +32,10 @@ module.exports = {
       transform: {
         '^.+\\.[jt]sx?$': 'babel-jest',
       },
+      // The island-list tests sign with @noble, so the signatures they verify
+      // are real rather than mocked.
+      resolver: '<rootDir>/jest-noble-resolver.js',
+      transformIgnorePatterns: ['node_modules/(?!(@noble|@scure)/)'],
     },
     {
       // Интеграционные тесты failover — гоняют НАСТОЯЩИЙ NetworkService против

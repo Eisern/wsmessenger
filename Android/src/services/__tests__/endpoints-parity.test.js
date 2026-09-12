@@ -19,6 +19,41 @@ function normalized(file) {
   return fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
 }
 
+const IL_ANDROID = path.join(__dirname, '..', 'island-list.js');
+const IL_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'island-list.js');
+
+describe('island-list.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(IL_ANDROID)).toBe(true);
+    expect(fs.existsSync(IL_EXTENSION)).toBe(true);
+    expect(normalized(IL_ANDROID)).toBe(normalized(IL_EXTENSION));
+  });
+
+  it('both copies canonicalize identically', () => {
+    const a = require('../island-list');
+    // Loaded in a sandbox rather than required: the extension copy lives
+    // outside rootDir, where babel cannot resolve its own runtime helpers for
+    // the async functions. A sandbox runs the file as the browser would.
+    const vm = require('vm');
+    const sandbox = { console, TextEncoder, JSON, Date };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(IL_EXTENSION, 'utf8'), sandbox, { filename: 'island-list.js' });
+    const b = sandbox.WSIslandList;
+    expect(b).toBeTruthy();
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+
+    // Canonical JSON is what the signature covers; a difference here would
+    // make one client reject every list the other accepts.
+    const cases = [
+      { b: 1, a: [2, { d: 4, c: 3 }] },
+      { label: 'основной', nested: { z: null, y: true } },
+      { list: [], empty: {}, n: -17 },
+    ];
+    for (const c of cases) expect(a.canonicalJson(c)).toBe(b.canonicalJson(c));
+  });
+});
+
 describe('endpoints.js parity between the two clients', () => {
   it('both copies exist', () => {
     expect(fs.existsSync(ANDROID_PATH)).toBe(true);

@@ -80,12 +80,14 @@ what replace per-IP rate limiting — do not raise it casually.
 
 ## Two things this prototype does not do yet
 
-- **The island's transport key is served over plain HTTPS** at `GET /relay/key`,
-  for development. In production a client must take that key from the signed
-  entry-point list and pin it: whoever substitutes the key reads every
-  envelope's metadata. That list does not exist yet.
+- **A client must take the island's transport key from the signed list**, not
+  from `GET /relay/key` — that endpoint is a development convenience, and
+  whoever substitutes the key reads every envelope's metadata. The signed list
+  now exists (`GET /.well-known/wsapp-island`, see `server/island_list.py`) and
+  republishes the transport key; a test asserts the two never drift apart. What
+  is still missing is a client that consumes it.
 - **No client speaks this.** The envelope is implemented once, in the test
   helpers. Shipping it means writing it twice (WebCrypto in the extension,
-  @noble on Android), and that must not happen before there are cross-client
-  pinned test vectors — the repository has already had two hand-written crypto
-  implementations drift apart unnoticed.
+  @noble on Android). The cross-client pinned vectors that had to exist first
+  are now in place (`Android/src/crypto/__tests__/cross-client-vectors.test.js`),
+  so that work is unblocked — it just has not been done.

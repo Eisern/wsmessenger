@@ -7625,3 +7625,29 @@ try:
     )
 except Exception as _e:  # pragma: no cover - relay ingress is optional
     logger.warning("relay ingress not mounted: %s", _e)
+
+
+# =========================================================================
+# Signed island list (optional)
+# =========================================================================
+# The trust root for entry-point failover and for relay transport keys alike.
+# Disabled unless ISLAND_SIGNING_KEY_B64 and ISLAND_ID are set.
+try:
+    from island_list import build_router as _build_island_list_router
+    from relay_ingress import RelayConfig as _RelayConfig
+
+    def _transport_keys_for_list():
+        try:
+            rc = _RelayConfig()
+            if not rc.enabled:
+                return []
+            return [{
+                "kid": base64.b64encode(rc.kid).decode("utf-8"),
+                "public_key_b64": base64.b64encode(rc.public_key_bytes()).decode("utf-8"),
+            }]
+        except Exception:
+            return []
+
+    app.include_router(_build_island_list_router(transport_keys=_transport_keys_for_list()))
+except Exception as _e:  # pragma: no cover - the signed list is optional
+    logger.warning("island list not mounted: %s", _e)

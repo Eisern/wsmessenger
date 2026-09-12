@@ -115,3 +115,47 @@ clear. That let a relay tell "duplicate" from "delivered" by the status code —
 and, worse, forge a 409 so the client would stop retrying elsewhere. Every
 outcome after the envelope is opened is now sealed, and the outer HTTP status is
 always 200.
+
+---
+
+# Signed island list tests
+
+`islandList.test.js` fetches `/.well-known/wsapp-island` and verifies the real
+signature with **both** client crypto stacks. Run with `npm run test:island-list`.
+
+This is the test that holds the canonical form together: the island
+canonicalizes the payload in Python and signs it; the clients canonicalize the
+same payload in JavaScript to check the signature. A one-byte disagreement —
+a float rendered `1.0` instead of `1`, a non-ASCII label escaped on one side
+only, keys sorted differently — makes the signature fail. Nothing else needs to
+assert the canonical form.
+
+## Setup
+
+Generate an Ed25519 signing key and describe the island in `server/.env`:
+
+```
+ISLAND_SIGNING_KEY_B64=<base64 ed25519 private key, 32 raw bytes>
+ISLAND_ID=island-test
+ISLAND_LIST_VERSION=3
+ISLAND_ENTRY_POINTS='[{"apiBase":"http://127.0.0.1:18101","wsBase":"ws://127.0.0.1:18101","label":"основной"},{"apiBase":"http://127.0.0.1:18102","wsBase":"ws://127.0.0.1:18102","label":"mirror"}]'
+ISLAND_RELAYS='[{"id":"relay-alpha","url":"http://127.0.0.1:18800"}]'
+```
+
+Single quotes again, and keep a **non-ASCII label** in there: one of the tests
+asserts it is present, because without it the canonical-form check would pass
+for the wrong reason.
+
+```sh
+python - <<'PY'
+import base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
+k = Ed25519PrivateKey.generate()
+print(base64.b64encode(k.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())).decode())
+PY
+```
+
+The list also republishes the relay transport key, and a test asserts it matches
+what `/relay/key` serves — the development endpoint and the signed document must
+not drift apart, because only the signed one may be trusted.
