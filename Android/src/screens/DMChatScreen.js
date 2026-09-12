@@ -17,6 +17,7 @@ import {
 } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
 import Clipboard from '@react-native-clipboard/clipboard';
+import TC from '../services/thread-chain';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NetworkService from '../services/NetworkService';
 import StorageService from '../services/StorageService';
@@ -254,7 +255,34 @@ export default function DMChatScreen({ navigation, route }) {
   useEffect(() => () => { _echoTimersRef.current.forEach(t => clearTimeout(t)); }, []);
   // Stable handler ref — registered once, delegate to current closure via ref
   const _handleIncomingRef = useRef(null);
-  const messages = (state.dmMessages[threadId] || []);
+  // Wrapped so its identity is stable: a bare `||` makes a new array on every
+  // render, which would re-run every hook that depends on it - including the
+  // chain check below, on every keystroke.
+  const messages = useMemo(() => state.dmMessages[threadId] || [], [state.dmMessages, threadId]);
+
+  // Chain problems for what is on screen, recomputed when the messages change.
+  // Checked over the whole visible run rather than per message: history loads
+  // in pages, and a per-message check would report a gap on every load.
+  const chainProblems = useMemo(() => {
+    const map = new Map();
+    try {
+      const entries = messages
+        .filter((m) => m && m._chain)
+        .map((m) => ({
+          id: m.id,
+          sender: (m.author || m.username || '').toLowerCase(),
+          seq: m._chain.seq,
+          prev: m._chain.prev,
+          link: m._chain.link,
+        }));
+      for (const p of TC.createThreadChain({ sha256: () => new Uint8Array(32) }).problemsByRun(entries)) {
+        if (p.id != null) map.set(p.id, p);
+      }
+    } catch (e) {
+      console.warn('[DMChat] chain check failed:', e?.message);
+    }
+    return map;
+  }, [messages]);
   const myUsername = state.username;
   // Ref to always-current messages — avoids stale closures in event listeners
   const messagesRef = useRef(messages);
@@ -768,7 +796,11 @@ export default function DMChatScreen({ navigation, route }) {
         const resolvedFrom = from || (msg.text && _sentBySelfCiphertexts.has(msg.text) ? _sentBySelfCiphertexts.get(msg.text).author : null);
         // sigValid===null with known sender means no Ed25519 sig (absent or unverifiable) — flag for UI.
         const sigUnverified = sigValid === null && from !== null && from.toLowerCase() !== meLower;
-        return { ...base, _decrypted: messageText, ...replyProp,
+        // Chain position rides along untouched. It is checked over a sorted run
+        // once the screen has its messages, never per message: history arrives
+        // in pages, and checking one at a time invents a gap on every load.
+        const chainProp = result?.chain ? { _chain: result.chain } : {};
+        return { ...base, _decrypted: messageText, ...replyProp, ...chainProp,
           ...(resolvedFrom ? { author: resolvedFrom, username: resolvedFrom } : {}),
           ...(sigUnverified ? { _sealedSenderUnverified: true } : {}) };
       }
@@ -1124,6 +1156,7 @@ export default function DMChatScreen({ navigation, route }) {
     const hitPos = searchHits.indexOf(index);
     const isSearchHit = hitPos !== -1;
     const isSearchActive = isSearchHit && hitPos === searchIdx % searchHits.length;
+    const chainProblem = chainProblems.get(item.id);
     const decryptFailed = item._decryptFailed;
     const needsDecrypt = item._needsDecrypt && !item._decrypted;
     const sealedMismatch = item._sealedSenderMismatch;
@@ -1135,6 +1168,20 @@ export default function DMChatScreen({ navigation, route }) {
     const fileInfo = (decryptFailed || needsDecrypt) ? null : parseFileMarker(text);
 
     return (
+      <>
+      {chainProblem && (
+        // A break has no innocent explanation: we hold the previous message and
+        // it does not hash to what this one committed to. A gap does - pages
+        // load out of order, and a sender can abandon a send - so it is worded
+        // as an observation rather than an accusation.
+        <View style={chainProblem.verdict === 'break' ? styles.chainBreak : styles.chainGap}>
+          <Text style={chainProblem.verdict === 'break' ? styles.chainBreakText : styles.chainGapText}>
+            {chainProblem.verdict === 'break'
+              ? '⚠ The stored history here does not match what the sender signed.'
+              : `${chainProblem.missing || 1} message${(chainProblem.missing || 1) > 1 ? 's' : ''} missing here`}
+          </Text>
+        </View>
+      )}
       <TouchableOpacity
         activeOpacity={0.8}
         onLongPress={() => {
@@ -1187,6 +1234,7 @@ export default function DMChatScreen({ navigation, route }) {
           {timeStr ? <Text style={styles.timeText}>{timeStr}</Text> : null}
         </View>
       </TouchableOpacity>
+      </>
     );
   }
 
@@ -1557,6 +1605,29 @@ const styles = StyleSheet.create({
   decryptFailedText: { fontSize: Typography.sm, color: '#f87171', fontStyle: 'italic' },
   decryptPendingText: { fontSize: Typography.sm, color: Colors.textMuted, fontStyle: 'italic' },
   sealedWarnText: { fontSize: Typography.xs, color: '#fbbf24', fontStyle: 'italic', marginTop: 2 },
+  chainGap: {
+    alignSelf: 'center',
+    marginVertical: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 10,
+    backgroundColor: 'rgba(240,164,41,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(240,164,41,0.35)',
+  },
+  chainGapText: { color: Colors.warning, fontSize: Typography.xs },
+  chainBreak: {
+    alignSelf: 'stretch',
+    marginVertical: 6,
+    marginHorizontal: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: 'rgba(248,81,73,0.12)',
+    borderWidth: 1,
+    borderColor: Colors.danger,
+  },
+  chainBreakText: { color: Colors.danger, fontSize: Typography.sm },
   sealedUnverifiedText: { fontSize: Typography.xs, color: Colors.textMuted, fontStyle: 'italic', marginTop: 2 },
   inputRow: {
     flexDirection: 'row',

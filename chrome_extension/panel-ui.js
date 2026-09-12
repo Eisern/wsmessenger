@@ -2555,6 +2555,35 @@ function addDecryptFailWarning(fromUser) {
   chat.appendChild(banner);
 }
 
+/**
+ * Shown where a sender's chain does not line up with what is on screen.
+ *
+ * Two verdicts, two tones, deliberately. A BREAK means we hold the previous
+ * message and it does not hash to what this one committed to - nothing
+ * innocent does that. A GAP means the numbering jumped, which an abandoned
+ * send or an unloaded page also produces, so it is stated as an observation.
+ * Wording a gap as an accusation would make the warning fire during normal
+ * use, and a warning that fires constantly is one nobody reads.
+ */
+function addChainProblemMarker(problem) {
+  if (!chat || !problem) return;
+  lastMsgAuthor = "";
+  const isBreak = problem.verdict === "break";
+  const marker = document.createElement("div");
+  marker.style.cssText = isBreak
+    ? `margin: 6px 8px; padding: 8px 12px; background: #3a0a0a;
+       border: 1px solid #c0392b; border-radius: 8px;
+       font-size: 12px; color: #e74c3c; line-height: 1.4;`
+    : `margin: 6px auto; padding: 4px 10px; background: rgba(240,164,41,0.12);
+       border: 1px solid rgba(240,164,41,0.35); border-radius: 10px;
+       font-size: 11px; color: #f0a429; width: fit-content;`;
+  const missing = Number(problem.missing || 1);
+  marker.textContent = isBreak
+    ? "⚠ The stored history here does not match what the sender signed."
+    : `${missing} message${missing > 1 ? "s" : ""} missing here`;
+  chat.appendChild(marker);
+}
+
 function addSigFailWarning(fromUser) {
   if (!chat) return;
   lastMsgAuthor = "";

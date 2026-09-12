@@ -144,3 +144,94 @@ describe('comparing two stored copies', () => {
     expect(chain.digestsAgree(a, b)).toBe(false);
   });
 });
+
+describe('what the user is actually looking at', () => {
+  // History is fetched in pages. Starting a screenful from genesis would say
+  // "500 messages missing" every time somebody opens a long conversation, and
+  // a warning that fires on every normal load is a warning nobody reads.
+  it('does not call a partial page a gap', async () => {
+    const run = await buildRun(['1', '2', '3', '4', '5', '6']);
+    const lastPage = run.slice(3);            // the user scrolled in partway
+
+    expect(chain.verifyRun(chain.genesis(), lastPage).ok).toBe(false);   // naive
+    expect(chain.verifyVisibleRun(lastPage).ok).toBe(true);              // honest
+  });
+
+  it('still reports a hole between two messages on screen', async () => {
+    const run = await buildRun(['1', '2', '3', '4', '5']);
+    const withHole = [run[1], run[3], run[4]];   // 3 is gone from the middle
+
+    const r = chain.verifyVisibleRun(withHole);
+    expect(r.ok).toBe(false);
+    expect(r.problems[0].verdict).toBe(TC.VERDICT_GAP);
+    expect(r.problems[0].missing).toBe(1);
+  });
+
+  it('still reports a break between two messages on screen', async () => {
+    const run = await buildRun(['1', '2', '3']);
+    const [elsewhere] = await buildRun(['from another thread'], run[0].link);
+    const doctored = [run[0], { ...elsewhere, seq: 2 }, run[2]];
+
+    const r = chain.verifyVisibleRun(doctored);
+    expect(r.ok).toBe(false);
+    expect(r.problems.map((p) => p.verdict)).toContain(TC.VERDICT_BREAK);
+  });
+
+  it('sorts before checking, so delivery order does not matter', async () => {
+    const run = await buildRun(['1', '2', '3']);
+    expect(chain.verifyVisibleRun([run[2], run[0], run[1]]).ok).toBe(true);
+  });
+
+  it('says nothing about an empty screen', () => {
+    expect(chain.verifyVisibleRun([]).ok).toBe(true);
+    expect(chain.verifyVisibleRun(null).ok).toBe(true);
+  });
+});
+
+describe('turning a screenful into things to show', () => {
+  async function entriesFor(sender, bodies, startFrom = TC.GENESIS_HEX) {
+    const run = await buildRun(bodies, startFrom);
+    return run.map((m, i) => ({ id: `${sender}-${i + 1}`, sender, seq: m.seq, prev: m.prev, link: m.link }));
+  }
+
+  it('says nothing about an intact conversation', async () => {
+    const mine = await entriesFor('alice', ['a', 'b', 'c']);
+    const theirs = await entriesFor('bob', ['x', 'y']);
+    expect(chain.problemsByRun([...mine, ...theirs])).toEqual([]);
+  });
+
+  it('does not mistake two people writing at once for a gap', async () => {
+    // The chains are per sender, so interleaving is normal conversation and
+    // must never be reported. Getting this wrong would make the warning fire
+    // constantly and therefore mean nothing.
+    const mine = await entriesFor('alice', ['a', 'b', 'c']);
+    const theirs = await entriesFor('bob', ['x', 'y', 'z']);
+    const interleaved = [mine[0], theirs[0], mine[1], theirs[1], theirs[2], mine[2]];
+    expect(chain.problemsByRun(interleaved)).toEqual([]);
+  });
+
+  it('points at the message the hole is in front of', async () => {
+    const mine = await entriesFor('alice', ['a', 'b', 'c', 'd']);
+    const withHole = [mine[0], mine[2], mine[3]];   // "b" removed
+
+    const problems = chain.problemsByRun(withHole);
+    expect(problems).toHaveLength(1);
+    expect(problems[0].verdict).toBe(TC.VERDICT_GAP);
+    expect(problems[0].missing).toBe(1);
+    expect(problems[0].id).toBe('alice-3');          // the marker goes before "c"
+    expect(problems[0].sender).toBe('alice');
+  });
+
+  it('reports only the sender whose run was touched', async () => {
+    const mine = await entriesFor('alice', ['a', 'b', 'c']);
+    const theirs = await entriesFor('bob', ['x', 'y', 'z']);
+    const problems = chain.problemsByRun([mine[0], mine[2], ...theirs]);
+    expect(problems.map((p) => p.sender)).toEqual(['alice']);
+  });
+
+  it('ignores messages that carry no chain, so a part-rolled-out thread looks fine', async () => {
+    const mine = await entriesFor('alice', ['a', 'b']);
+    const legacy = [{ id: 'old-1', sender: 'alice' }, { id: 'old-2', sender: 'alice', seq: 'x' }];
+    expect(chain.problemsByRun([...legacy, ...mine])).toEqual([]);
+  });
+});

@@ -2523,6 +2523,9 @@ if (msg.type === "dm_history_res") {
     console.warn("ensureDmKeyReady failed (history):", e);
   }
 
+  // Chain facts for this page, checked after the loop rather than inside it.
+  const __chainEntries = [];
+
   for (const m of rows) {
     let user = m.username || null;
 
@@ -2543,6 +2546,17 @@ if (msg.type === "dm_history_res") {
           if (!user && dec.sealedFrom) user = dec.sealedFrom;
           const meNameLower = String(meName || "").trim().toLowerCase();
           const senderLower = String(dec.sealedFrom || "").trim().toLowerCase();
+          if (dec.chain) {
+            // Collected now, checked once the whole page is decrypted: per
+            // message it would report a gap on every partial load.
+            __chainEntries.push({
+              id: __chainEntries.length,
+              sender: senderLower,
+              seq: dec.chain.seq,
+              prev: dec.chain.prev,
+              link: dec.chain.link,
+            });
+          }
           if (dec.sigValid === false && typeof addSigFailWarning === "function") {
             addSigFailWarning(dec.sealedFrom || user);
           } else if (dec.sigValid === null && dec.sealedFrom && senderLower !== meNameLower
@@ -2580,6 +2594,20 @@ if (msg.type === "dm_history_res") {
       msgReply
     );
   }
+
+  // The page is decrypted; now check each sender's run over what is on screen.
+  try {
+    const TCmod = globalThis.WSThreadChain;
+    if (TCmod && __chainEntries.length) {
+      const tc = TCmod.createThreadChain({ sha256: () => new Uint8Array(32) });
+      for (const problem of tc.problemsByRun(__chainEntries)) {
+        if (typeof addChainProblemMarker === "function") addChainProblemMarker(problem);
+      }
+    }
+  } catch (e) {
+    console.warn("chain check failed (history):", e?.message || e);
+  }
+
   if (appendOlder) __applyOlderScrollRestore("dm", Number(msg.thread_id));
   __dmOlderLoading = false;
   return;

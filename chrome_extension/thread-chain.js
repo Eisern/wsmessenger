@@ -156,6 +156,76 @@
     }
 
     /**
+     * Check a run of messages the user can actually see.
+     *
+     * verifyRun starts from a known head, which is right when the client has
+     * been following a thread. It is wrong for a screenful: history is fetched
+     * in pages, so the earliest visible message is nearly always preceded by
+     * messages that simply have not been loaded, and starting from genesis
+     * would report "500 missing" every time somebody opens a conversation.
+     *
+     * Here the first message's own claim about its predecessor is taken as the
+     * starting point. That makes the first message valid by construction — it
+     * is not evidence of anything — and every gap or break reported afterwards
+     * is strictly BETWEEN two messages the user is looking at.
+     */
+    function verifyVisibleRun(messages) {
+      const list = Array.isArray(messages) ? messages.slice() : [];
+      if (!list.length) return { state: genesis(), problems: [], ok: true };
+
+      list.sort(function (a, b) { return Number(a.seq) - Number(b.seq); });
+      const first = list[0];
+      if (!isHex32(first && first.prev) || !isFinite(Number(first && first.seq))) {
+        return verifyRun(genesis(), list);
+      }
+      const start = { seq: Number(first.seq) - 1, hash: first.prev };
+      return verifyRun(start, list);
+    }
+
+    /**
+     * Everything wrong with a screenful of messages, ready to render.
+     *
+     * @param {Array} entries [{ id, sender, seq, prev, link }] in any order
+     * @returns {Array} [{ id, sender, verdict, missing }] - `id` is the
+     *          message the problem was noticed AT, so a marker goes before it.
+     *
+     * Grouped by sender, because the chains are per sender: two people writing
+     * at once is not a gap in either of their runs. A message with no chain
+     * fields is skipped rather than counted, so a thread part-way through the
+     * rollout does not look damaged.
+     */
+    function problemsByRun(entries) {
+      const bySender = {};
+      const list = Array.isArray(entries) ? entries : [];
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i];
+        if (!e || !isFinite(Number(e.seq)) || !isHex32(e.prev)) continue;
+        const who = String(e.sender == null ? "" : e.sender).toLowerCase();
+        (bySender[who] = bySender[who] || []).push(e);
+      }
+
+      const out = [];
+      const senders = Object.keys(bySender);
+      for (let i = 0; i < senders.length; i++) {
+        const run = bySender[senders[i]];
+        const r = verifyVisibleRun(run);
+        const sorted = run.slice().sort(function (a, b) { return Number(a.seq) - Number(b.seq); });
+        for (let j = 0; j < r.problems.length; j++) {
+          const p = r.problems[j];
+          const at = sorted[p.index];
+          out.push({
+            id: at && at.id,
+            sender: senders[i],
+            seq: p.seq,
+            verdict: p.verdict,
+            missing: p.missing,
+          });
+        }
+      }
+      return out;
+    }
+
+    /**
      * One value summarising a sender's half of a thread, for comparing two
      * independently stored copies of the same conversation.
      */
@@ -174,6 +244,8 @@
       linkFor: linkFor,
       accept: accept,
       verifyRun: verifyRun,
+      verifyVisibleRun: verifyVisibleRun,
+      problemsByRun: problemsByRun,
       digest: digest,
       digestsAgree: digestsAgree,
     };
