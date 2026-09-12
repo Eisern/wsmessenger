@@ -42,7 +42,7 @@ See [CLAUDE.md](CLAUDE.md) for:
 - the service-vs-screen split and event/listener patterns
 - crypto unlock flow, sealed-sender DM transport, key-rotation rules
 - keyboard handling on Android 15 edge-to-edge displays
-- security hardening notes (FLAG_SECURE, certificate pinning,
+- security hardening notes (FLAG_SECURE, network security config,
   rate limits, KDF minimums)
 
 ## License
