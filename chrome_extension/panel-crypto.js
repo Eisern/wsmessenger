@@ -3423,16 +3423,37 @@ async function ensureForeignKeysReady(contact) {
   const cm = CM();
   if (!cm) throw new Error("Locked");
 
+  // Called once per message on the decrypt path, so it has to be free when
+  // there is nothing to do. It was not: it re-imported both keys and wrote the
+  // archive every time, and writing the archive asks the worker to decrypt the
+  // stored blob first. A page of history was therefore fifty round trips to
+  // the worker, which is exactly what its per-minute cap on sensitive messages
+  // is there to stop - so reading a conversation could lock itself out.
+  const archive = cm.roomKeyArchive?.get(rid);
+  const inboxKid = contact.inbox?.keyId;
+  const outboxKid = contact.outbox?.keyId;
+  const haveInbox = !inboxKid || !!archive?.has(inboxKid);
+  const haveOutbox = !outboxKid || !!archive?.has(outboxKid);
+  if (cm.roomKeys?.has(rid) && haveInbox && haveOutbox) return;
+
+  let changed = false;
   if (contact.inbox?.keyB64) {
-    await cm.loadRoomKey(rid, contact.inbox.keyB64);
-    if (contact.inbox.keyId) {
-      await cm.loadArchivedKey(rid, contact.inbox.keyId, contact.inbox.keyB64);
+    if (!cm.roomKeys?.has(rid)) {
+      await cm.loadRoomKey(rid, contact.inbox.keyB64);
+      changed = true;
+    }
+    if (inboxKid && !archive?.has(inboxKid)) {
+      await cm.loadArchivedKey(rid, inboxKid, contact.inbox.keyB64);
+      changed = true;
     }
   }
-  if (contact.outbox?.keyB64 && contact.outbox?.keyId) {
-    await cm.loadArchivedKey(rid, contact.outbox.keyId, contact.outbox.keyB64);
+  if (contact.outbox?.keyB64 && outboxKid && !archive?.has(outboxKid)) {
+    await cm.loadArchivedKey(rid, outboxKid, contact.outbox.keyB64);
+    changed = true;
   }
-  await saveRoomKeyArchive(rid);
+
+  // Only when something actually arrived: this is the expensive half.
+  if (changed) await saveRoomKeyArchive(rid);
 }
 
 /**

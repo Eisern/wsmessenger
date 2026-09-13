@@ -6400,7 +6400,7 @@ async function __renderForeignDmSection() {
   dmListEl.appendChild(sec);
 }
 
-async function __openForeignActionsMenu(contact) {
+async function __openForeignActionsMenu(contact) {   // eslint-disable-line no-param-reassign
   const name = contact.displayName || __foreignCardText(contact.kid);
   const relays = contact.island?.relays || [];
   const via = contact.useRelay;
@@ -6438,12 +6438,25 @@ ${sn.safetyNumber}`,
     // directly hands the sender's address to a server they do not trust, and
     // sending through a relay depends on a third party being up. The design
     // says the trade must be visible rather than decided for them.
+    let current = contact;
     if (!via && !relays.length) {
-      await __ui.alert(
-        "Their server does not list a relay, so there is nothing to send through yet.",
-      );
-      return;
+      // What we know about their island may simply be old - the list is
+      // re-read on a six-hour timer, and a relay added since then would not
+      // show up until it expires. Somebody asking for a relay right now is
+      // reason enough to go and look.
+      try {
+        await refreshForeignIsland(contact, { force: true });
+        current = (await getForeignContact(contact.kid)) || contact;
+      } catch { /* fall through to the answer below */ }
+
+      if (!(current.island?.relays || []).length) {
+        await __ui.alert(
+          "Their server does not list a relay, so there is nothing to send through yet.",
+        );
+        return;
+      }
     }
+    contact = current;
     await saveForeignContact({ ...contact, useRelay: !via });
     await __refreshDmListNow();
     await __ui.alert(
