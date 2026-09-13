@@ -3291,7 +3291,7 @@ async function addForeignContact(blobText) {
  * Collect the address, delivery secret and thread key of the mailbox this
  * contact opened for us on their island.
  */
-async function claimForeignOutbox(contact) {
+async function claimForeignOutbox(contact, { retried = false } = {}) {
   const cu = CU();
   const myKid = await cu.fingerprintPublicKey(CM().userPublicKeyPem);
   const bases = (contact.island?.entryPoints || []).map((e) => e.apiBase).filter(Boolean);
@@ -3344,6 +3344,18 @@ async function claimForeignOutbox(contact) {
   // Remember why, so the contact can say which of the two it was. They need
   // different things from the user - wait for the other person, or fix the
   // address - and until now both showed the same "waiting for them" line.
+  // Every address we know either refused us or did not answer. Before calling
+  // it a failure, ask their island for its current list - that is the case the
+  // signed list exists for, and the pin from their card is what makes the
+  // answer safe to believe.
+  if (!retried) {
+    const moved = await refreshForeignIsland(contact, { force: true }).catch(() => ({ ok: false }));
+    if (moved.ok && moved.changed) {
+      const fresh = await getForeignContact(contact.kid);
+      if (fresh) return await claimForeignOutbox(fresh, { retried: true });
+    }
+  }
+
   const failure = {
     at: Date.now(),
     status: last?.status ?? null,
@@ -3621,4 +3633,125 @@ async function foreignOutboxSize() {
   const ob = foreignOutbox();
   if (!ob) return 0;
   try { return await ob.size(); } catch { return 0; }
+}
+
+// ============================
+// Keeping a contact's island reachable
+// ============================
+//
+// A contact card freezes the addresses of the other island at the moment it
+// was handed over. Islands move: a domain changes, a bridge is added, the one
+// address in the card stops answering - and the contact is then lost for good,
+// with no way back except meeting again in person.
+//
+// The card carries the island's signing key precisely so that need not happen.
+// The island publishes a signed list of its own entry points; the key pinned
+// from the card says whether a list we are handed is really theirs. So the
+// addresses can be refreshed without trusting whoever answered.
+
+const _ISLAND_RECHECK_MS = 6 * 60 * 60 * 1000;
+
+function _islandVerifier() {
+  const IL = globalThis.WSIslandList;
+  if (!IL) return null;
+  return IL.createIslandListVerifier({
+    ed25519Verify: (pub, sig, msg) => CU().ed25519Verify(pub, sig, msg),
+    b64decode: (s) => _u8FromB64url(s),
+    utf8Encode: (s) => new TextEncoder().encode(s),
+    now: () => Date.now(),
+  });
+}
+
+/**
+ * Ask a contact's island where it lives now, and believe the answer only if it
+ * is signed by the key their card pinned.
+ *
+ * @param {object} contact
+ * @param {object} [opts] { force } - skip the recheck interval
+ * @returns {Promise<{ok:boolean, reason?:string, changed?:boolean}>}
+ */
+async function refreshForeignIsland(contact, { force = false } = {}) {
+  const verifier = _islandVerifier();
+  if (!verifier) return { ok: false, reason: "verifier unavailable" };
+
+  const last = Number(contact.island?.lastCheckedAt || 0);
+  if (!force && last && Date.now() - last < _ISLAND_RECHECK_MS) {
+    return { ok: true, reason: "checked recently", changed: false };
+  }
+
+  // The pin starts as what the card said. `version: 0` because the card does
+  // not carry one - the first list we verify sets the floor for every later
+  // one, and the verifier refuses anything older afterwards.
+  const pin = contact.island?.pin || {
+    signingKeyB64: contact.island?.signingKeyB64 || "",
+    islandId: contact.island?.islandId || "",
+    version: 0,
+  };
+  if (!pin.signingKeyB64) return { ok: false, reason: "card carried no signing key" };
+
+  const bases = [];
+  if (contact.outbox?.apiBase) bases.push(contact.outbox.apiBase);
+  for (const e of contact.island?.entryPoints || []) {
+    if (e.apiBase && !bases.includes(e.apiBase)) bases.push(e.apiBase);
+  }
+
+  let lastReason = "unreachable";
+  for (const base of bases) {
+    let doc;
+    try {
+      const r = await fetch(String(base).replace(/\/+$/, "") + "/.well-known/wsapp-island");
+      if (!r.ok) { lastReason = `http ${r.status}`; continue; }
+      doc = await r.json();
+    } catch (e) {
+      lastReason = "unreachable";
+      continue;
+    }
+
+    const res = await verifier.verify(doc, pin);
+    if (!res.ok) {
+      // Signed by the wrong key, or a replay of an older list. Not a network
+      // problem and not something to shop around for at the next address: an
+      // island that answers with somebody else's signature is exactly what the
+      // pin exists to catch.
+      console.warn(`[Foreign] ${base} served a list we cannot trust: ${res.reason}`);
+      lastReason = res.reason;
+      if (res.reason === "bad signature" || res.reason === "different island" || res.reason === "rollback") {
+        return { ok: false, reason: res.reason };
+      }
+      continue;
+    }
+
+    const fresh = res.payload.entryPoints.map((e) => ({
+      apiBase: e.apiBase, wsBase: e.wsBase || "", label: e.label || "",
+    }));
+    const before = (contact.island?.entryPoints || []).map((e) => e.apiBase).join("|");
+    const after = fresh.map((e) => e.apiBase).join("|");
+
+    const updated = {
+      ...contact,
+      island: {
+        ...contact.island,
+        entryPoints: fresh,
+        relays: res.payload.relays || [],
+        pin: res.pin,
+        lastCheckedAt: Date.now(),
+      },
+    };
+
+    // If the address we have been delivering to is gone from their own list,
+    // move to one that is there. The delivery secret is per mailbox, not per
+    // address, so nothing else has to change.
+    if (updated.outbox?.apiBase && !fresh.some((e) => e.apiBase === updated.outbox.apiBase)) {
+      updated.outbox = { ...updated.outbox, apiBase: fresh[0].apiBase };
+    }
+
+    await saveForeignContact(updated);
+    _foreignThreadCache.set(foreignThreadId(updated), updated);
+    if (before !== after) {
+      console.log(`[Foreign] ${contact.displayName}: island now reachable at ${after}`);
+    }
+    return { ok: true, changed: before !== after };
+  }
+
+  return { ok: false, reason: lastReason };
 }

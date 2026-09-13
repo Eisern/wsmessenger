@@ -6374,6 +6374,9 @@ async function __renderForeignDmSection() {
         // anything is still waiting, and usually the moment connectivity came
         // back.
         drainForeignOutbox().catch(() => {});
+        // Cheap and throttled: better to learn their island moved while the
+        // old address still answers than the first time it does not.
+        refreshForeignIsland(c).catch(() => {});
         setModeDm(threadId, c.displayName || __foreignCardText(c.kid));
         pushRecent("dm", threadId, c.displayName || "");
         clearChat();

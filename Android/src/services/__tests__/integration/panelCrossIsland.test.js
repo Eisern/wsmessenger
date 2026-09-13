@@ -122,7 +122,7 @@ function makePanel({ apiBase, islandId, username, token }) {
   };
   vm.createContext(sandbox);
 
-  for (const f of ['crypto-utils.js', 'endpoints.js', 'thread-chain.js', 'outbox.js', 'foreign-dm.js']) {
+  for (const f of ['crypto-utils.js', 'endpoints.js', 'thread-chain.js', 'island-list.js', 'outbox.js', 'foreign-dm.js']) {
     vm.runInContext(fs.readFileSync(path.join(EXT_DIR, f), 'utf8'), sandbox, { filename: f });
   }
   const CU = sandbox.__wsCrypto.utils;
@@ -469,6 +469,52 @@ describe('they write to each other', () => {
     const after = (await http(ISLAND_B, `/dm/${bobSide.inbox.threadId}/history`,
       { token: bob.token })).data;
     expect((after.messages || after).length).toBe(beforeCount + 1);
+  });
+
+  it('finds a contact again after their island changes address', async () => {
+    // The card froze their addresses at the moment it was handed over. When
+    // the last of them stops answering the contact used to be lost for good.
+    const stored = await alice.sandbox.getForeignContact(aliceSide.kid);
+    await alice.sandbox.saveForeignContact({
+      ...stored,
+      island: {
+        ...stored.island,
+        entryPoints: [{ apiBase: 'http://127.0.0.1:9', wsBase: '', label: 'gone' }],
+        lastCheckedAt: 0,
+      },
+    });
+
+    // The claim walks its addresses, finds nothing, asks their island where it
+    // lives now, and believes the answer only because their card pinned the
+    // key that signed it.
+    const claimed = await alice.sandbox.claimForeignOutbox(
+      await alice.sandbox.getForeignContact(aliceSide.kid),
+    );
+    expect(claimed.outbox.threadId).toBe(bobSide.inbox.threadId);
+
+    const after = await alice.sandbox.getForeignContact(aliceSide.kid);
+    expect(after.island.entryPoints.some((e) => e.apiBase === ISLAND_B)).toBe(true);
+    expect(after.island.pin.islandId).toBe('island-b');
+    expect(after.island.pin.version).toBeGreaterThan(0);
+  });
+
+  it('refuses a list signed by anyone but their island', async () => {
+    // Island A is a real island serving a real, correctly signed document -
+    // just not theirs. Without the pin this is how a contact gets redirected
+    // to somebody else's mailbox.
+    const stored = await alice.sandbox.getForeignContact(aliceSide.kid);
+    const res = await alice.sandbox.refreshForeignIsland({
+      ...stored,
+      island: { ...stored.island, entryPoints: [{ apiBase: ISLAND_A }], lastCheckedAt: 0 },
+      outbox: { ...stored.outbox, apiBase: ISLAND_A },
+    }, { force: true });
+
+    expect(res.ok).toBe(false);
+    expect(['bad signature', 'different island']).toContain(res.reason);
+
+    // And nothing was overwritten by the attempt.
+    const after = await alice.sandbox.getForeignContact(aliceSide.kid);
+    expect(after.island.pin?.islandId ?? 'island-b').toBe('island-b');
   });
 
   it('keeps the contact in storage, not in memory', async () => {
