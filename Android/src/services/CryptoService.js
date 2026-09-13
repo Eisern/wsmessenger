@@ -850,7 +850,7 @@ const CryptoService = {
           let sigMsg;
           let chained = null;
           if (CHAIN_WRITE_ENABLED) {
-            const head = await ChainStore.get(threadId, 'out');
+            const head = await ChainStore.get(rid, 'out');
             chained = { seq: head.seq + 1, prev: head.hash };
             envelopeObj.sq = chained.seq;
             envelopeObj.pv = chained.prev;
@@ -866,7 +866,7 @@ const CryptoService = {
             // seq it carries must already be spoken for. An abandoned send
             // leaves a hole, which the peer reports as a GAP - the survivable
             // verdict, not an accusation.
-            await ChainStore.set(threadId, 'out', {
+            await ChainStore.set(rid, 'out', {
               seq: chained.seq,
               hash: await _threadChain.linkFor(sigMsg),
             });

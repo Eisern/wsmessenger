@@ -83,14 +83,20 @@ const _threadChain = (globalThis.WSThreadChain || null) && globalThis.WSThreadCh
 // Where this device keeps a thread's two hash chains: the one it writes and
 // the one it verifies. Not secret - these are hashes of bytes the peer already
 // signed - so they sit in plain storage next to the rest of the thread state.
+//
+// Keyed by the island-scoped slot (`dmRid`), not by the thread id: thread 42
+// exists on every island, and reusing one island's head for another island's
+// thread makes the peer there see a BREAK - the red "this was tampered with"
+// banner - on an honest message. Keys written under a bare thread id by a
+// build running with CHAIN_WRITE_ENABLED are simply never read again.
 const _chainPrefix = "__chain:";
-function _chainKey(threadId, who) {
-  return _chainPrefix + String(threadId) + ":" + String(who || "out");
+function _chainKey(rid, who) {
+  return _chainPrefix + String(rid) + ":" + String(who || "out");
 }
-async function _chainGet(threadId, who) {
+async function _chainGet(rid, who) {
   const genesis = { seq: 0, hash: globalThis.WSThreadChain.GENESIS_HEX };
   try {
-    const k = _chainKey(threadId, who);
+    const k = _chainKey(rid, who);
     const r = await chrome.storage.local.get(k);
     const v = r && r[k];
     if (v && typeof v.seq === "number" && /^[0-9a-f]{64}$/.test(v.hash || "")) {
@@ -99,10 +105,10 @@ async function _chainGet(threadId, who) {
   } catch { /* unreadable state is the same as no state */ }
   return genesis;
 }
-async function _chainSet(threadId, who, state) {
+async function _chainSet(rid, who, state) {
   if (!state || typeof state.seq !== "number") return;
   try {
-    await chrome.storage.local.set({ [_chainKey(threadId, who)]: { seq: state.seq, hash: state.hash } });
+    await chrome.storage.local.set({ [_chainKey(rid, who)]: { seq: state.seq, hash: state.hash } });
   } catch (e) {
     // Failing to persist means the next message reports a gap: noisy but
     // honest, and it must never block sending.
@@ -1875,7 +1881,7 @@ async function encryptDm(threadId, plaintext, peerUsername) {
       let sigMsg;
       let chained = null;
       if (CHAIN_WRITE_ENABLED && _threadChain) {
-        const head = await _chainGet(threadId, "out");
+        const head = await _chainGet(dmRid(threadId), "out");
         chained = { seq: head.seq + 1, prev: head.hash };
         envelopeObj.sq = chained.seq;
         envelopeObj.pv = chained.prev;
@@ -1890,7 +1896,7 @@ async function encryptDm(threadId, plaintext, peerUsername) {
         // with this exact ciphertext and retried unchanged, so the seq it
         // carries is already spoken for. An abandoned send leaves a hole,
         // which the peer reports as a GAP - the survivable verdict.
-        await _chainSet(threadId, "out", {
+        await _chainSet(dmRid(threadId), "out", {
           seq: chained.seq,
           hash: await _threadChain.linkFor(sigMsg),
         });

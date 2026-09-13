@@ -17,6 +17,13 @@
  *
  * A chain is per (thread, writer). Losing this state is survivable: the chain
  * resynchronises from the next message, at the cost of one reported gap.
+ *
+ * Threads are addressed by the island-scoped slot the caller already holds
+ * (`CryptoService._dmRid`), never by a bare thread id: thread 42 exists on
+ * every island, and handing one island's head to another island's thread of
+ * the same number makes the peer there see a BREAK - the red "this was
+ * tampered with" banner - on an honest message. This store stays a plain
+ * key-value store and resolves no islands of its own.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -24,15 +31,15 @@ import TC from './thread-chain';
 
 const PREFIX = 'chain_v1:';
 
-function keyFor(threadId, who) {
-  return `${PREFIX}${String(threadId)}:${String(who || 'out')}`;
+function keyFor(rid, who) {
+  return `${PREFIX}${String(rid)}:${String(who || 'out')}`;
 }
 
 const ChainStore = {
   /** Current head for a writer in a thread; genesis when nothing is stored. */
-  async get(threadId, who) {
+  async get(rid, who) {
     try {
-      const raw = await AsyncStorage.getItem(keyFor(threadId, who));
+      const raw = await AsyncStorage.getItem(keyFor(rid, who));
       if (!raw) return { seq: 0, hash: TC.GENESIS_HEX };
       const parsed = JSON.parse(raw);
       if (typeof parsed?.seq === 'number' && /^[0-9a-f]{64}$/.test(parsed?.hash || '')) {
@@ -42,11 +49,11 @@ const ChainStore = {
     return { seq: 0, hash: TC.GENESIS_HEX };
   },
 
-  async set(threadId, who, state) {
+  async set(rid, who, state) {
     if (!state || typeof state.seq !== 'number') return;
     try {
       await AsyncStorage.setItem(
-        keyFor(threadId, who),
+        keyFor(rid, who),
         JSON.stringify({ seq: state.seq, hash: state.hash }),
       );
     } catch (e) {
@@ -57,10 +64,10 @@ const ChainStore = {
   },
 
   /** Forget a thread's chains — used when its history is deleted. */
-  async clearThread(threadId) {
+  async clearThread(rid) {
     try {
       const keys = await AsyncStorage.getAllKeys();
-      const mine = keys.filter((k) => k.startsWith(`${PREFIX}${String(threadId)}:`));
+      const mine = keys.filter((k) => k.startsWith(`${PREFIX}${String(rid)}:`));
       if (mine.length) await AsyncStorage.multiRemove(mine);
     } catch (_e) { /* best effort */ }
   },
