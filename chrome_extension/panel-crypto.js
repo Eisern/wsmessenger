@@ -1961,7 +1961,18 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
 
         if (inner.sig && from) {
           try {
-            const peerPub = await fetchPeerEd25519PubKey(from);
+            // A cross-island contact has no entry in this island's key store,
+            // and should not need one: their signing key came from the contact
+            // card, out of band. Verifying against that is strictly stronger
+            // than verifying against whatever a key server hands over - it is
+            // what stops a dishonest island forging messages from them.
+            // Our own copies in that thread are still ours, so they verify
+            // against our own key like anywhere else.
+            const __fc = _foreignThreadCache.get(Number(threadId));
+            const __mine = fromLower && fromLower === String(getMeUsername() || "").toLowerCase();
+            const peerPub = (__fc && !__mine && __fc.ed25519PubB64)
+              ? new Uint8Array(CU().base64ToArrayBuffer(__fc.ed25519PubB64))
+              : await fetchPeerEd25519PubKey(from);
             if (peerPub) {
               const cu = CU();
               // v2 when the envelope carries its place in the sender's chain,
@@ -2619,13 +2630,24 @@ async function _migrateLegacyFpPins() {
 }
 
 /**
- * Address of a peer's pin on this island. Async because it waits for the
- * one-time migration above; every caller is already async.
+ * Address of a pin, given the island the peer's name was read on.
+ *
+ * For a local peer that is this island and their username. For a cross-island
+ * contact it is THEIR island and their kid: their name is not a name here, and
+ * the kid is what their contact card bound the keys to.
+ */
+function _fpBaseOn(island, me, peer) {
+  return _knownFpPrefix + String(island).trim().toLowerCase() + ":" +
+    String(me).trim().toLowerCase() + ":" + String(peer).trim().toLowerCase();
+}
+
+/**
+ * Address of a local peer's pin. Async because it waits for the one-time
+ * migration above; every caller is already async.
  */
 async function _fpBase(me, peer) {
   await _ensureFpPinsMigrated();
-  return _knownFpPrefix + ISLAND_ID + ":" +
-    String(me).trim().toLowerCase() + ":" + String(peer).trim().toLowerCase();
+  return _fpBaseOn(ISLAND_ID, me, peer);
 }
 
 /**
@@ -2931,3 +2953,444 @@ safePost({ type: "auth_get" });
 
 window.__panelCryptoReady = true;
 try { window.dispatchEvent(new Event("ws_crypto_ready")); } catch {}
+
+// ============================
+// Cross-island contacts
+// ============================
+//
+// A contact on another island is reached through two mailboxes: one this
+// client opened at home for their key, which is where their messages arrive,
+// and one they opened for us on their island, which is where ours go. See
+// foreign-dm.js for the protocol and
+// docs/internal/cross-island-dm-assessment.md for why it is shaped this way.
+//
+// Everything below is panel-side on purpose. The worker addresses one island;
+// these requests address another, and the delivery secret for it is held by
+// this client rather than by either server.
+
+const FD = () => globalThis.WSForeignDm || null;
+
+// thread id -> contact, for the decrypt path: it runs per message and must not
+// read storage to find out whether a thread is a cross-island one.
+const _foreignThreadCache = new Map();
+
+function _foreignDeps() {
+  const cu = CU();
+  return {
+    fetchJson: async (url, opts = {}) => {
+      const r = await fetch(url, opts);
+      let body = null;
+      try { body = await r.json(); } catch { /* empty body */ }
+      return { ok: r.ok, status: r.status, body };
+    },
+    sign: async (bytes) => {
+      const seed = CM()?.ed25519Seed;
+      if (!seed) throw new Error("Locked: no signing key");
+      return _u8FromB64url(await cu.ed25519Sign(seed, bytes));
+    },
+    verify: (pub, sig, msg) => cu.ed25519Verify(pub, sig, msg),
+    sha256: async (bytes) => new Uint8Array(await cu.sha256Raw(bytes)),
+    hmacSha256: async (keyBytes, msgBytes) => {
+      const k = await crypto.subtle.importKey(
+        "raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+      );
+      return new Uint8Array(await crypto.subtle.sign("HMAC", k, msgBytes));
+    },
+    randomBytes: (n) => crypto.getRandomValues(new Uint8Array(n)),
+    now: () => Date.now(),
+  };
+}
+
+function _u8FromB64url(s) {
+  let b64 = String(s || "").replace(/-/g, "+").replace(/_/g, "/");
+  b64 += "=".repeat((4 - (b64.length % 4)) % 4);
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function _b64FromU8(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+  return btoa(s);
+}
+
+const _FOREIGN_INDEX = "__foreign_index:";
+
+function _foreignIndexKey() {
+  return _FOREIGN_INDEX + ISLAND_ID + ":" + String(getMeUsername() || "").toLowerCase();
+}
+
+/** Every cross-island contact this account has on this island. */
+async function listForeignContacts() {
+  try {
+    // Reading the list is also how the decrypt path learns which threads are
+    // foreign: the panel lists contacts before it can open one.
+
+    const idxKey = _foreignIndexKey();
+    const stored = await chrome.storage.local.get([idxKey]);
+    const kids = Array.isArray(stored[idxKey]) ? stored[idxKey] : [];
+    if (!kids.length) return [];
+    const keys = kids.map((kid) => FD().contactKey(ISLAND_ID, getMeUsername(), kid));
+    const blobs = await chrome.storage.local.get(keys);
+    const out = keys.map((k) => blobs[k]).filter(Boolean);
+    for (const c of out) _foreignThreadCache.set(foreignThreadId(c), c);
+    return out;
+  } catch (e) {
+    console.warn("[Foreign] list failed:", e?.message || e);
+    return [];
+  }
+}
+
+async function getForeignContact(peerKid) {
+  const key = FD().contactKey(ISLAND_ID, getMeUsername(), peerKid);
+  const stored = await chrome.storage.local.get([key]);
+  return stored[key] || null;
+}
+
+async function saveForeignContact(contact) {
+  const key = FD().contactKey(ISLAND_ID, getMeUsername(), contact.kid);
+  const idxKey = _foreignIndexKey();
+  const stored = await chrome.storage.local.get([idxKey]);
+  const kids = Array.isArray(stored[idxKey]) ? stored[idxKey] : [];
+  if (!kids.includes(contact.kid)) kids.push(contact.kid);
+  await chrome.storage.local.set({ [key]: contact, [idxKey]: kids });
+}
+
+/** The thread a foreign contact's conversation is displayed under. */
+function foreignThreadId(contact) {
+  return Number(contact?.inbox?.threadId || 0);
+}
+
+async function isForeignThread(threadId) {
+  const tid = Number(threadId);
+  if (!tid) return null;
+  const all = await listForeignContacts();
+  return all.find((c) => foreignThreadId(c) === tid) || null;
+}
+
+/**
+ * The card this user hands to somebody on another island, out of band.
+ *
+ * It carries the island's signed entry points so the other side can reach this
+ * island without being told where by a third party, and it is signed by this
+ * user's own key, so nothing in it has to be taken on the island's word.
+ */
+async function buildMyContactBlobText() {
+  const me = getMeUsername();
+  const myPub = CM()?.userPublicKeyPem;
+  if (!me || !myPub) throw new Error("Unlock first");
+
+  const cu = CU();
+  const kid = await cu.fingerprintPublicKey(myPub);
+  const seed = CM()?.ed25519Seed;
+  if (!seed) throw new Error("Unlock first");
+  const edPub = _b64FromU8(await cu.ed25519GetPublicKey(seed));
+
+  let islandId = ISLAND_ID;
+  let signingKey = "";
+  let entryPoints = [{ apiBase: API_BASE, wsBase: API_BASE.replace(/^http/, "ws"), label: "" }];
+  try {
+    const r = await fetch(API_BASE + "/.well-known/wsapp-island");
+    if (r.ok) {
+      const doc = await r.json();
+      if (doc?.payload?.island_id) {
+        islandId = doc.payload.island_id;
+        signingKey = doc.signing_key_b64 || "";
+        if (Array.isArray(doc.payload.entry_points) && doc.payload.entry_points.length) {
+          entryPoints = doc.payload.entry_points;
+        }
+      }
+    }
+  } catch {
+    // An island that publishes no list still works: the card then carries the
+    // address this client is actually using, which is what the peer needs.
+  }
+
+  const blob = await FD().buildContactBlob(
+    { kid, x25519PubB64: myPub, ed25519PubB64: edPub, displayName: me },
+    { islandId, signingKeyB64: signingKey, entryPoints },
+    _foreignDeps().sign,
+  );
+  return JSON.stringify(blob);
+}
+
+/**
+ * Take somebody's card, open a mailbox for them here, and pin their keys.
+ *
+ * Opening the mailbox IS the consent: until this runs, nothing on this island
+ * will accept a message addressed to this user from that key.
+ */
+async function addForeignContact(blobText) {
+  const me = getMeUsername();
+  if (!me) throw new Error("Not logged in");
+  await ensureCryptoReady({ interactive: true, reason: "Add contact" });
+
+  let blob;
+  try {
+    blob = JSON.parse(String(blobText || "").trim());
+  } catch {
+    throw new Error("That does not look like a contact card");
+  }
+
+  const seen = await FD().verifyContactBlob(blob, _foreignDeps());
+  if (!seen.ok) throw new Error(`Card rejected: ${seen.reason}`);
+  const c = seen.contact;
+
+  // Delivering to their island means fetching a host this extension was never
+  // granted. The request has to happen while the click that opened this dialog
+  // still counts as a gesture, which is why it is here and not at send time.
+  await _requestForeignOrigins(c.entryPoints);
+
+  if (c.kid === await CU().fingerprintPublicKey(CM().userPublicKeyPem)) {
+    throw new Error("That is your own card");
+  }
+
+  const token = await requestToken();
+  if (!token) throw new Error("No token");
+
+  // The key their messages to us will be encrypted with. We generate it
+  // because we own the mailbox; they receive it when they claim.
+  const cu = CU();
+  const keyB64 = await cu.exportRoomKey(await cu.generateRoomKey(true));
+  const keyId = await cu.fingerprintRoomKeyBase64(keyB64);
+
+  const created = await fetch(API_BASE + "/foreign/box", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify({
+      peer_kid: c.kid,
+      peer_x25519_pub: c.x25519PubB64,
+      peer_ed25519_pub: c.ed25519PubB64,
+      label: c.displayName,
+      encrypted_thread_key: await cu.encryptRoomKeyForUser(CM().userPublicKeyPem, keyB64),
+      key_id: keyId,
+    }),
+  });
+  const createdBody = await created.json().catch(() => ({}));
+  if (!created.ok) throw new Error(createdBody.detail || `Could not open mailbox (${created.status})`);
+  const threadId = Number(createdBody.thread_id);
+
+  const wrapped = await fetch(API_BASE + `/foreign/box/${threadId}/peer-key`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify({
+      peer_kid: c.kid,
+      peer_x25519_pub: c.x25519PubB64,
+      peer_ed25519_pub: c.ed25519PubB64,
+      encrypted_thread_key: await cu.encryptRoomKeyForUser(c.x25519PubB64, keyB64),
+      key_id: keyId,
+    }),
+  });
+  if (!wrapped.ok) throw new Error(`Could not leave the key for them (${wrapped.status})`);
+
+  // Pin both halves of their identity, on their island rather than ours: the
+  // name means nothing here, and the kid is what the card bound the keys to.
+  await chrome.storage.local.set({
+    [_fpBaseOn(c.islandId, me, c.kid)]: c.kid,
+    [_fpBaseOn(c.islandId, me, c.kid) + ":ed"]: c.ed25519PubB64,
+  });
+
+  const contact = {
+    v: 1,
+    kid: c.kid,
+    displayName: c.displayName || c.kid.slice(0, 8),
+    x25519PubB64: c.x25519PubB64,
+    ed25519PubB64: c.ed25519PubB64,
+    island: { islandId: c.islandId, signingKeyB64: c.islandSigningKeyB64, entryPoints: c.entryPoints },
+    inbox: { threadId, keyB64, keyId },
+    outbox: null,
+    addedAt: Date.now(),
+  };
+  await saveForeignContact(contact);
+
+  // Their mailbox may not exist yet - they add us in their own time - so a
+  // failure here is normal and retried whenever the conversation is opened.
+  try {
+    await claimForeignOutbox(contact);
+  } catch (e) {
+    console.log("[Foreign] outbox not claimable yet:", e?.message || e);
+  }
+  return await getForeignContact(c.kid);
+}
+
+/**
+ * Collect the address, delivery secret and thread key of the mailbox this
+ * contact opened for us on their island.
+ */
+async function claimForeignOutbox(contact) {
+  const cu = CU();
+  const myKid = await cu.fingerprintPublicKey(CM().userPublicKeyPem);
+  const bases = (contact.island?.entryPoints || []).map((e) => e.apiBase).filter(Boolean);
+  if (!bases.length) throw new Error("Contact card carries no address");
+
+  let last = null;
+  for (const base of bases) {
+    const r = await FD().claimMailbox(_foreignDeps(), base, myKid);
+    if (r.ok) {
+      let keyB64 = null;
+      if (r.encryptedThreadKey) {
+        try {
+          keyB64 = await cu.decryptRoomKeyForUser(CM().userPrivateKey, r.encryptedThreadKey);
+        } catch (e) {
+          console.warn("[Foreign] their key did not unwrap:", e?.message || e);
+        }
+      }
+      const updated = {
+        ...contact,
+        outbox: {
+          apiBase: base,
+          threadId: r.threadId,
+          secretB64: r.deliverySecretB64,
+          expiresAt: r.expiresAt,
+          keyB64,
+          keyId: r.keyId,
+        },
+      };
+      await saveForeignContact(updated);
+      return updated;
+    }
+    last = r;
+    // 403 is the island's single answer to every refusal, including "no
+    // mailbox here yet". Trying the next entry point is still worth it: this
+    // one may simply be unreachable.
+  }
+  throw new Error(`Could not claim their mailbox (${last?.status || "no answer"})`);
+}
+
+/**
+ * Put both directions' keys where decryption will find them.
+ *
+ * The conversation holds ciphertext under two keys - theirs for what they
+ * wrote, ours for the copies we kept - and every message names the key it used,
+ * so both simply go into the same slot's archive.
+ */
+async function ensureForeignKeysReady(contact) {
+  _foreignThreadCache.set(foreignThreadId(contact), contact);
+  const rid = dmRid(foreignThreadId(contact));
+  const cm = CM();
+  if (!cm) throw new Error("Locked");
+
+  if (contact.inbox?.keyB64) {
+    await cm.loadRoomKey(rid, contact.inbox.keyB64);
+    if (contact.inbox.keyId) {
+      await cm.loadArchivedKey(rid, contact.inbox.keyId, contact.inbox.keyB64);
+    }
+  }
+  if (contact.outbox?.keyB64 && contact.outbox?.keyId) {
+    await cm.loadArchivedKey(rid, contact.outbox.keyId, contact.outbox.keyB64);
+  }
+  await saveRoomKeyArchive(rid);
+}
+
+/**
+ * Encrypt for a cross-island contact and deliver it twice: to their island,
+ * which is where they will read it, and to ours, so our own outgoing messages
+ * survive a reinstall. Both copies are the same ciphertext under their
+ * mailbox's key.
+ */
+async function sendForeignMessage(contact, plaintext) {
+  let c = contact;
+  if (!c.outbox || !c.outbox.keyB64) c = await claimForeignOutbox(c);
+  if (!c.outbox?.keyB64) throw new Error("No key for this contact yet");
+
+  const cu = CU();
+  const me = getMeUsername();
+  const seed = CM()?.ed25519Seed;
+  const envelope = { ss: 1, from: me, body: plaintext };
+  if (seed) {
+    envelope.sig = await cu.ed25519Sign(
+      seed, cu._dmSigMessage(c.outbox.threadId, me, plaintext),
+    );
+  }
+
+  const key = await cu.importRoomKey(c.outbox.keyB64);
+  const enc = await cu.encryptMessage(key, JSON.stringify(envelope));
+  const ciphertext = JSON.stringify({ ...enc, kid: c.outbox.keyId });
+
+  let res = await FD().deliver(_foreignDeps(), {
+    apiBase: c.outbox.apiBase,
+    threadId: c.outbox.threadId,
+    secretB64: c.outbox.secretB64,
+  }, ciphertext);
+
+  // A delivery secret lasts a day. An expired one is refused with the same
+  // 403 as everything else, so re-claim once before believing it.
+  if (!res.ok && (res.status === 403 || res.status === 401)) {
+    c = await claimForeignOutbox(c);
+    res = await FD().deliver(_foreignDeps(), {
+      apiBase: c.outbox.apiBase,
+      threadId: c.outbox.threadId,
+      secretB64: c.outbox.secretB64,
+    }, ciphertext);
+  }
+  if (!res.ok) throw new Error(`Delivery refused (${res.status})`);
+
+  // Our own copy, into our own mailbox, over the ordinary path.
+  safePost({ type: "dm_send", thread_id: foreignThreadId(c), text: ciphertext });
+  return true;
+}
+
+/**
+ * Forget a cross-island contact and close the mailbox their messages arrive
+ * in. Closing the mailbox is what actually stops them: the delivery secret
+ * they hold opens nothing once the box is gone.
+ */
+async function removeForeignContact(peerKid) {
+  const contact = await getForeignContact(peerKid);
+  if (!contact) return false;
+
+  const token = await requestToken();
+  if (token && foreignThreadId(contact)) {
+    const r = await fetch(API_BASE + `/foreign/box/${foreignThreadId(contact)}`, {
+      method: "DELETE",
+      headers: { Authorization: "Bearer " + token },
+    });
+    // A mailbox already gone is the state we wanted; anything else is a real
+    // failure and must not leave the local half pointing at a live box.
+    if (!r.ok && r.status !== 404) throw new Error(`Could not close the mailbox (${r.status})`);
+  }
+
+  const key = FD().contactKey(ISLAND_ID, getMeUsername(), peerKid);
+  const idxKey = _foreignIndexKey();
+  const stored = await chrome.storage.local.get([idxKey]);
+  const kids = (Array.isArray(stored[idxKey]) ? stored[idxKey] : []).filter((k) => k !== peerKid);
+  await chrome.storage.local.set({ [idxKey]: kids });
+  await chrome.storage.local.remove([key]);
+  _foreignThreadCache.delete(foreignThreadId(contact));
+  return true;
+}
+
+/**
+ * Ask for host access to a contact's island.
+ *
+ * Chrome gates fetch on host permissions but not WebSocket, so skipping this
+ * yields a client that looks connected and fails every delivery - the same
+ * trap the entry-point work documented for the worker.
+ */
+async function _requestForeignOrigins(entryPoints) {
+  const origins = [];
+  for (const ep of entryPoints || []) {
+    try {
+      const u = new URL(ep.apiBase);
+      if (u.protocol !== "https:") continue;   // http is refused by the CSP anyway
+      origins.push(u.origin + "/*");
+    } catch { /* skip an address we cannot parse */ }
+  }
+  if (!origins.length) return true;
+  try {
+    if (await chrome.permissions.contains({ origins })) return true;
+    const granted = await chrome.permissions.request({ origins });
+    if (!granted) {
+      throw new Error("Access to their server was declined, so nothing could be delivered there");
+    }
+    return true;
+  } catch (e) {
+    if (e && /declined/.test(e.message || "")) throw e;
+    // Older Chrome, or a call outside a gesture: let the delivery attempt be
+    // what reports the problem rather than blocking the contact here.
+    console.warn("[Foreign] permission request failed:", e?.message || e);
+    return false;
+  }
+}

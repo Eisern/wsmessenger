@@ -2177,6 +2177,9 @@ function setModeDm(threadId, peerUsername) {
   dmMode = true;
   activeDmThreadId = Number(threadId);
   activeDmPeer = String(peerUsername || "").trim();
+  // Derived rather than set by whoever opened the thread: a stale value here
+  // would send the next message to the wrong island, or to none.
+  __activeForeignKid = _foreignThreadCache.get(Number(threadId))?.kid || null;
 
   __setDmModeUI(true);
 
@@ -2816,6 +2819,9 @@ function renderDmList(items) {
     empty.className = "dm-empty";
     empty.textContent = "No conversations yet.";
     dmListEl.appendChild(empty);
+    // Somebody whose only correspondents are on other servers has an empty
+    // local list and a full contact list; returning here would hide them.
+    __renderForeignDmSection().catch(() => {});
     return;
   }
 
@@ -2916,6 +2922,9 @@ function renderDmList(items) {
 
   renderSection("Pinned", pinned, "is-pinned-section");
   renderSection("Recent", recent, "is-recent-section");
+  // Appended asynchronously: it reads local storage, and the local list must
+  // not wait on it.
+  __renderForeignDmSection().catch(() => {});
 
   __renderUnreadDotsInLists();
 }
@@ -6263,4 +6272,174 @@ try {
       setStatus(`Error: ${err?.message || err}`);
     }
   });
+})();
+
+// =============================
+// Cross-island contacts in the DM list
+// =============================
+//
+// They are listed apart from local conversations because they are a different
+// kind of thing: reached by a key rather than a name, and living half on
+// another server. Opening one lands in the ordinary chat view - the mailbox is
+// an ordinary thread here - so only the key loading and the send path differ.
+
+function __foreignCardText(kid) {
+  return String(kid || "").slice(0, 8);
+}
+
+async function __renderForeignDmSection() {
+  if (!dmListEl) return;
+  // Two paths land here - the dm_list response and an explicit refresh after
+  // adding somebody - and they can both run for one user action.
+  for (const old of dmListEl.querySelectorAll(".is-foreign-section")) old.remove();
+
+  let contacts = [];
+  try {
+    contacts = await listForeignContacts();
+  } catch (e) {
+    console.warn("[Foreign] list failed:", e?.message || e);
+    return;
+  }
+  if (!contacts.length) return;
+
+  // The empty-state line is about local conversations; with contacts present
+  // it would contradict what is right below it.
+  const empty = dmListEl.querySelector(".dm-empty");
+  if (empty) empty.remove();
+
+  const sec = document.createElement("div");
+  sec.className = "dm-section is-foreign-section";
+  const head = document.createElement("div");
+  head.className = "dm-section-title";
+  head.textContent = "Other servers";
+  sec.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "dm-section-body";
+
+  for (const contact of contacts) {
+    const threadId = foreignThreadId(contact);
+    if (!threadId) continue;
+    const name = contact.displayName || __foreignCardText(contact.kid);
+
+    const btn = document.createElement("button");
+    btn.className = "dm-item dm-item-card";
+    btn.dataset.threadId = String(threadId);
+    btn.title = `${name} on ${contact.island?.islandId || "another server"}`;
+
+    const avatar = document.createElement("span");
+    avatar.className = "dm-avatar";
+    avatar.textContent = makeInitials(name);
+    btn.appendChild(avatar);
+
+    const main = document.createElement("span");
+    main.className = "dm-main";
+    const nameEl = document.createElement("span");
+    nameEl.className = "dm-peer";
+    nameEl.textContent = name;
+    const metaEl = document.createElement("span");
+    metaEl.className = "dm-meta";
+    // Whether we can write yet is the one piece of state worth showing: until
+    // they add our card back, there is no mailbox of theirs to deliver into.
+    metaEl.textContent = contact.outbox?.keyB64
+      ? (contact.island?.islandId || "another server")
+      : "waiting for them to add you";
+    main.appendChild(nameEl);
+    main.appendChild(metaEl);
+    btn.appendChild(main);
+
+    if (dmMode && Number(activeDmThreadId) === threadId) btn.classList.add("active");
+
+    btn.onclick = async () => {
+      try {
+        await ensureCryptoReady({ interactive: true, reason: "Open conversation" });
+        let c = contact;
+        if (!c.outbox?.keyB64) {
+          try { c = await claimForeignOutbox(c); } catch { /* still one-way */ }
+        }
+        await ensureForeignKeysReady(c);
+        setModeDm(threadId, c.displayName || __foreignCardText(c.kid));
+        pushRecent("dm", threadId, c.displayName || "");
+        clearChat();
+        safePost({ type: "dm_connect", thread_id: threadId, peer_username: "" });
+        safePost({ type: "dm_history", thread_id: threadId, limit: 50 });
+      } catch (e) {
+        await __ui.alert("Could not open: " + (e?.message || e));
+      }
+    };
+
+    btn.oncontextmenu = async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const ok = await __ui.confirm(
+        `Remove ${name} and close their mailbox on this server? ` +
+        `They will no longer be able to deliver to you, and the conversation stored here goes with it.`,
+      );
+      if (ok) {
+        try {
+          await removeForeignContact(contact.kid);
+          await __refreshDmListNow();
+        } catch (e) {
+          await __ui.alert("Could not remove: " + (e?.message || e));
+        }
+      }
+    };
+
+    body.appendChild(btn);
+  }
+
+  sec.appendChild(body);
+  dmListEl.appendChild(sec);
+}
+
+async function __refreshDmListNow() {
+  try { safePost({ type: "dm_list" }); } catch {}
+  try { await __renderForeignDmSection(); } catch {}
+}
+
+(function wireForeignButtons() {
+  const cardBtn = document.getElementById("dmCardBtn");
+  const addBtn = document.getElementById("dmAddForeignBtn");
+
+  if (cardBtn) {
+    cardBtn.onclick = async () => {
+      try {
+        await ensureCryptoReady({ interactive: true, reason: "Contact card" });
+        const text = await buildMyContactBlobText();
+        // Shown in a prompt rather than copied silently: the card is the thing
+        // the other person's trust rests on, so it should be visible and
+        // deliberately handed over.
+        await __ui.prompt(
+          "Your contact card. Send it to the person you want to write to, over a channel you both trust:",
+          { title: "My contact card", value: text, inputType: "text", okText: "Done", cancelText: "Close" },
+        );
+        try { await navigator.clipboard.writeText(text); } catch { /* prompt still shows it */ }
+      } catch (e) {
+        await __ui.alert("Could not build the card: " + (e?.message || e));
+      }
+    };
+  }
+
+  if (addBtn) {
+    addBtn.onclick = async () => {
+      const text = await __ui.prompt(
+        "Paste their contact card. This opens a mailbox on this server for their key — " +
+        "nobody can write to you here until you do.",
+        { title: "Add someone from another server", inputType: "text", okText: "Add", placeholder: "{\"payload\":..." },
+      );
+      if (!text) return;
+      try {
+        const contact = await addForeignContact(text);
+        await __refreshDmListNow();
+        await __ui.alert(
+          contact?.outbox?.keyB64
+            ? `${contact.displayName} added. You can write to each other now.`
+            : `${contact?.displayName || "Contact"} added. They need to add your card before you can write to them; ` +
+              `their messages to you will arrive as soon as they do.`,
+        );
+      } catch (e) {
+        await __ui.alert("Could not add: " + (e?.message || e));
+      }
+    };
+  }
 })();

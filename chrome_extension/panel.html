@@ -163,12 +163,15 @@
         <div class="panel-head">
           <div class="panel-title">Direct</div>
           <div class="panel-actions">
+            <button id="dmCardBtn" class="panel-btn" type="button" title="Show your contact card for someone on another server">My card</button>
+            <button id="dmAddForeignBtn" class="panel-btn" type="button" title="Add someone from another server by their contact card">Add card</button>
             <button id="dmRefreshBtn" class="panel-btn" type="button" title="Refresh">Refresh</button>
           </div>
         </div>
         <div class="panel-scroll">
           <div id="dmList" class="dm-list"></div>
           <div class="panel-hint" style="margin-top:10px;">Tap a dialog to open. Use `...` (or right-click) for actions.</div>
+          <div class="panel-hint" style="margin-top:6px;">People on another server are added by exchanging a contact card, and appear under &ldquo;Other servers&rdquo;.</div>
         </div>
       </section>
 
@@ -455,6 +458,7 @@
   <script src="rpc.js"></script>
   <script src="endpoints.js"></script>
   <script src="thread-chain.js"></script>
+  <script src="foreign-dm.js"></script>
 
   <script src="panel.js"></script>
   <script src="panel-crypto.js"></script>

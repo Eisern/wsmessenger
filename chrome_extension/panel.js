@@ -16,6 +16,11 @@ let API_BASE = "https://imagine-1-ws.xyz";
 // still addresses the island it is actually talking to.
 let ISLAND_ID = "imagine-1-ws.xyz";
 
+// Which cross-island contact the open conversation belongs to, if any. A
+// foreign thread looks like any other thread to the read path; only sending
+// differs, because it goes to another island and keeps a copy here.
+let __activeForeignKid = null;
+
 // --- Runtime backend resolution -------------------------------------------
 // Must run before anything issues a request. background.js resolves the same
 // `server_config` key for its own calls; the panel needs it too, otherwise the
@@ -3134,6 +3139,17 @@ async function send() {
 
     const sendPeer = activeDmPeer;
     try {
+      if (__activeForeignKid) {
+        // Two deliveries, one ciphertext: their island, where they read it,
+        // and ours, so our own outgoing half survives a reinstall.
+        const contact = await getForeignContact(__activeForeignKid);
+        if (!contact) throw new Error("Contact not found");
+        await sendForeignMessage(contact, payload);
+        __clearReplyTo();
+        try { __markDmSeen?.(activeDmThreadId); } catch {}
+        msgInput.value = "";
+        return;
+      }
       const enc = await encryptDm(activeDmThreadId, payload, sendPeer);
       safePost({ type: "dm_send", thread_id: activeDmThreadId, text: enc });
       __clearReplyTo();
