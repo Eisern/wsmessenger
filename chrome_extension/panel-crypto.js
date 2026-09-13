@@ -3419,27 +3419,56 @@ async function sendForeignMessage(contact, plaintext) {
     encrypted: true, iv: enc.iv, data: enc.data, kid, aad_v1: true,
   });
 
-  let res = await FD().deliver(_foreignDeps(), {
+  const box = () => ({
     apiBase: c.outbox.apiBase,
     threadId: c.outbox.threadId,
     secretB64: c.outbox.secretB64,
-  }, ciphertext);
+  });
+
+  let res;
+  try {
+    res = await FD().deliver(_foreignDeps(), box(), ciphertext);
+  } catch (e) {
+    // Their island did not answer at all. Nothing about this message is wrong,
+    // so it goes in the queue rather than being announced as a failure.
+    res = { ok: false, status: 0, nonceB64: null, transport: e?.message || "unreachable" };
+  }
 
   // A delivery secret lasts a day. An expired one is refused with the same
   // 403 as everything else, so re-claim once before believing it.
   if (!res.ok && (res.status === 403 || res.status === 401)) {
-    c = await claimForeignOutbox(c);
-    res = await FD().deliver(_foreignDeps(), {
-      apiBase: c.outbox.apiBase,
-      threadId: c.outbox.threadId,
-      secretB64: c.outbox.secretB64,
-    }, ciphertext);
+    try {
+      c = await claimForeignOutbox(c);
+      res = await FD().deliver(_foreignDeps(), box(), ciphertext);
+    } catch { /* fall through to the queue */ }
   }
-  if (!res.ok) throw new Error(`Delivery refused (${res.status})`);
 
-  // Our own copy, into our own mailbox, over the ordinary path.
+  // Our own copy goes to our own island either way: if that is unreachable,
+  // the user is looking at a client that cannot do anything at all, which is
+  // the case the queue is explicitly NOT for.
   safePost({ type: "dm_send", thread_id: foreignThreadId(c), text: ciphertext });
-  return true;
+
+  if (res.ok) {
+    // A successful send is also the best moment to try whatever is waiting:
+    // their island is evidently up.
+    drainForeignOutbox().catch(() => {});
+    return { ok: true };
+  }
+
+  const ob = foreignOutbox();
+  if (ob && (res.status === 0 || res.status === 429 || res.status >= 500)) {
+    await ob.enqueue({
+      threadId: c.outbox.threadId,
+      // The envelope as it goes on the wire. deliver() encodes it; the field
+      // name is the queue's, and it never looks inside.
+      ciphertextB64: ciphertext,
+      nonceB64: res.nonceB64 || FD()._b64url(_foreignDeps().randomBytes(16)),
+      meta: { kid: c.kid },
+    });
+    return { ok: false, queued: true };
+  }
+
+  throw new Error(`Delivery refused (${res.status})`);
 }
 
 /**
@@ -3503,4 +3532,93 @@ async function _requestForeignOrigins(entryPoints) {
     console.warn("[Foreign] permission request failed:", e?.message || e);
     return false;
   }
+}
+
+// ============================
+// Cross-island outbox
+// ============================
+//
+// Until now a cross-island message that could not be delivered was lost: the
+// send threw, an alert appeared, and the input box was cleared anyway. Your own
+// island being down is something you notice immediately, because nothing else
+// works either. Somebody else's island being down looks like nothing at all -
+// you are online, your server is fine, and the message is simply gone.
+//
+// outbox.js holds the queue and decides what each failure means; this is the
+// part that knows where a message was going and how to say it again.
+
+const _OUTBOX_KEY_PREFIX = "__foreign_outbox:";
+
+function _outboxKey() {
+  return _OUTBOX_KEY_PREFIX + ISLAND_ID + ":" + String(getMeUsername() || "").toLowerCase();
+}
+
+let _foreignOutbox = null;
+
+function foreignOutbox() {
+  if (_foreignOutbox) return _foreignOutbox;
+  const OB = globalThis.WSOutbox;
+  if (!OB) return null;
+  _foreignOutbox = OB.createOutbox({
+    storage: {
+      load: async () => {
+        const key = _outboxKey();
+        const got = await chrome.storage.local.get([key]);
+        return Array.isArray(got[key]) ? got[key] : [];
+      },
+      save: async (items) => {
+        await chrome.storage.local.set({ [_outboxKey()]: items });
+      },
+    },
+    now: () => Date.now(),
+    log: (msg, data) => console.log("[Outbox]", msg, data || ""),
+  });
+  return _foreignOutbox;
+}
+
+/**
+ * Try every queued message that is due.
+ *
+ * The nonce is the item's, never a fresh one: the island de-duplicates on
+ * (thread_id, nonce), which is what makes repeating a message that already
+ * arrived answer 409 instead of delivering it twice.
+ */
+async function drainForeignOutbox() {
+  const ob = foreignOutbox();
+  if (!ob) return null;
+  try {
+    return await ob.drain(async (item) => {
+      const kid = item?.meta?.kid;
+      const contact = kid ? await getForeignContact(kid) : null;
+      if (!contact) return { status: 400 };          // the contact is gone; drop it
+
+      let c = contact;
+      if (!c.outbox?.secretB64 || item.secretRefreshed) {
+        try { c = await claimForeignOutbox(c); } catch { return { status: 0 }; }
+      }
+      if (!c.outbox?.secretB64) return { status: 0 };
+
+      try {
+        return await FD().deliver(
+          _foreignDeps(),
+          { apiBase: c.outbox.apiBase, threadId: c.outbox.threadId, secretB64: c.outbox.secretB64 },
+          item.ciphertextB64,
+          { nonce: _u8FromB64url(item.nonceB64) },
+        );
+      } catch (e) {
+        // Unreachable rather than refused: keep it and back off.
+        return { name: e?.name || "TypeError" };
+      }
+    });
+  } catch (e) {
+    console.warn("[Outbox] drain failed:", e?.message || e);
+    return null;
+  }
+}
+
+/** How many messages are still waiting, for the UI. */
+async function foreignOutboxSize() {
+  const ob = foreignOutbox();
+  if (!ob) return 0;
+  try { return await ob.size(); } catch { return 0; }
 }

@@ -3156,10 +3156,19 @@ async function send() {
         // and ours, so our own outgoing half survives a reinstall.
         const contact = await getForeignContact(__activeForeignKid);
         if (!contact) throw new Error("Contact not found");
-        await sendForeignMessage(contact, payload);
+        const outcome = await sendForeignMessage(contact, payload);
         __clearReplyTo();
         try { __markDmSeen?.(activeDmThreadId); } catch {}
         msgInput.value = "";
+        if (outcome && outcome.queued) {
+          // Not an error: their island did not answer, the message is kept and
+          // will be repeated. Clearing the box without saying this is what used
+          // to lose messages outright.
+          await __ui.alert(
+            "Their server did not answer. The message is queued and will be sent " +
+            "as soon as it can be - you can close the panel.",
+          );
+        }
         return;
       }
       const enc = await encryptDm(activeDmThreadId, payload, sendPeer);

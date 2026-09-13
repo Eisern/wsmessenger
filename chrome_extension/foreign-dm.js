@@ -265,10 +265,16 @@
    * @param {object} box  { apiBase, threadId, secretB64 }
    * @param {string} ciphertextJson  the encrypted envelope, exactly as stored
    */
-  async function deliver(deps, box, ciphertextJson) {
+  async function deliver(deps, box, ciphertextJson, opts) {
     const ptBytes = utf8(ciphertextJson);
     const ts = deps.now ? deps.now() : Date.now();
-    const nonce = deps.randomBytes(16);
+    // A retry MUST reuse the nonce of the attempt it repeats. The island
+    // de-duplicates on (thread_id, nonce), so the same nonce turns a repeat of
+    // a message that did arrive into a 409 instead of a second copy - while the
+    // timestamp and the tag are recomputed, because the island only accepts a
+    // few minutes either side of now. Callers that queue a message keep the
+    // nonce returned below and hand it back here.
+    const nonce = (opts && opts.nonce) ? opts.nonce : deps.randomBytes(16);
     const digest = await deps.sha256(ptBytes);
     const msg = concatBytes([
       utf8(String(box.threadId)), utf8("|"),
@@ -289,7 +295,7 @@
         tag_b64: b64url(tag),
       }),
     });
-    return { ok: !!res.ok, status: res.status, body: res.body };
+    return { ok: !!res.ok, status: res.status, body: res.body, nonce: nonce, nonceB64: b64url(nonce) };
   }
 
   // Where a contact's state lives on this device. Island-scoped like every

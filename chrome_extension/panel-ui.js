@@ -6370,6 +6370,10 @@ async function __renderForeignDmSection() {
           try { c = await claimForeignOutbox(c); } catch { /* still one-way */ }
         }
         await ensureForeignKeysReady(c);
+        // Opening the conversation is the moment the user cares whether
+        // anything is still waiting, and usually the moment connectivity came
+        // back.
+        drainForeignOutbox().catch(() => {});
         setModeDm(threadId, c.displayName || __foreignCardText(c.kid));
         pushRecent("dm", threadId, c.displayName || "");
         clearChat();

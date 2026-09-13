@@ -122,7 +122,7 @@ function makePanel({ apiBase, islandId, username, token }) {
   };
   vm.createContext(sandbox);
 
-  for (const f of ['crypto-utils.js', 'endpoints.js', 'thread-chain.js', 'foreign-dm.js']) {
+  for (const f of ['crypto-utils.js', 'endpoints.js', 'thread-chain.js', 'outbox.js', 'foreign-dm.js']) {
     vm.runInContext(fs.readFileSync(path.join(EXT_DIR, f), 'utf8'), sandbox, { filename: f });
   }
   const CU = sandbox.__wsCrypto.utils;
@@ -403,6 +403,72 @@ describe('they write to each other', () => {
     expect(got.text).toBe(fromBob);
     expect(got.sealedFrom).toBe(bob.username);
     expect(got.sigValid).toBe(true);
+  });
+
+  it('queues a message their island did not take, and sends it later', async () => {
+    // The failure this is for is invisible from here: our island is fine, we
+    // are online, and the message still cannot be delivered. Before the queue
+    // existed the input box was cleared anyway and the message was simply gone.
+    const stored = await alice.sandbox.getForeignContact(aliceSide.kid);
+    const realBase = stored.outbox.apiBase;
+
+    await alice.sandbox.saveForeignContact({
+      ...stored,
+      outbox: { ...stored.outbox, apiBase: 'http://127.0.0.1:9' },   // discard port
+    });
+
+    const text = 'это должно подождать';
+    const dead = await alice.sandbox.getForeignContact(aliceSide.kid);
+    const outcome = await alice.sandbox.sendForeignMessage(dead, text);
+    expect(outcome.queued).toBe(true);
+    expect(await alice.sandbox.foreignOutboxSize()).toBe(1);
+
+    // Their island comes back.
+    await alice.sandbox.saveForeignContact({
+      ...dead,
+      outbox: { ...dead.outbox, apiBase: realBase },
+    });
+    const drained = await alice.sandbox.drainForeignOutbox();
+    expect(drained.sent).toBe(1);
+    expect(await alice.sandbox.foreignOutboxSize()).toBe(0);
+
+    // And it is a real message at the other end, not just a queue that emptied.
+    await bob.sandbox.ensureForeignKeysReady(bobSide);
+    const got = await bob.sandbox.decryptDm(
+      bobSide.inbox.threadId,
+      await lastMessage(ISLAND_B, bobSide.inbox.threadId, bob.token),
+      '', Date.now(),
+    );
+    expect(got.text).toBe(text);
+    expect(got.sigValid).toBe(true);
+  });
+
+  it('repeating a queued message does not deliver it twice', async () => {
+    // A retry reuses the nonce, so an attempt that did arrive but whose answer
+    // was lost comes back as 409 - which the queue reads as delivered.
+    const contact = await alice.sandbox.getForeignContact(aliceSide.kid);
+    const before = (await http(ISLAND_B, `/dm/${bobSide.inbox.threadId}/history`,
+      { token: bob.token })).data;
+    const beforeCount = (before.messages || before).length;
+
+    const ct = await alice.sandbox.encryptDm(aliceSide.inbox.threadId, 'once', bob.username);
+    const box = {
+      apiBase: contact.outbox.apiBase,
+      threadId: contact.outbox.threadId,
+      secretB64: contact.outbox.secretB64,
+    };
+    const first = await alice.sandbox.WSForeignDm.deliver(foreignDeps(alice), box, ct);
+    expect(first.ok).toBe(true);
+
+    const again = await alice.sandbox.WSForeignDm.deliver(
+      foreignDeps(alice), box, ct, { nonce: first.nonce },
+    );
+    expect(again.status).toBe(409);
+    expect(alice.sandbox.WSOutbox.classifySendOutcome(again)).toBe('sent');
+
+    const after = (await http(ISLAND_B, `/dm/${bobSide.inbox.threadId}/history`,
+      { token: bob.token })).data;
+    expect((after.messages || after).length).toBe(beforeCount + 1);
   });
 
   it('keeps the contact in storage, not in memory', async () => {
