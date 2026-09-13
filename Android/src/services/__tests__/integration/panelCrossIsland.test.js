@@ -517,6 +517,66 @@ describe('they write to each other', () => {
     expect(after.island.pin?.islandId ?? 'island-b').toBe('island-b');
   });
 
+  it('sends through a relay, so their island never sees the sender', async () => {
+    // Direct delivery hands the sender's address and typing times to a server
+    // they do not trust and have no account with. The relay carries the same
+    // message without being able to read it.
+    const stored = await alice.sandbox.getForeignContact(aliceSide.kid);
+    const refreshed = await alice.sandbox.refreshForeignIsland(
+      { ...stored, island: { ...stored.island, lastCheckedAt: 0 } }, { force: true },
+    );
+    expect(refreshed.ok).toBe(true);
+
+    const withRelay = await alice.sandbox.getForeignContact(aliceSide.kid);
+    expect(withRelay.island.relays.length).toBeGreaterThan(0);
+    // The transport key comes from the signed list and nowhere else: whoever
+    // substitutes it reads the metadata of every envelope.
+    expect(withRelay.island.transportKeys[0].publicKeyB64).toBeTruthy();
+
+    await alice.sandbox.saveForeignContact({ ...withRelay, useRelay: true });
+    const text = 'это ушло через реле';
+    const outcome = await alice.sandbox.sendForeignMessage(
+      await alice.sandbox.getForeignContact(aliceSide.kid), text,
+    );
+    expect(outcome.ok).toBe(true);
+
+    await bob.sandbox.ensureForeignKeysReady(bobSide);
+    const got = await bob.sandbox.decryptDm(
+      bobSide.inbox.threadId,
+      await lastMessage(ISLAND_B, bobSide.inbox.threadId, bob.token),
+      '', Date.now(),
+    );
+    expect(got.text).toBe(text);
+    expect(got.sealedFrom).toBe(alice.username);
+    expect(got.sigValid).toBe(true);
+  });
+
+  it('does not fall back to direct delivery when the relay fails', async () => {
+    // Falling back would hand over the address the user asked to withhold,
+    // silently. Queuing is the right answer; giving up the property is not.
+    const stored = await alice.sandbox.getForeignContact(aliceSide.kid);
+    await alice.sandbox.saveForeignContact({
+      ...stored,
+      useRelay: true,
+      island: { ...stored.island, relays: [{ id: 'dead', url: 'http://127.0.0.1:9' }] },
+    });
+
+    const before = (await http(ISLAND_B, `/dm/${bobSide.inbox.threadId}/history`,
+      { token: bob.token })).data;
+    const beforeCount = (before.messages || before).length;
+
+    const outcome = await alice.sandbox.sendForeignMessage(
+      await alice.sandbox.getForeignContact(aliceSide.kid), 'не должно уйти напрямую',
+    );
+    expect(outcome.queued).toBe(true);
+
+    const after = (await http(ISLAND_B, `/dm/${bobSide.inbox.threadId}/history`,
+      { token: bob.token })).data;
+    expect((after.messages || after).length).toBe(beforeCount);
+
+    await alice.sandbox.WSOutbox.createOutbox; // keep the queue module referenced
+  });
+
   it('keeps the contact in storage, not in memory', async () => {
     const listed = await alice.sandbox.listForeignContacts();
     expect(listed).toHaveLength(1);

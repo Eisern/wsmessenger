@@ -265,7 +265,10 @@
    * @param {object} box  { apiBase, threadId, secretB64 }
    * @param {string} ciphertextJson  the encrypted envelope, exactly as stored
    */
-  async function deliver(deps, box, ciphertextJson, opts) {
+  // The body the island accepts, built once so the direct and relayed paths
+  // cannot drift apart: a relayed message is the same message, carried by
+  // somebody who cannot read it.
+  async function buildWireBody(deps, box, ciphertextJson, opts) {
     const ptBytes = utf8(ciphertextJson);
     const ts = deps.now ? deps.now() : Date.now();
     // A retry MUST reuse the nonce of the attempt it repeats. The island
@@ -283,19 +286,88 @@
       digest,
     ]);
     const tag = await deps.hmacSha256(unb64(box.secretB64), msg);
-
-    const res = await deps.fetchJson(str(box.apiBase).replace(/\/+$/, "") + "/ud/dm/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
+    return {
+      nonce: nonce,
+      body: {
         thread_id: Number(box.threadId),
         ts: ts,
         nonce_b64: b64url(nonce),
         ciphertext_b64: b64url(ptBytes),
         tag_b64: b64url(tag),
-      }),
+      },
+    };
+  }
+
+  async function deliver(deps, box, ciphertextJson, opts) {
+    const built = await buildWireBody(deps, box, ciphertextJson, opts);
+    const res = await deps.fetchJson(str(box.apiBase).replace(/\/+$/, "") + "/ud/dm/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(built.body),
     });
-    return { ok: !!res.ok, status: res.status, body: res.body, nonce: nonce, nonceB64: b64url(nonce) };
+    return {
+      ok: !!res.ok, status: res.status, body: res.body,
+      nonce: built.nonce, nonceB64: b64url(built.nonce),
+    };
+  }
+
+  /**
+   * Deliver through a relay, so the recipient's island never sees the sender's
+   * address or the timing of their typing.
+   *
+   * Direct delivery hands both to a server the sender does not trust and has no
+   * account with - the one metadata leak this design accepts by default. A
+   * relay carries the message without being able to read it: the envelope is
+   * sealed to the island's transport key, which must come from the SIGNED
+   * island list, because whoever substitutes that key reads every envelope's
+   * metadata.
+   *
+   * The answer is sealed too. A relay that could forge "delivered" would be
+   * able to swallow messages silently, and one that could forge a 409 would
+   * stop the sender retrying anywhere else.
+   *
+   * @param {object} deps   as `deliver`, plus sealRelay / openRelayResponse / fetchBytes
+   * @param {object} relay  { url, islandId, transportKeyB64 }
+   */
+  async function deliverThroughRelay(deps, relay, box, ciphertextJson, opts) {
+    const built = await buildWireBody(deps, box, ciphertextJson, opts);
+    const envNonce = deps.randomBytes(16);
+    const inner = {
+      thread_id: built.body.thread_id,
+      ts: built.body.ts,
+      nonce_b64: built.body.nonce_b64,
+      ciphertext_b64: built.body.ciphertext_b64,
+      tag_b64: built.body.tag_b64,
+      env_ts: deps.now ? deps.now() : Date.now(),
+      env_nonce_b64: b64(envNonce),
+    };
+
+    const sealed = await deps.sealRelay(relay.transportKeyB64, inner);
+    const res = await deps.fetchBytes(str(relay.url).replace(/\/+$/, "") + "/forward", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ next: str(relay.islandId), blob: b64(sealed.envelope) }),
+    });
+
+    const out = { nonce: built.nonce, nonceB64: b64url(built.nonce), viaRelay: true };
+    if (!res.ok || !res.bytes) {
+      // The relay itself refused or did not answer. Nothing was learned about
+      // the island, so this is a transport failure and the caller may retry -
+      // through another relay, or directly.
+      return Object.assign(out, { ok: false, status: res.status || 0, relayFailed: true });
+    }
+
+    let answer;
+    try {
+      answer = await deps.openRelayResponse(sealed.responseKey, res.bytes);
+    } catch (e) {
+      // Unopenable: either not the island we sealed for, or the relay made it
+      // up. Either way it is not an answer about our message.
+      return Object.assign(out, { ok: false, status: 0, relayFailed: true });
+    }
+
+    const status = Number(answer && answer.status) || 0;
+    return Object.assign(out, { ok: status >= 200 && status < 300, status: status, body: answer });
   }
 
   // Where a contact's state lives on this device. Island-scoped like every
@@ -316,6 +388,7 @@
     verifyContactBlob: verifyContactBlob,
     claimMailbox: claimMailbox,
     deliver: deliver,
+    deliverThroughRelay: deliverThroughRelay,
     contactKey: contactKey,
     _b64: b64,
     _unb64: unb64,

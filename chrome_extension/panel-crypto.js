@@ -3070,6 +3070,16 @@ function _foreignDeps() {
     },
     randomBytes: (n) => crypto.getRandomValues(new Uint8Array(n)),
     now: () => Date.now(),
+    // The relay answers with bytes, not JSON: the answer is sealed so the
+    // relay cannot fake a delivery it did not make.
+    fetchBytes: async (url, opts = {}) => {
+      const r = await fetch(url, opts);
+      let bytes = null;
+      try { bytes = new Uint8Array(await r.arrayBuffer()); } catch { /* no body */ }
+      return { ok: r.ok, status: r.status, bytes };
+    },
+    sealRelay: (transportKeyB64, inner) => cu.sealRelayEnvelope(transportKeyB64, inner),
+    openRelayResponse: (key, bytes) => cu.openRelayResponse(key, bytes),
   };
 }
 
@@ -3439,7 +3449,9 @@ async function sendForeignMessage(contact, plaintext) {
 
   let res;
   try {
-    res = await FD().deliver(_foreignDeps(), box(), ciphertext);
+    res = c.useRelay
+      ? await deliverForeignViaRelay(c, box(), ciphertext)
+      : await FD().deliver(_foreignDeps(), box(), ciphertext);
   } catch (e) {
     // Their island did not answer at all. Nothing about this message is wrong,
     // so it goes in the queue rather than being announced as a failure.
@@ -3733,6 +3745,10 @@ async function refreshForeignIsland(contact, { force = false } = {}) {
         ...contact.island,
         entryPoints: fresh,
         relays: res.payload.relays || [],
+        // Only ever from the signed list. GET /relay/key is a development
+        // convenience, and whoever substitutes that key reads the metadata of
+        // every envelope sent through a relay.
+        transportKeys: res.payload.transportKeys || [],
         pin: res.pin,
         lastCheckedAt: Date.now(),
       },
@@ -3754,4 +3770,43 @@ async function refreshForeignIsland(contact, { force = false } = {}) {
   }
 
   return { ok: false, reason: lastReason };
+}
+
+/**
+ * Send one message through one of the contact's island's relays.
+ *
+ * Direct delivery tells the recipient's island the sender's address and the
+ * time they typed - to a server the sender does not trust and has no account
+ * with. That is the metadata leak this design accepts by default, and the
+ * relay is what closes it; the choice is per contact and made by the user,
+ * because it is a trade against reliability, not a free win.
+ *
+ * Falls back to nothing: if the relays fail, the caller queues the message. A
+ * silent fallback to direct delivery would hand over the address the user
+ * asked to withhold.
+ */
+async function deliverForeignViaRelay(contact, box, ciphertext, opts) {
+  const relays = contact.island?.relays || [];
+  const key = (contact.island?.transportKeys || [])[0]?.publicKeyB64;
+  if (!relays.length || !key) {
+    // Their island publishes no relay, or we have not verified its list yet.
+    // Saying so beats quietly sending the thing the user asked not to send.
+    throw new Error("No relay is available for this contact yet");
+  }
+
+  let last = { ok: false, status: 0 };
+  for (const relay of relays) {
+    last = await FD().deliverThroughRelay(
+      _foreignDeps(),
+      { url: relay.url, islandId: contact.island.islandId, transportKeyB64: key },
+      box,
+      ciphertext,
+      opts,
+    );
+    // A relay that failed us says nothing about the island; try the next one.
+    // An answer FROM the island - even a refusal - is final.
+    if (!last.relayFailed) return last;
+    console.warn(`[Foreign] relay ${relay.id} did not carry it (${last.status})`);
+  }
+  return last;
 }

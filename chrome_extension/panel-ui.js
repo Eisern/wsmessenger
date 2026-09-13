@@ -6352,7 +6352,7 @@ async function __renderForeignDmSection() {
     // WHY not, because the two reasons need different things from the user:
     // wait for the other person, or go and fix the address.
     metaEl.textContent = contact.outbox?.keyB64
-      ? (contact.island?.islandId || "another server")
+      ? (contact.island?.islandId || "another server") + (contact.useRelay ? " · via relay" : "")
       : contact.lastClaim?.kind === "unreachable"
         ? "their server did not answer"
         : "waiting for them to add you";
@@ -6390,18 +6390,7 @@ async function __renderForeignDmSection() {
     btn.oncontextmenu = async (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      const ok = await __ui.confirm(
-        `Remove ${name} and close their mailbox on this server? ` +
-        `They will no longer be able to deliver to you, and the conversation stored here goes with it.`,
-      );
-      if (ok) {
-        try {
-          await removeForeignContact(contact.kid);
-          await __refreshDmListNow();
-        } catch (e) {
-          await __ui.alert("Could not remove: " + (e?.message || e));
-        }
-      }
+      await __openForeignActionsMenu(contact);
     };
 
     body.appendChild(btn);
@@ -6409,6 +6398,76 @@ async function __renderForeignDmSection() {
 
   sec.appendChild(body);
   dmListEl.appendChild(sec);
+}
+
+async function __openForeignActionsMenu(contact) {
+  const name = contact.displayName || __foreignCardText(contact.kid);
+  const relays = contact.island?.relays || [];
+  const via = contact.useRelay;
+
+  const choice = String((await __ui.prompt(
+    `${name} on ${contact.island?.islandId || "another server"}
+` +
+    `1 Safety number
+` +
+    `2 ${via ? "Send directly instead" : "Send through a relay"}` +
+    `${relays.length ? "" : " (their server lists none)"}
+` +
+    `3 Remove and close their mailbox`,
+    { title: "Contact actions", placeholder: "1-3", inputType: "text", okText: "Apply", cancelText: "Cancel" },
+  )) || "").trim();
+  if (!choice) return;
+
+  if (choice === "1") {
+    try {
+      const sn = await getSafetyNumber(name);
+      await __ui.alert(
+        `Read this to ${name} over a channel you both already trust. If the two of ` +
+        `you see the same number, nobody is in the middle:
+
+${sn.safetyNumber}`,
+      );
+    } catch (e) {
+      await __ui.alert("Could not compute it: " + (e?.message || e));
+    }
+    return;
+  }
+
+  if (choice === "2") {
+    // Deliberately a per-contact choice the user makes, not a default: sending
+    // directly hands the sender's address to a server they do not trust, and
+    // sending through a relay depends on a third party being up. The design
+    // says the trade must be visible rather than decided for them.
+    if (!via && !relays.length) {
+      await __ui.alert(
+        "Their server does not list a relay, so there is nothing to send through yet.",
+      );
+      return;
+    }
+    await saveForeignContact({ ...contact, useRelay: !via });
+    await __refreshDmListNow();
+    await __ui.alert(
+      via
+        ? `Messages to ${name} will go straight to their server, which will see your address.`
+        : `Messages to ${name} will go through a relay, which cannot read them and does ` +
+          `not know who you are. Their server will no longer see your address.`,
+    );
+    return;
+  }
+
+  if (choice === "3") {
+    const ok = await __ui.confirm(
+      `Remove ${name} and close their mailbox on this server? ` +
+      `They will no longer be able to deliver to you, and the conversation stored here goes with it.`,
+    );
+    if (!ok) return;
+    try {
+      await removeForeignContact(contact.kid);
+      await __refreshDmListNow();
+    } catch (e) {
+      await __ui.alert("Could not remove: " + (e?.message || e));
+    }
+  }
 }
 
 async function __refreshDmListNow() {
