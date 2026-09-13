@@ -232,3 +232,78 @@ the wrong place, next to a different question.
 
 Deleting is detected, not prevented. Nobody can stop the holder of a database
 from dropping a row; the chain only stops them from doing it quietly.
+
+---
+
+# Cross-island direct messages
+
+Two suites, and the split between them is the point.
+
+`crossIsland.test.js` proves the **protocol**: it calls `foreign-dm.js` and does
+the crypto itself, so it answers "do two independent islands agree". Run it with
+`npx jest --selectProjects integration --runInBand --forceExit crossIsland`.
+
+`panelCrossIsland.test.js` proves the **client**: it loads
+`chrome_extension/panel-crypto.js` into a sandbox and calls the functions the
+buttons call. It answers a different question - "does the extension do the
+protocol" - and on its first run it caught `sendForeignMessage` emitting
+ciphertext the extension's own decrypt path throws away. The protocol test could
+not have caught that, because it never asked the client to read what the client
+wrote.
+
+Only the browser's side is stubbed: storage, permissions, the DOM, and a
+stand-in for `CryptoManager` whose `encryptMessage` matches the real one byte
+for byte. Unlocking the real one needs an encrypted identity blob and the
+Argon2 WASM self-test, which is a different thing to test.
+
+## What the islands need
+
+Both must have `ISLAND_ID` set - the claim signature binds it, so the endpoints
+answer 404 without it.
+
+Island A's entry-point list carries addresses that answer nothing (18101/18102,
+the failover proxies). That is deliberate: the claim has to walk past an
+unreachable entry point to reach a live one, and one test asserts it does.
+
+## TLS, and why the extension needs it
+
+The extension's CSP allows `https:`/`wss:` only, so a panel in a browser cannot
+reach a container that speaks http - not for cross-island delivery and not for
+anything else. Node is not bound by that, so the test suites run against the
+plain http ports and need none of this.
+
+To drive the extension by hand, put a TLS front in front of both islands:
+
+```sh
+# Caddyfile: named sites, because a browser talking to a raw IP sends no SNI
+# and there is then no certificate to select.
+#   localhost:8443 { tls internal
+#                    reverse_proxy host.docker.internal:8000 }
+#   localhost:8444 { tls internal
+#                    reverse_proxy host.docker.internal:8001 }
+docker run -d --name wsapp-tls -p 8443:8443 -p 8444:8444 \
+  -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  --add-host host.docker.internal:host-gateway caddy:2-alpine
+curl -sk https://localhost:8443/health
+```
+
+Then add the https address to each island's `ISLAND_ENTRY_POINTS` **first** in
+the list, so a contact card carries an address a browser can use. Chrome will
+not trust Caddy's local CA: open both URLs once per profile and accept the
+warning, after which the extension's own requests to that origin go through.
+Nothing has to be installed in the OS trust store.
+
+## One-time fix on a cloned island
+
+A database recreated from `schema.sql` as `postgres` leaves every table owned by
+`postgres`, and the server's own role cannot read them - every authenticated
+call answers 500. Island B was built that way and nothing noticed for weeks,
+because the suite that touched it asserted only that a login there does *not*
+succeed.
+
+```sh
+docker exec wsapp-island-b bash -lc 'su postgres -c "psql -d wsapp -c \"
+  GRANT ALL ON ALL TABLES IN SCHEMA public TO wsapp;
+  GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO wsapp;
+  ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO wsapp;\""'
+```
