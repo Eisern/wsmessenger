@@ -266,10 +266,20 @@ const CryptoUtils = {
     // --- PBKDF2 path (fallback / legacy) ---
     const MIN_ITERATIONS = 600_000;
     const ALLOWED_HASHES = new Set(['SHA-256', 'SHA-384', 'SHA-512']);
-    const iterations = Math.max(
-      Number(opts?.iterations) > 0 ? Number(opts.iterations) : 620_000,
-      MIN_ITERATIONS,
-    );
+    // Refused, not raised. Clamping a weakened container to the floor sounds
+    // safer and is worse: the key then derives from parameters nobody wrote,
+    // so the container fails to open with "decryption failed" and the reason -
+    // that its parameters had been rewritten - is lost. The extension refuses;
+    // two clients disagreeing about this is how one of them becomes the soft
+    // target.
+    const _rawIterations = opts?.iterations;
+    const iterations =
+      (_rawIterations === undefined || _rawIterations === null || _rawIterations === '')
+        ? 620_000
+        : Number(_rawIterations);
+    if (!Number.isFinite(iterations) || iterations < MIN_ITERATIONS) {
+      throw new Error(`KDF iterations too low: ${iterations} (minimum ${MIN_ITERATIONS})`);
+    }
     let hash = String(opts?.hash || 'SHA-256').trim().toUpperCase();
     if (hash === 'SHA256') hash = 'SHA-256';
     if (hash === 'SHA384') hash = 'SHA-384';

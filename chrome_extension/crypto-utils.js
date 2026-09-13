@@ -335,8 +335,17 @@ const CryptoUtils = {
     }
 
     // PBKDF2 (fallback and legacy)
+    //
+    // Absent means "use the default"; present but unusable means somebody
+    // wrote it, and the only honest answer is to refuse. Treating 0 or a
+    // negative as absent let a rewritten container pass the floor check
+    // untouched, because the value the check saw was the default, not the one
+    // in the container.
+    const _rawIterations = opts?.iterations;
     const iterations =
-      Number(opts?.iterations) > 0 ? Number(opts.iterations) : 620000;
+      (_rawIterations === undefined || _rawIterations === null || _rawIterations === "")
+        ? 620000
+        : Number(_rawIterations);
     let hash = String(opts?.hash || "SHA-256").trim().toUpperCase();
     if (hash === "SHA256") hash = "SHA-256";
     if (hash === "SHA384") hash = "SHA-384";
@@ -344,7 +353,7 @@ const CryptoUtils = {
 
     const _MIN_ITER = 600_000;
     const _OK_HASHES = ["SHA-256", "SHA-384", "SHA-512"];
-    if (iterations < _MIN_ITER)
+    if (!Number.isFinite(iterations) || iterations < _MIN_ITER)
       throw new Error(`KDF iterations too low: ${iterations} (minimum ${_MIN_ITER})`);
     if (!_OK_HASHES.includes(hash))
       throw new Error(`KDF hash not allowed: ${hash}`);

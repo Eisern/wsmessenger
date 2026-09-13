@@ -368,3 +368,88 @@ describe('v1 and v2 signatures do not substitute for one another', () => {
     }
   });
 });
+
+describe('both clients refuse a weakened key derivation', () => {
+  // The parameters are not ours: they travel in the encrypted private-key
+  // container, which lives in local storage and, in older builds, came back
+  // from a server. Whoever can rewrite them can pick how hard the password is
+  // to brute force - and the client would never look any different. So the
+  // floors are checked on the way in, in both implementations, and a container
+  // that asks for less than they allow is refused rather than honoured.
+  const SALT = Buffer.from(new Uint8Array(16).fill(9)).toString('base64');
+
+  const weakened = [
+    ['one iteration', { name: 'PBKDF2', iterations: 1, hash: 'SHA-256' }],
+    ['just under the floor', { name: 'PBKDF2', iterations: 599999, hash: 'SHA-256' }],
+    ['zero', { name: 'PBKDF2', iterations: 0, hash: 'SHA-256' }],
+    ['a broken hash', { name: 'PBKDF2', iterations: 620000, hash: 'SHA-1' }],
+    ['a hash nobody offers', { name: 'PBKDF2', iterations: 620000, hash: 'MD5' }],
+  ];
+
+  for (const [what, kdf] of weakened) {
+    it(`refuses ${what}: extension`, async () => {
+      await expect(EXT.deriveRawKeyFromPassword('correct horse', SALT, kdf)).rejects.toThrow();
+    });
+    it(`refuses ${what}: Android`, async () => {
+      await expect(AND.deriveRawKeyFromPassword('correct horse', SALT, kdf)).rejects.toThrow();
+    });
+  }
+
+  it('accepts the floor itself, so the limit is a floor and not a fence', async () => {
+    const at = { name: 'PBKDF2', iterations: 600000, hash: 'SHA-256' };
+    const a = await EXT.deriveRawKeyFromPassword('correct horse', SALT, at);
+    const b = await AND.deriveRawKeyFromPassword('correct horse', SALT, at);
+    expect(a.raw.length).toBe(32);
+    // And the two clients derive the same bytes from the same inputs, which is
+    // what lets one device open what the other wrote.
+    expect(hex(a.raw)).toBe(hex(b.raw));
+    expect(a.kdf.iterations).toBe(600000);
+  });
+
+  it('refuses a salt too short to be worth having', async () => {
+    const short = Buffer.from(new Uint8Array(8)).toString('base64');
+    const ok = { name: 'PBKDF2', iterations: 620000, hash: 'SHA-256' };
+    await expect(EXT.deriveRawKeyFromPassword('correct horse', short, ok)).rejects.toThrow();
+    await expect(AND.deriveRawKeyFromPassword('correct horse', short, ok)).rejects.toThrow();
+  });
+
+  it('never silently swaps Argon2id for PBKDF2', async () => {
+    // The two clients answer differently here, and both answers are right for
+    // what they are. The extension loads Argon2id as a WASM blob whose hash it
+    // pins, so when it cannot verify that blob - as here - it refuses to
+    // derive at all. Android compiles its Argon2id in: there is no blob to
+    // substitute, so it derives.
+    //
+    // What neither may do is quietly fall back to PBKDF2. That would turn "the
+    // implementation is unavailable" into "your key was derived a different
+    // way", and the same password would then open nothing.
+    await expect(
+      EXT.deriveRawKeyFromPassword('correct horse', SALT, { name: 'Argon2id' }),
+    ).rejects.toThrow(/argon2/i);
+
+    const onAndroid = await AND.deriveRawKeyFromPassword('correct horse', SALT, { name: 'Argon2id' });
+    expect(onAndroid.kdf.name).toBe('Argon2id');
+    expect(onAndroid.raw.length).toBe(32);
+  });
+
+  it('refuses to open a container whose parameters were rewritten', async () => {
+    // The attack end to end, on the path that actually reads them: take a
+    // real container and lower its iteration count. Opening it must fail on
+    // the parameters, not after deriving a wrong key.
+    const container = {
+      v: 3,
+      alg: 'AES-256-GCM',
+      kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 620000 },
+      salt: SALT,
+      iv: Buffer.from(new Uint8Array(12)).toString('base64'),
+      data: Buffer.from(new Uint8Array(64)).toString('base64'),
+      created_at: 0,
+      username: 'someone',
+      ext_version: '0',
+    };
+    const tampered = { ...container, kdf: { ...container.kdf, iterations: 10 } };
+
+    await expect(EXT.decryptPrivateKey(tampered, 'correct horse')).rejects.toThrow(/iterations/i);
+    await expect(AND.decryptPrivateKey(tampered, 'correct horse')).rejects.toThrow(/iterations/i);
+  });
+});
