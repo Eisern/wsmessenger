@@ -339,3 +339,28 @@ A 429 there means the per-IP limit: raise `RL_ED25519_KEY_IP_PER_10MIN` and
 `RL_ED25519_KEY_USER_PER_10MIN` in the island's `.env`. Every client
 republishes that key on each unlock, so one address running a test suite - or
 an office behind one NAT - reaches the default quickly.
+
+## Restarting an island without leaving two of them
+
+A shell loop that kills processes by matching their command line will match
+its own wrapper first, whose command line contains the pattern it was given -
+so it kills itself, the real server survives, and the next start leaves a
+second process that never binds. The symptom is an `.env` change that appears
+to do nothing. Build the pattern at run time so the literal never appears in
+the wrapper:
+
+```sh
+docker exec <island> bash -lc 'P=$(printf "%s%s" "uvi" "corn")
+  for d in /proc/[0-9]*; do cl=$(tr " " " " < $d/cmdline 2>/dev/null)
+    case "$cl" in *"$P"*) case "$cl" in *python3*) kill -9 ${d#/proc/};; esac;; esac
+  done'
+```
+
+## Rate limits the suites need relaxed
+
+Recovery is deliberately strict in production - five attempts per hour per
+address, three per account - and a suite that exercises it reaches that in one
+run. Set `RL_RECOVER_IP_PER_HOUR` and `RL_RECOVER_USER_PER_HOUR` high in the
+island's `.env`, along with the others listed above. A 429 here shows up as a
+missing nonce and then as a 422 from the endpoint that needed it, which reads
+like a client bug and is not one.
