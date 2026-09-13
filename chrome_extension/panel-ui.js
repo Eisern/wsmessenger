@@ -2149,7 +2149,16 @@ function applyComposerPolicyUI() {
   const blocked = !!(isCryptoLocked || blockRoomPosting);
   msgInput.disabled = blocked;
   sendBtn.disabled = blocked;
-  if (attachBtn) attachBtn.disabled = blocked;
+  // Attaching is disabled for a cross-island contact, where a file would reach
+  // nobody: it lives on the island it was uploaded to and is fetched with an
+  // account there. Greyed out rather than refused on click, so the limit is
+  // visible before the file is chosen.
+  if (attachBtn) {
+    attachBtn.disabled = blocked || !!(dmMode && typeof __activeForeignKid !== "undefined" && __activeForeignKid);
+    attachBtn.title = attachBtn.disabled && !blocked
+      ? "Files cannot be sent to someone on another server yet"
+      : "Attach a file";
+  }
 
   if (isCryptoLocked) {
     msgInput.placeholder = "Crypto is locked. Click Unlock.";

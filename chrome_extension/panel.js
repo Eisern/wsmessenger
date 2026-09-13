@@ -1118,6 +1118,18 @@ async function pickAndUploadFile() {
     await __ui.alert("Please open a conversation first.");
     return;
   }
+  if (inDm && __activeForeignKid) {
+    // A file lives on the island it was uploaded to, and is fetched with an
+    // account there. A cross-island contact has no account here, so a file
+    // sent this way would reach nobody - the marker would land in our own
+    // mailbox and the download would be ours alone. Refusing is the honest
+    // answer until the transfer itself crosses the border.
+    await __ui.alert(
+      "Files cannot be sent to someone on another server yet — they have no account " +
+      "on this one to download from. Text messages work.",
+    );
+    return;
+  }
   if (!inDm && !activeRoomId) {
     await __ui.alert("First, connect to the room.");
     return;

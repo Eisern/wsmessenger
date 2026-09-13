@@ -197,6 +197,28 @@ async function setUp(base, islandId, username) {
   return panel;
 }
 
+// What foreign-dm.deliver needs from a platform, for the two places a test has
+// to put a message into a mailbox itself.
+function foreignDeps(panel) {
+  return {
+    fetchJson: async (url, opts) => {
+      const r = await fetch(url, opts);
+      let body = null;
+      try { body = await r.json(); } catch { /* empty body */ }
+      return { ok: r.ok, status: r.status, body };
+    },
+    sha256: async (b) => new Uint8Array(await panel.CU.sha256Raw(b)),
+    hmacSha256: async (k, m) => {
+      const key = await globalThis.crypto.subtle.importKey(
+        'raw', k, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+      );
+      return new Uint8Array(await globalThis.crypto.subtle.sign('HMAC', key, m));
+    },
+    randomBytes: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+    now: () => Date.now(),
+  };
+}
+
 // The panel decodes the sealed path's base64url before handing it to decryptDm.
 function udDecode(stored) {
   const t = String(stored || '').trim();
@@ -309,23 +331,7 @@ describe('they write to each other', () => {
     const secret = await http(ISLAND_A, `/dm/${aliceSide.inbox.threadId}/delivery-secret`,
       { token: alice.token });
     const delivered = await alice.sandbox.WSForeignDm.deliver(
-      {
-        fetchJson: async (url, opts) => {
-          const r = await fetch(url, opts);
-          let body = null;
-          try { body = await r.json(); } catch { /* empty */ }
-          return { ok: r.ok, status: r.status, body };
-        },
-        sha256: async (b) => new Uint8Array(await alice.CU.sha256Raw(b)),
-        hmacSha256: async (k, m) => {
-          const key = await globalThis.crypto.subtle.importKey(
-            'raw', k, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
-          );
-          return new Uint8Array(await globalThis.crypto.subtle.sign('HMAC', key, m));
-        },
-        randomBytes: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
-        now: () => Date.now(),
-      },
+      foreignDeps(alice),
       {
         apiBase: ISLAND_A,
         threadId: aliceSide.inbox.threadId,
@@ -339,6 +345,35 @@ describe('they write to each other', () => {
     const stored = await lastMessage(ISLAND_A, aliceSide.inbox.threadId, alice.token);
     const got = await alice.sandbox.decryptDm(aliceSide.inbox.threadId, stored, '', Date.now());
     expect(got.text).toBe(fromAlice);
+    expect(got.sealedFrom).toBe(alice.username);
+    expect(got.sigValid).toBe(true);
+  });
+
+  it('accepts our own message whichever thread number it was signed over', async () => {
+    // Not every path through this client goes abroad. The file sender encrypts
+    // with the local thread's key and signs over the local thread id, and the
+    // result sits in the same conversation next to messages signed over the
+    // peer's mailbox. A verifier that insists on one of the two numbers calls
+    // the other a forgery - which is what attaching a file used to produce.
+    const local = await alice.sandbox.encryptDm(
+      aliceSide.inbox.threadId, 'FILE2::local-path', bob.username,
+    );
+    const secret = await http(ISLAND_A, `/dm/${aliceSide.inbox.threadId}/delivery-secret`,
+      { token: alice.token });
+    const sent = await alice.sandbox.WSForeignDm.deliver(
+      foreignDeps(alice),
+      {
+        apiBase: ISLAND_A,
+        threadId: aliceSide.inbox.threadId,
+        secretB64: secret.data.delivery_secret_b64,
+      },
+      local,
+    );
+    expect(sent.ok).toBe(true);
+
+    const stored = await lastMessage(ISLAND_A, aliceSide.inbox.threadId, alice.token);
+    const got = await alice.sandbox.decryptDm(aliceSide.inbox.threadId, stored, '', Date.now());
+    expect(got.text).toBe('FILE2::local-path');
     expect(got.sealedFrom).toBe(alice.username);
     expect(got.sigValid).toBe(true);
   });

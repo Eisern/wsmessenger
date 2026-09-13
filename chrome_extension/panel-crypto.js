@@ -1989,19 +1989,31 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
               const chained = Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || "");
               // A signature covers the thread the message was DELIVERED to.
               // In a cross-island conversation that is not always the thread it
-              // is being read in: our own copy of what we sent was delivered to
-              // the peer's mailbox on their island, and kept here only so the
-              // history is whole. Verifying it against this thread's number
-              // fails - correctly, on the wrong question - and accuses us of
-              // forging our own messages.
-              const __sigTid = (__fc && __mine && __fc.outbox && __fc.outbox.threadId)
-                ? __fc.outbox.threadId
-                : threadId;
-              const sigMsg = chained
-                ? cu._dmSigMessageV2(__sigTid, inner.sq, inner.pv, from, inner.body)
-                : cu._dmSigMessage(__sigTid, from, inner.body);
+              // is read in: our own copy of what we sent went to the peer's
+              // mailbox on their island and is kept here only so the history is
+              // whole. Verifying it against this thread's number fails -
+              // correctly, on the wrong question - and accuses us of forging
+              // our own messages.
+              //
+              // Our own messages can carry either number, because not every
+              // path through this client goes abroad, so both are tried. That
+              // costs nothing: an attacker who could produce either signature
+              // would already hold our signing key.
+              const __ownTids = [];
+              if (__fc && __mine && __fc.outbox && __fc.outbox.threadId) {
+                __ownTids.push(__fc.outbox.threadId);
+              }
+              __ownTids.push(threadId);
+
               const sigBytes = new Uint8Array(cu.base64ToArrayBuffer(inner.sig));
-              sigValid = await cu.ed25519Verify(peerPub, sigBytes, sigMsg);
+              let sigMsg = null;
+              for (const tid of __ownTids) {
+                sigMsg = chained
+                  ? cu._dmSigMessageV2(tid, inner.sq, inner.pv, from, inner.body)
+                  : cu._dmSigMessage(tid, from, inner.body);
+                sigValid = await cu.ed25519Verify(peerPub, sigBytes, sigMsg);
+                if (sigValid === true) break;
+              }
               if (chained) {
                 // Reported, not checked here: history arrives in pages and in
                 // no particular order, so verifying message by message would
