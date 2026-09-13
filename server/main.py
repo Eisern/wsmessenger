@@ -7799,15 +7799,23 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
     except Exception:
         raise HTTPException(status_code=503, detail="unavailable")
 
+    def _denied(reason: str):
+        # The caller always gets the same 403 - anything else would let a
+        # stranger tell "no mailbox here" from "wrong signature" and so map
+        # keys to islands. The operator, who can read their own database
+        # anyway, gets the reason in their own log.
+        print(f"[foreign/claim] denied: {reason}", flush=True)
+        return HTTPException(status_code=403, detail="forbidden")
+
     kid = _norm_kid(payload.kid)
     try:
         nonce = base64.b64decode((payload.nonce_b64 or "").strip(), validate=False)
         sig = base64.b64decode((payload.sig_b64 or "").strip().replace("-", "+").replace("_", "/")
                                + "=" * (-len((payload.sig_b64 or "").strip()) % 4))
     except Exception:
-        raise HTTPException(status_code=403, detail="forbidden")
+        raise _denied("nonce or signature is not base64")
     if len(nonce) != 32 or len(sig) != 64:
-        raise HTTPException(status_code=403, detail="forbidden")
+        raise _denied(f"wrong sizes: nonce={len(nonce)} sig={len(sig)}")
 
     async with SessionLocal() as session:
         async with session.begin():
@@ -7823,7 +7831,7 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
                 RETURNING nonce
             """), {"n": nonce, "ttl": FOREIGN_CHALLENGE_TTL_S})
             if not res.scalar_one_or_none():
-                raise HTTPException(status_code=403, detail="forbidden")
+                raise _denied("nonce unknown, already spent, or older than the TTL")
 
             res = await session.execute(text("""
                 SELECT b.thread_id, b.peer_ed25519_pub, b.peer_wrapped_key, b.peer_wrapped_kid
@@ -7833,7 +7841,7 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
             """), {"kid": kid})
             box = res.mappings().first()
             if not box:
-                raise HTTPException(status_code=403, detail="forbidden")
+                raise _denied(f"no mailbox for kid {kid}")
 
             # Domain-separated and bound to this island and this kid, so a
             # signature made for one island cannot be replayed at another
@@ -7842,8 +7850,10 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
             try:
                 ed_raw = base64.b64decode(box["peer_ed25519_pub"] + "=" * (-len(box["peer_ed25519_pub"]) % 4))
                 Ed25519PublicKey.from_public_bytes(ed_raw).verify(sig, message)
-            except Exception:
-                raise HTTPException(status_code=403, detail="forbidden")
+            except Exception as e:
+                raise _denied(
+                    f"signature does not verify for kid {kid} on island {island}: {e}"
+                )
 
             tid = int(box["thread_id"])
 
@@ -7860,7 +7870,7 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
                 """), {"tid": tid})
                 row = res.mappings().first()
             if not row:
-                raise HTTPException(status_code=403, detail="forbidden")
+                raise _denied("mailbox has no delivery secret")
 
             secret_b64 = base64.urlsafe_b64encode(bytes(row["delivery_secret"])).decode().rstrip("=")
             expires_at = row["expires_at"]
