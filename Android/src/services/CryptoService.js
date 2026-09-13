@@ -58,6 +58,29 @@ const CRYPTO_IDLE_LOCK_OPTIONS = [
 
 // TOFU cooldown: avoid hammering the server for peer key checks
 const _KC_CHECK_TTL_MS = 60_000; // 1 minute
+
+// Which island a peer name belongs to. A username identifies a person only
+// within one island, so it is half the address of a pin — StorageService holds
+// the other half and resolves nothing itself.
+//
+// Pins written before the address carried an island are moved onto the current
+// one before the first read. Reading first would find nothing, record the key
+// on offer as the trusted baseline and call it first contact, which is the
+// silent downgrade pins exist to prevent — so a failed migration propagates and
+// the caller either blocks the action or reports "unverified", never "trusted".
+let _pinsMigrated = null;
+
+async function _pinScope() {
+  const island = EP.islandIdOf(NetworkService.getServerConfig());
+  if (!_pinsMigrated) {
+    _pinsMigrated = StorageService.migrateFingerprintPins(island).catch((e) => {
+      _pinsMigrated = null;
+      throw e;
+    });
+  }
+  await _pinsMigrated;
+  return island;
+}
 const _kcLastChecked = new Map(); // peerLower -> timestamp
 const _kcAlerted = new Set(); // peerLower — session dedup for key change alerts
 
@@ -1049,8 +1072,9 @@ const CryptoService = {
    * @param {string} fingerprint
    */
   async verifyPeerKey(me, peer, fingerprint) {
-    await StorageService.setKnownFingerprint(me, peer, fingerprint);
-    await StorageService.setKeyVerified(me, peer);
+    const island = await _pinScope();
+    await StorageService.setKnownFingerprint(island, me, peer, fingerprint);
+    await StorageService.setKeyVerified(island, me, peer);
   },
 
   /**
@@ -1059,8 +1083,34 @@ const CryptoService = {
    * @param {string} peer
    * @returns {Promise<boolean>}
    */
+  /**
+   * Whether this peer's key changed since it was pinned and still needs
+   * re-verification. Screens go through here rather than touching
+   * StorageService: the island is half a pin's address, and resolving it in
+   * one place is what keeps two servers' `bob` apart.
+   * @returns {Promise<boolean>}
+   */
+  async getPeerKeyChanged(me, peer) {
+    try {
+      return await StorageService.getKeyChanged(await _pinScope(), me, peer);
+    } catch (_e) {
+      return false;
+    }
+  },
+
+  /** Clear that flag once the user has confirmed the new key. */
+  async clearPeerKeyChanged(me, peer) {
+    await StorageService.removeKeyChanged(await _pinScope(), me, peer);
+  },
+
   async isPeerKeyVerified(me, peer) {
-    return StorageService.isKeyVerified(me, peer);
+    // Answers rather than throws: callers use it to decide what to render, and
+    // "cannot tell" must render as not verified.
+    try {
+      return await StorageService.isKeyVerified(await _pinScope(), me, peer);
+    } catch (_e) {
+      return false;
+    }
   },
 
   // ---- Identity & key publishing ----
@@ -1659,17 +1709,18 @@ async function _checkPeerKeyChanged(peerUsername, { force = false, peerPublicKey
     if (!peerPub) return null;
 
     const peerFp = await CryptoUtils.fingerprintPublicKey(peerPub);
-    const knownFp = await StorageService.getKnownFingerprint(me, peer);
+    const island = await _pinScope();
+    const knownFp = await StorageService.getKnownFingerprint(island, me, peer);
 
     if (!knownFp) {
       // First time seeing this peer — store fingerprint, no alert
-      await StorageService.setKnownFingerprint(me, peer, peerFp);
+      await StorageService.setKnownFingerprint(island, me, peer, peerFp);
       return { changed: false, username: peer };
     }
 
     if (knownFp === peerFp) {
       // Same key — clear any stale :changed flag
-      try { await StorageService.removeKeyChanged(me, peer); } catch (_e) {}
+      try { await StorageService.removeKeyChanged(island, me, peer); } catch (_e) {}
       return { changed: false, username: peer };
     }
 
@@ -1680,16 +1731,16 @@ async function _checkPeerKeyChanged(peerUsername, { force = false, peerPublicKey
     // which is the fastest way to teach users to ignore the warning.
     const legacyFp = await CryptoUtils._fingerprintPublicKeyLegacy(peerPub);
     if (knownFp === legacyFp) {
-      await StorageService.setKnownFingerprint(me, peer, peerFp);
-      try { await StorageService.removeKeyChanged(me, peer); } catch (_e) {}
+      await StorageService.setKnownFingerprint(island, me, peer, peerFp);
+      try { await StorageService.removeKeyChanged(island, me, peer); } catch (_e) {}
       return { changed: false, username: peer, migrated: true };
     }
 
     // *** KEY CHANGED ***
-    await StorageService.setKnownFingerprint(me, peer, peerFp);
-    await StorageService.setKeyChanged(me, peer);
+    await StorageService.setKnownFingerprint(island, me, peer, peerFp);
+    await StorageService.setKeyChanged(island, me, peer);
     // Reset verification status only (keep fingerprint + _changed intact)
-    try { await StorageService.clearVerifiedFlag(me, peer); } catch (_e) {}
+    try { await StorageService.clearVerifiedFlag(island, me, peer); } catch (_e) {}
 
     return { changed: true, username: peer };
   } catch (e) {
@@ -1731,7 +1782,7 @@ async function _assertPeerKeyTrustedForSharing(peerUsername, actionLabel = 'shar
   // in the narrow window of first detection. Once the fingerprint is updated,
   // keyCheck.changed becomes false and sharing would be allowed even without re-verification.
   try {
-    const stillChanged = await StorageService.getKeyChanged(me, peer);
+    const stillChanged = await StorageService.getKeyChanged(await _pinScope(), me, peer);
     if (stillChanged) {
       throw new Error(
         `Public key for "${peer}" has recently changed and requires re-verification. ` +

@@ -104,16 +104,26 @@ async function _asyncRemove(key) {
   }
 }
 
+// Pin keys: `fp2_{island}_{me}_{peer}` with `_verified` / `_changed` suffixes.
+// The v1 shape carried no island — see migrateFingerprintPins below.
+const _FP_PREFIX = 'fp2_';
+const _FP_PREFIX_V1 = 'fp_';
+const _FP_INDEX_KEY = '_fp_index';
+
+function _fpBase(island, me, peer) {
+  return `${_FP_PREFIX}${String(island).toLowerCase()}_${String(me).toLowerCase()}_${String(peer).toLowerCase()}`;
+}
+
 /**
  * Track fingerprint Keychain keys in Keychain (not AsyncStorage) for clearAll() enumeration.
  * Prevents metadata leakage: peer list is NOT stored in unencrypted AsyncStorage.
  */
 async function _addToFpIndex(fpKey) {
   try {
-    const idx = (await _secureGet('_fp_index')) || [];
+    const idx = (await _secureGet(_FP_INDEX_KEY)) || [];
     if (!idx.includes(fpKey)) {
       idx.push(fpKey);
-      await _secureSet('_fp_index', idx);
+      await _secureSet(_FP_INDEX_KEY, idx);
     }
   } catch (_e) { /* best-effort */ }
 }
@@ -439,56 +449,104 @@ const StorageService = {
   },
 
   // --- Known peer fingerprints (Keychain) — TOFU integrity requires tamper-resistant storage ---
+  //
+  // Addressed by (island, me, peer). A username identifies a person only
+  // within one island: "bob" on one server and "bob" on another are two
+  // different people, and one slot for both means either a false "this key
+  // changed" warning on an honest peer or, worse, a stranger's key inheriting
+  // the trust the user granted to someone else. The island comes from the
+  // caller — this store resolves nothing on its own, the same way ChainStore
+  // takes a slot rather than working out which thread the caller meant.
 
-  async getKnownFingerprint(me, peer) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}`;
-    return _secureGet(key);
+  async getKnownFingerprint(island, me, peer) {
+    return _secureGet(_fpBase(island, me, peer));
     // fingerprint string or null
   },
 
-  async setKnownFingerprint(me, peer, fingerprint) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}`;
+  async setKnownFingerprint(island, me, peer, fingerprint) {
+    const key = _fpBase(island, me, peer);
     await _secureSet(key, fingerprint);
     // Maintain an AsyncStorage index of fp keys so clearAll() can enumerate them
     await _addToFpIndex(key);
   },
 
-  async isKeyVerified(me, peer) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}_verified`;
-    return !!(await _secureGet(key));
+  async isKeyVerified(island, me, peer) {
+    return !!(await _secureGet(_fpBase(island, me, peer) + '_verified'));
   },
 
-  async setKeyVerified(me, peer) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}_verified`;
-    await _secureSet(key, { ts: Date.now() });
+  async setKeyVerified(island, me, peer) {
+    await _secureSet(_fpBase(island, me, peer) + '_verified', { ts: Date.now() });
   },
 
-  async removeKeyVerified(me, peer) {
-    const fpKey = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}`;
+  async removeKeyVerified(island, me, peer) {
+    const fpKey = _fpBase(island, me, peer);
     await _secureRemove(fpKey);
     await _secureRemove(fpKey + '_verified');
     await _secureRemove(fpKey + '_changed');
   },
 
   /** Remove ONLY the _verified flag, preserving fingerprint and _changed. */
-  async clearVerifiedFlag(me, peer) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}_verified`;
-    await _secureRemove(key);
+  async clearVerifiedFlag(island, me, peer) {
+    await _secureRemove(_fpBase(island, me, peer) + '_verified');
   },
 
-  async getKeyChanged(me, peer) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}_changed`;
-    return !!(await _secureGet(key));
+  async getKeyChanged(island, me, peer) {
+    return !!(await _secureGet(_fpBase(island, me, peer) + '_changed'));
   },
 
-  async setKeyChanged(me, peer) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}_changed`;
-    await _secureSet(key, true);
+  async setKeyChanged(island, me, peer) {
+    await _secureSet(_fpBase(island, me, peer) + '_changed', true);
   },
 
-  async removeKeyChanged(me, peer) {
-    const key = `fp_${String(me).toLowerCase()}_${String(peer).toLowerCase()}_changed`;
-    await _secureRemove(key);
+  async removeKeyChanged(island, me, peer) {
+    await _secureRemove(_fpBase(island, me, peer) + '_changed');
+  },
+
+  /**
+   * Move pins written before the address carried an island onto `island`.
+   *
+   * Such a pin belongs to whichever island this client was talking to when it
+   * wrote it — it only ever talks to one at a time — so attributing them to the
+   * current one is right for anyone who never changed servers, and anyone who
+   * did already had both servers sharing the slot. Runs before any pin is read:
+   * reading first would find nothing, record the key on offer as the trusted
+   * baseline and call it first contact, which is the silent downgrade pins
+   * exist to prevent.
+   *
+   * Returns the number of pins moved.
+   */
+  async migrateFingerprintPins(island) {
+    let moved = 0;
+    try {
+      const index = (await _secureGet(_FP_INDEX_KEY)) || [];
+      if (!Array.isArray(index) || !index.length) return 0;
+
+      const kept = [];
+      for (const legacyKey of index) {
+        if (typeof legacyKey !== 'string' || !legacyKey.startsWith(_FP_PREFIX_V1)) {
+          kept.push(legacyKey);
+          continue;
+        }
+        const newKey = `${_FP_PREFIX}${String(island).toLowerCase()}_${legacyKey.slice(_FP_PREFIX_V1.length)}`;
+        for (const suffix of ['', '_verified', '_changed']) {
+          const value = await _secureGet(legacyKey + suffix);
+          if (value === null || value === undefined) continue;
+          await _secureSet(newKey + suffix, value);
+          await _secureRemove(legacyKey + suffix).catch(() => {});
+        }
+        kept.push(newKey);
+        moved++;
+      }
+
+      await _secureSet(_FP_INDEX_KEY, kept);
+      if (moved) console.log(`[StorageService] Moved ${moved} pin(s) onto island ${island}`);
+    } catch (e) {
+      // Reported, not swallowed: the caller retries, and a pin that did not
+      // move must never be read as "no pin".
+      console.warn('[StorageService] pin migration failed:', e?.message);
+      throw e;
+    }
+    return moved;
   },
 
   // --- Room passwords (SecureStore) ← chrome.storage.local "roomPassById" ---
@@ -596,7 +654,7 @@ const StorageService = {
       // Preserve only identity-related and server config keys.
       const keysToRemove = allKeys.filter(k =>
         // Legacy Keychain-migrated keys
-        k.startsWith('rka_') || k.startsWith('fp_') ||
+        k.startsWith('rka_') || k.startsWith('fp_') || k.startsWith('fp2_') ||
         // Room data (history, metadata, last seen)
         k.startsWith('room_history_') || k.startsWith('room_meta_') || k.startsWith('last_seen_room_') ||
         // Saved connections

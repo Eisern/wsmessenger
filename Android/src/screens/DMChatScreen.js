@@ -643,7 +643,7 @@ export default function DMChatScreen({ navigation, route }) {
         // Check verification and key-changed status
         const verified = await CryptoService.isPeerKeyVerified(myUsername, peer);
         setPeerKeyVerified(verified);
-        const changed = await StorageService.getKeyChanged(myUsername, peer);
+        const changed = await CryptoService.getPeerKeyChanged(myUsername, peer);
         setPeerKeyChanged(!!changed);
       }
     } catch (_e) { /* ignore */ }
@@ -1407,7 +1407,7 @@ export default function DMChatScreen({ navigation, route }) {
                       const fp = peerPubKey ? await CryptoService.fingerprintPeerKey(peerPubKey) : null;
                       await CryptoService.verifyPeerKey(myUsername, peer, fp);
                       // Clear key changed flag
-                      await StorageService.removeKeyChanged(myUsername, peer);
+                      await CryptoService.clearPeerKeyChanged(myUsername, peer);
                       setPeerKeyVerified(true);
                       setPeerKeyChanged(false);
                     } catch (e) {

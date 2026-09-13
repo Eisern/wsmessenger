@@ -1569,7 +1569,7 @@ async function assertPeerKeyTrustedForSharing(
   // and sharing is allowed even without user re-verification.
   const me = getMeUsername();
   if (me) {
-    const changedKey = _knownFpPrefix + me.toLowerCase() + ":" + peer.toLowerCase() + ":changed";
+    const changedKey = (await _fpBase(me, peer)) + ":changed";
     try {
       const stored = await chrome.storage.local.get([changedKey]);
       if (stored[changedKey]) {
@@ -2556,12 +2556,77 @@ function scheduleRoomKeySweep(reason = "", { roomId = 0, delayMs = 0 } = {}) {
 // If either key changes, the number changes user can detect MITM.
 //
 // Known fingerprints are stored in chrome.storage.local:
-//   key: "__known_fp:{myUsername}:{peerUsername}"
+//   key: "__known_fp_v2:{island}:{myUsername}:{peerUsername}"
 //   value: hex fingerprint of peer's public key
 //
 // When a peer's key changes, we emit a "key_changed" event via window.
+//
+// The island is part of the address because a username only identifies a
+// person within one island: "bob" on one server and "bob" on another are two
+// different people. One slot for both means either a false "this key changed"
+// warning on an honest peer or, worse, a stranger's key silently inheriting
+// the trust the user granted to someone else.
 
-const _knownFpPrefix = "__known_fp:";
+const _knownFpPrefix = "__known_fp_v2:";
+const _knownFpPrefixV1 = "__known_fp:";
+const _fpMigrationFlag = "__known_fp_migrated_v2";
+
+// Pins written before the address carried an island belong to whichever island
+// this client was talking to when it wrote them - it only ever talks to one at
+// a time - so they move onto the current one. Reading a pin before this has run
+// would find nothing, record the key on offer as the trusted baseline and call
+// it first contact, which is exactly the silent downgrade the pins exist to
+// prevent. Every reader therefore awaits it, and it runs once per profile.
+let _fpPinsReady = null;
+function _ensureFpPinsMigrated() {
+  if (!_fpPinsReady) _fpPinsReady = _migrateLegacyFpPins();
+  return _fpPinsReady;
+}
+
+async function _migrateLegacyFpPins() {
+  try {
+    await __apiBaseReady;
+  } catch { /* ISLAND_ID keeps whatever it resolved to */ }
+  try {
+    const flag = await chrome.storage.local.get([_fpMigrationFlag]);
+    if (flag[_fpMigrationFlag]) return;
+
+    const all = await chrome.storage.local.get(null);
+    const moved = {};
+    const drop = [];
+    for (const k of Object.keys(all)) {
+      if (!k.startsWith(_knownFpPrefixV1)) continue;
+      moved[_knownFpPrefix + ISLAND_ID + ":" + k.slice(_knownFpPrefixV1.length)] = all[k];
+      drop.push(k);
+    }
+
+    if (drop.length) {
+      await chrome.storage.local.set(moved);
+      await chrome.storage.local.remove(drop);
+      console.log(`[SafetyNumbers] Moved ${drop.length} pin entr(ies) onto island ${ISLAND_ID}`);
+    }
+    await chrome.storage.local.set({ [_fpMigrationFlag]: true });
+  } catch (e) {
+    // Fail closed and let the next call retry: an unmigrated pin read as "no
+    // pin" would record whatever key is on offer as the trusted baseline. A
+    // caller that cannot check trust must not conclude there is nothing to
+    // check - every caller of _fpBase either blocks the action or reports
+    // "unverified", both of which are safe.
+    console.warn("[SafetyNumbers] pin migration failed:", e?.message || e);
+    _fpPinsReady = null;
+    throw e;
+  }
+}
+
+/**
+ * Address of a peer's pin on this island. Async because it waits for the
+ * one-time migration above; every caller is already async.
+ */
+async function _fpBase(me, peer) {
+  await _ensureFpPinsMigrated();
+  return _knownFpPrefix + ISLAND_ID + ":" +
+    String(me).trim().toLowerCase() + ":" + String(peer).trim().toLowerCase();
+}
 
 /**
  * Get the safety number for a peer user.
@@ -2590,7 +2655,7 @@ async function getSafetyNumber(peerUsername) {
   const peerFp = await CU().fingerprintPublicKey(peerPub);
 
   // Check if key changed vs known
-  const storageKey = _knownFpPrefix + me.toLowerCase() + ":" + peer.toLowerCase();
+  const storageKey = await _fpBase(me, peer);
   let keyChanged = false;
   try {
     const stored = await chrome.storage.local.get([storageKey]);
@@ -2634,7 +2699,7 @@ async function markKeyVerified(peerUsername) {
   const me = getMeUsername();
   if (!me || !peerUsername) return;
   const peer = String(peerUsername).trim().toLowerCase();
-  const storageKey = _knownFpPrefix + me.toLowerCase() + ":" + peer;
+  const storageKey = await _fpBase(me, peer);
 
   // Re-fetch and store current fingerprint. This is the *only* place that's
   // allowed to advance the known fingerprint after a real key change —
@@ -2669,7 +2734,7 @@ async function isKeyVerified(peerUsername) {
   const me = getMeUsername();
   if (!me || !peerUsername) return false;
   const peer = String(peerUsername).trim().toLowerCase();
-  const storageKey = _knownFpPrefix + me.toLowerCase() + ":" + peer + ":verified";
+  const storageKey = (await _fpBase(me, peer)) + ":verified";
   try {
     const stored = await chrome.storage.local.get([storageKey]);
     return !!stored[storageKey];
@@ -2685,7 +2750,7 @@ async function _resetKeyVerification(peerUsername) {
   const me = getMeUsername();
   if (!me || !peerUsername) return;
   const peer = String(peerUsername).trim().toLowerCase();
-  const base = _knownFpPrefix + me.toLowerCase() + ":" + peer;
+  const base = await _fpBase(me, peer);
   try {
     await chrome.storage.local.remove([base + ":verified", base + ":ts"]);
     // Persist a "key changed, needs re-verification" flag so that assertPeerKeyTrustedForSharing
@@ -2741,7 +2806,7 @@ async function checkPeerKeyChanged(peerUsername, { force = false, peerPublicKeyB
     const peerPub = String(peerPublicKeyB64 || "").trim() || await fetchPeerPublicKey(peer);
     const peerFp = await CU().fingerprintPublicKey(peerPub);
 
-    const storageKey = _knownFpPrefix + me.toLowerCase() + ":" + peerLower;
+    const storageKey = await _fpBase(me, peerLower);
     const stored = await chrome.storage.local.get([storageKey]);
     const knownFp = stored[storageKey] || null;
 
