@@ -36,6 +36,14 @@ module.exports = {
       // are real rather than mocked.
       resolver: '<rootDir>/jest-noble-resolver.js',
       transformIgnorePatterns: ['node_modules/(?!(@noble|@scure)/)'],
+      // StorageService is a plain module over two platform APIs, so the pin
+      // tests run here with the same stubs the integration project uses —
+      // in `npm test`, where a trust-critical store belongs, rather than in
+      // the suite that needs a live server.
+      moduleNameMapper: {
+        '^react-native-keychain$': '<rootDir>/src/services/__tests__/integration/helpers/keychainStub.js',
+        '^@react-native-async-storage/async-storage$': '<rootDir>/src/services/__tests__/integration/helpers/asyncStorageStub.js',
+      },
     },
     {
       // Интеграционные тесты failover — гоняют НАСТОЯЩИЙ NetworkService против
