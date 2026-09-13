@@ -1009,6 +1009,54 @@ const CryptoUtils = {
   },
 
   /**
+   * Safety number for a pair identified by KEYS, not by names.
+   *
+   * The v1 number mixes in usernames and sorts by them. Two people on
+   * different islands share no namespace - and may share a name - so the two
+   * sides would sort differently and read out different numbers, or two
+   * different people would read out the same one.
+   *
+   * v2 takes the two X25519 public keys, orders them by their kid so both
+   * sides agree without talking, and hashes the raw key bytes under its own
+   * domain prefix. v1 stays for local pairs: changing their number would show
+   * every already-verified contact as suddenly unverified.
+   *
+   * @param {string} myPublicKeyB64   - base64 raw X25519 public key
+   * @param {string} peerPublicKeyB64 - base64 raw X25519 public key
+   * @returns {Promise<string>} 60-digit safety number "12345 67890 ..."
+   */
+  async computeSafetyNumberV2(myPublicKeyB64, peerPublicKeyB64) {
+    const rawMine = new Uint8Array(this.base64ToArrayBuffer(String(myPublicKeyB64 || "").trim()));
+    const rawPeer = new Uint8Array(this.base64ToArrayBuffer(String(peerPublicKeyB64 || "").trim()));
+    if (rawMine.length !== 32 || rawPeer.length !== 32) {
+      throw new Error("Safety number needs two 32-byte X25519 keys");
+    }
+
+    const kidMine = await this.fingerprintPublicKey(myPublicKeyB64);
+    const kidPeer = await this.fingerprintPublicKey(peerPublicKeyB64);
+    const mineFirst = kidMine <= kidPeer;
+    const first = mineFirst ? rawMine : rawPeer;
+    const second = mineFirst ? rawPeer : rawMine;
+
+    const prefix = new TextEncoder().encode("ws-safety-v2");
+    const payload = new Uint8Array(prefix.length + 64);
+    payload.set(prefix, 0);
+    payload.set(first, prefix.length);
+    payload.set(second, prefix.length + 32);
+
+    const hashBytes = new Uint8Array(await crypto.subtle.digest("SHA-256", payload));
+
+    // Same rendering as v1: 30 bytes as one BigInt, so no byte can collide
+    // with another the way a per-byte encoding once did.
+    let n = 0n;
+    for (let i = 0; i < 30; i++) n = n * 256n + BigInt(hashBytes[i]);
+    const dec = n.toString(10).padStart(73, "0").slice(0, 60);
+    const groups = [];
+    for (let i = 0; i < 60; i += 5) groups.push(dec.slice(i, i + 5));
+    return groups.join(" ");
+  },
+
+  /**
    * Fingerprint a public key (first 16 bytes of SHA-256 → 32 hex chars).
    * Hashes the RAW 32-byte X25519 public key (base64-decoded), not the
    * base64 text. Whitespace / padding variants in the encoding no longer

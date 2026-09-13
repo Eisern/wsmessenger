@@ -2684,6 +2684,21 @@ async function getSafetyNumber(peerUsername) {
   const myPub = CM()?.userPublicKeyPem;
   if (!myPub) throw new Error("Own public key not available (crypto locked?)");
 
+  // A cross-island contact is not in this island's key store, and asking it
+  // would be the wrong question anyway: their key came from their card, out of
+  // band, which is what the number is meant to confirm. Their number is v2 -
+  // keyed by kid rather than by names that mean nothing across the border.
+  const foreign = (await listForeignContacts())
+    .find((c) => String(c.displayName || "").toLowerCase() === peer.toLowerCase());
+  if (foreign) {
+    return {
+      safetyNumber: await CU().computeSafetyNumberV2(myPub, foreign.x25519PubB64),
+      peerFingerprint: foreign.kid,
+      keyChanged: false,
+      v2: true,
+    };
+  }
+
   // Get peer's public key from server
   const peerPub = await fetchPeerPublicKey(peer);
 

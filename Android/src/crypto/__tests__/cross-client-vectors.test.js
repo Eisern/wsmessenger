@@ -59,6 +59,9 @@ function hex(v) {
 // ---- fixed inputs -------------------------------------------------------
 const PRIV = new Uint8Array(32).map((_, i) => i + 1);          // 01..20
 const PUB_B64 = Buffer.from(new Uint8Array(32).map((_, i) => 0x40 + i)).toString('base64');
+// A second key, so a pair can be formed. Its kid sorts before PUB_B64's, which
+// is what makes the order test below meaningful rather than accidental.
+const PUB2_B64 = Buffer.from(new Uint8Array(32).map((_, i) => i + 1)).toString('base64');
 
 // ---- pinned outputs — do not recompute ----------------------------------
 const V = {
@@ -89,6 +92,11 @@ const V = {
 
   dmSigMessageV2: '77732d646d2d7369672d76320000002a00000007' + 'aa'.repeat(32) + '0005616c69636568656c6c6f20776f726c64',
   dmSigMessageV2Genesis: '77732d646d2d7369672d7632000000010000000100000000000000000000000000000000000000000000000000000000000000000000',
+
+  // Two people read this aloud to each other. If the two clients disagree, the
+  // number that is supposed to prove nobody is in the middle becomes the thing
+  // that says somebody is.
+  safetyNumberV2: '16494 02878 99189 75102 28754 87121 50637 46431 96992 49973 55065 63096',
 
   padBucket1: 64,
   padBucket100: 128,
@@ -121,6 +129,9 @@ const CASES = [
   ['_padBucket(1)', async (U) => U._padBucket(1), V.padBucket1],
   ['_padBucket(100)', async (U) => U._padBucket(100), V.padBucket100],
   ['_stableJson', async (U) => U._stableJson({ b: 1, a: [2, { d: 4, c: 3 }] }), V.stableJson],
+  // Keys, not names: a cross-island pair shares no namespace, and two people
+  // may carry the same username on two islands.
+  ['computeSafetyNumberV2', async (U) => U.computeSafetyNumberV2(PUB2_B64, PUB_B64), V.safetyNumberV2],
 ];
 
 describe('extension matches the pinned vectors', () => {
@@ -136,6 +147,23 @@ describe('Android matches the pinned vectors', () => {
 });
 
 describe('round trips agree across clients', () => {
+  it('a safety number does not depend on who is asking', async () => {
+    // Each side passes its own key first. Reading out different numbers would
+    // look exactly like an interception to two people on the phone.
+    const mine = await EXT.computeSafetyNumberV2(PUB2_B64, PUB_B64);
+    const theirs = await AND.computeSafetyNumberV2(PUB_B64, PUB2_B64);
+    expect(mine).toBe(theirs);
+    expect(mine).toBe(V.safetyNumberV2);
+  });
+
+  it('the v2 number is not the v1 number for the same pair', async () => {
+    // Separate domains, so a v1 number can never be read as a v2 one - and the
+    // local pairs that already verified keep the number they verified.
+    const v1 = await EXT.computeSafetyNumber('alice', PUB2_B64, 'bob', PUB_B64);
+    expect(v1).not.toBe(V.safetyNumberV2);
+    expect(await AND.computeSafetyNumber('alice', PUB2_B64, 'bob', PUB_B64)).toBe(v1);
+  });
+
   it('bip39 decodes on either side what the other encoded', async () => {
     const fromExt = await EXT.bip39Encode(PRIV);
     const fromAnd = await AND.bip39Encode(PRIV);

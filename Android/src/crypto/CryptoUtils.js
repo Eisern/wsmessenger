@@ -745,6 +745,57 @@ const CryptoUtils = {
   },
 
   /**
+   * Safety number for a pair identified by KEYS, not by names.
+   *
+   * The v1 number mixes in usernames and sorts by them. Two people on
+   * different islands share no namespace - and may share a name - so the two
+   * sides would sort differently and read out different numbers, or two
+   * different people would read out the same one.
+   *
+   * v2 takes the two X25519 public keys, orders them by their kid so both
+   * sides agree without talking, and hashes the raw key bytes under its own
+   * domain prefix. v1 stays for local pairs: changing their number would show
+   * every already-verified contact as suddenly unverified.
+   *
+   * Pinned in src/crypto/__tests__/cross-client-vectors.test.js.
+   */
+  async computeSafetyNumberV2(myPublicKeyB64, peerPublicKeyB64) {
+    const rawMine = new Uint8Array(CryptoUtils.base64ToArrayBuffer(String(myPublicKeyB64 || '').trim()));
+    const rawPeer = new Uint8Array(CryptoUtils.base64ToArrayBuffer(String(peerPublicKeyB64 || '').trim()));
+    if (rawMine.length !== 32 || rawPeer.length !== 32) {
+      throw new Error('Safety number needs two 32-byte X25519 keys');
+    }
+
+    const kidMine = await CryptoUtils.fingerprintPublicKey(myPublicKeyB64);
+    const kidPeer = await CryptoUtils.fingerprintPublicKey(peerPublicKeyB64);
+    const mineFirst = kidMine <= kidPeer;
+    const first = mineFirst ? rawMine : rawPeer;
+    const second = mineFirst ? rawPeer : rawMine;
+
+    const prefix = new TextEncoder().encode('ws-safety-v2');
+    const payload = new Uint8Array(prefix.length + 64);
+    payload.set(prefix, 0);
+    payload.set(first, prefix.length);
+    payload.set(second, prefix.length + 32);
+
+    const hash = await crypto.subtle.digest('SHA-256', payload);
+    const hashBytes = new Uint8Array(hash);
+
+    // Same rendering as v1: 30 bytes as one BigInt, so no byte can collide
+    // with another the way a per-byte encoding once did.
+    let n = 0n;
+    for (let i = 0; i < 30; i++) {
+      n = n * 256n + BigInt(hashBytes[i]);
+    }
+    const dec = n.toString(10).padStart(73, '0').slice(0, 60);
+    const groups = [];
+    for (let i = 0; i < 60; i += 5) {
+      groups.push(dec.slice(i, i + 5));
+    }
+    return groups.join(' ');
+  },
+
+  /**
    * Fingerprint of a public KEY — the hash of the 32 raw key bytes.
    *
    * This used to hash the base64 TEXT instead, which made the same key produce
