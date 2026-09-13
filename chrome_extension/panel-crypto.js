@@ -1917,8 +1917,22 @@ async function encryptDm(threadId, plaintext, peerUsername) {
 }
 
 async function decryptDm(threadId, text, peerUsername, msgTs) {
+  // A cross-island thread has no key on this island and no peer here to share
+  // one with. Left to the local path, a missing key becomes "the server has
+  // none, so create and share one" - which would mint a key for a mailbox the
+  // other side cannot read, and only the trust check stops it, by failing with
+  // a message about a public key nobody here was ever going to have.
+  const __foreignThread = await _foreignForThread(threadId);
+  if (__foreignThread) {
+    try {
+      await ensureForeignKeysReady(__foreignThread);
+    } catch (e) {
+      console.warn("decryptDm: foreign keys not ready:", e?.message || e);
+    }
+  }
+
   try {
-    await ensureDmKeyReady(threadId, peerUsername, { interactive: false });
+    if (!__foreignThread) await ensureDmKeyReady(threadId, peerUsername, { interactive: false });
   } catch (e) {
     // DM_KEY_LOCKED is the expected non-interactive failure mode — the
     // !CM()?.roomKeys?.has(rid) guard below handles it. Anything else is
@@ -3100,12 +3114,25 @@ function _b64FromU8(u8) {
 
 const _FOREIGN_INDEX = "__foreign_index:";
 
+/**
+ * Wait until the active island is known.
+ *
+ * Every contact is filed under it, so anything that reads or writes one before
+ * `server_config` has been applied looks in the wrong drawer: it finds nothing
+ * and concludes there are no cross-island contacts. That conclusion is not
+ * harmless - it is what sends a foreign thread down the local key path.
+ */
+async function _islandSettled() {
+  try { await __apiBaseReady; } catch { /* keep whatever we resolved to */ }
+}
+
 function _foreignIndexKey() {
   return _FOREIGN_INDEX + ISLAND_ID + ":" + String(getMeUsername() || "").toLowerCase();
 }
 
 /** Every cross-island contact this account has on this island. */
 async function listForeignContacts() {
+  await _islandSettled();
   try {
     // Reading the list is also how the decrypt path learns which threads are
     // foreign: the panel lists contacts before it can open one.
@@ -3126,12 +3153,14 @@ async function listForeignContacts() {
 }
 
 async function getForeignContact(peerKid) {
+  await _islandSettled();
   const key = FD().contactKey(ISLAND_ID, getMeUsername(), peerKid);
   const stored = await chrome.storage.local.get([key]);
   return stored[key] || null;
 }
 
 async function saveForeignContact(contact) {
+  await _islandSettled();
   const key = FD().contactKey(ISLAND_ID, getMeUsername(), contact.kid);
   const idxKey = _foreignIndexKey();
   const stored = await chrome.storage.local.get([idxKey]);

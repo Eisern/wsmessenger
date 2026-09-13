@@ -400,6 +400,43 @@ describe('they write to each other', () => {
     await alice.sandbox.WSOutbox.createOutbox; // keep the queue module referenced
   });
 
+  it('never asks this island for a key that belongs to another one', async () => {
+    // Reading a cross-island message must not touch the local DM key path. If
+    // it does, a missing key here turns into "create one and share it with the
+    // peer" - for a mailbox the other side cannot read, addressed to somebody
+    // who has no account on this island. The only thing that stopped it was
+    // the trust check refusing, with a message about a public key that was
+    // never going to exist.
+    const stored = await bob.sandbox.getForeignContact(bobSide.kid);
+
+    // A panel that has just started: nothing loaded, nothing cached.
+    const fresh = makePanel({
+      apiBase: ISLAND_B, islandId: 'island-b-test', username: bob.username, token: bob.token,
+    });
+    const ok = await fresh.manager.initializeUserKeyWithKek(
+      bob.identity.encrypted, bob.identity.aesKey,
+      bob.identity.publicKeyB64, bob.username.toLowerCase(),
+    );
+    expect(ok).toBe(true);
+    await fresh.sandbox.saveForeignContact(stored);
+
+    const before = (await http(ISLAND_B, `/crypto/dm-key/${bobSide.inbox.threadId}`,
+      { token: bob.token })).status;
+
+    // The peer name is what the UI would pass: a display name, not a user here.
+    const got = await fresh.sandbox.decryptDm(
+      bobSide.inbox.threadId,
+      await lastMessage(ISLAND_B, bobSide.inbox.threadId, bob.token),
+      stored.displayName, Date.now(),
+    );
+    expect(got.text).toBeTruthy();
+
+    // And nothing was created on this island behind our back.
+    const after = (await http(ISLAND_B, `/crypto/dm-key/${bobSide.inbox.threadId}`,
+      { token: bob.token })).status;
+    expect(after).toBe(before);
+  });
+
   it('keeps the contact in storage, not in memory', async () => {
     const listed = await alice.sandbox.listForeignContacts();
     expect(listed).toHaveLength(1);
