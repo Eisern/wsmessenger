@@ -3227,7 +3227,18 @@ async function claimForeignOutbox(contact) {
 
   let last = null;
   for (const base of bases) {
-    const r = await FD().claimMailbox(_foreignDeps(), base, myKid);
+    // An address that cannot be reached at all - blocked by the extension's
+    // CSP, dead host, wrong scheme - throws rather than answering. Letting
+    // that escape would abandon the remaining entry points, which is the whole
+    // reason a card carries more than one.
+    let r;
+    try {
+      r = await FD().claimMailbox(_foreignDeps(), base, myKid);
+    } catch (e) {
+      console.warn(`[Foreign] ${base} unreachable:`, e?.message || e);
+      last = { status: 0 };
+      continue;
+    }
     if (r.ok) {
       let keyB64 = null;
       if (r.encryptedThreadKey) {
@@ -3305,9 +3316,19 @@ async function sendForeignMessage(contact, plaintext) {
     );
   }
 
+  // Built by hand rather than through CM().encryptMessage, because that
+  // encrypts with the key in the slot - the inbox key - and this has to go out
+  // under the mailbox key of the island it is addressed to. The shape must
+  // match the manager's byte for byte: `encrypted: true` is what the receiving
+  // panel keys on, and the kid is bound as AAD, so a message cannot be
+  // re-labelled with another key's id.
   const key = await cu.importRoomKey(c.outbox.keyB64);
-  const enc = await cu.encryptMessage(key, JSON.stringify(envelope));
-  const ciphertext = JSON.stringify({ ...enc, kid: c.outbox.keyId });
+  const kid = c.outbox.keyId || await cu.fingerprintRoomKeyBase64(c.outbox.keyB64);
+  const aad = new TextEncoder().encode(String(kid));
+  const enc = await cu.encryptMessage(key, JSON.stringify(envelope), aad);
+  const ciphertext = JSON.stringify({
+    encrypted: true, iv: enc.iv, data: enc.data, kid, aad_v1: true,
+  });
 
   let res = await FD().deliver(_foreignDeps(), {
     apiBase: c.outbox.apiBase,

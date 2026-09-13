@@ -173,9 +173,14 @@ async function sealed(sender, threadId, text, roomKeyB64) {
     body: text,
     sig: await CU.ed25519Sign(sender.edSeed, CU._dmSigMessage(threadId, sender.displayName, text)),
   };
+  // The shape CryptoManager.encryptMessage emits, down to `encrypted: true`
+  // and the kid bound as AAD: the client's decrypt path keys on both, so a
+  // helper that skipped them would prove less than it looks.
   const key = await CU.importRoomKey(roomKeyB64);
-  const enc = await CU.encryptMessage(key, JSON.stringify(envelope));
-  return JSON.stringify({ ...enc, kid: await CU.fingerprintRoomKeyBase64(roomKeyB64) });
+  const kid = await CU.fingerprintRoomKeyBase64(roomKeyB64);
+  const aad = new TextEncoder().encode(kid);
+  const enc = await CU.encryptMessage(key, JSON.stringify(envelope), aad);
+  return JSON.stringify({ encrypted: true, iv: enc.iv, data: enc.data, kid, aad_v1: true });
 }
 
 // The sealed path stores base64url(utf8(json)), and the panel decodes it with
@@ -190,7 +195,9 @@ function udDecode(stored) {
 async function openSealed(reader, stored, roomKeyB64, senderEdPubB64, threadId) {
   const parsed = JSON.parse(udDecode(stored));
   const key = await CU.importRoomKey(roomKeyB64);
-  const plain = await CU.decryptMessage(key, parsed);
+  const plain = await CU.decryptMessage(
+    key, parsed, parsed.kid ? new TextEncoder().encode(String(parsed.kid)) : undefined,
+  );
   const inner = JSON.parse(plain);
   const sigOk = await CU.ed25519Verify(
     unb64(senderEdPubB64),
