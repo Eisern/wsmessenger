@@ -70,11 +70,17 @@ beforeAll(async () => {
   alice = await setUp(ISLAND, 'island-local', `loc_a_${stamp}`);
   bob = await setUp(ISLAND, 'island-local', `loc_b_${stamp}`);
 
-  // Both must accept DMs from strangers, or /dm/open answers 403.
+  // Both must accept DMs and invites from strangers: these two are not friends,
+  // and the island refuses either otherwise.
   for (const who of [alice, bob]) {
     const r = await http(ISLAND, '/profile/me', {
       method: 'PUT', token: who.token,
-      body: { privacy: { allow_dm_from_non_friends: true } },
+      body: {
+        privacy: {
+          allow_dm_from_non_friends: true,
+          allow_group_invites_from_non_friends: true,
+        },
+      },
     });
     if (!r.ok) throw new Error(`could not open ${who.username} to DMs: ${r.status}`);
   }
@@ -221,5 +227,102 @@ describe('room keys and the history they have to keep readable', () => {
     expect(await fresh.manager.decryptMessage(roomId, JSON.parse(beforeRotation)))
       .toBe('проверка архива');
     expect(fresh.manager.roomKeyArchive.get(roomId)?.size ?? 0).toBeGreaterThan(0);
+  });
+});
+
+describe('a second person joining a room', () => {
+  let roomId;
+  let roomKeyB64;
+
+  it('creates the room and invites them', async () => {
+    roomKeyB64 = await alice.CU.exportRoomKey(await alice.CU.generateRoomKey(true));
+    const created = await http(ISLAND, '/rooms', {
+      method: 'POST',
+      token: alice.token,
+      body: {
+        name: `loc_join_${stamp}`,
+        password: null,
+        encrypted_room_key: await alice.CU.encryptRoomKeyForUser(
+          alice.manager.userPublicKeyB64, roomKeyB64,
+        ),
+        is_public: false,
+        is_readonly: false,
+      },
+    });
+    expect(created.ok).toBe(true);
+    roomId = Number(created.data.id ?? created.data.room_id);
+    await alice.manager.loadRoomKey(roomId, roomKeyB64);
+
+    const invited = await http(ISLAND, `/rooms/${roomId}/invite`, {
+      method: 'POST', token: alice.token, body: { username: bob.username },
+    });
+    expect(invited.ok).toBe(true);
+  });
+
+  it('leaves a gap the moment they accept, and nothing else does', async () => {
+    // The island does not hold the room key and cannot mint one, so a new
+    // member is simply a member with no key row. That gap is derived from
+    // membership rather than recorded anywhere, which is what makes it
+    // impossible to lose.
+    const accepted = await http(ISLAND, `/rooms/${roomId}/invites/accept`, {
+      method: 'POST', token: bob.token, body: {},
+    });
+    expect(accepted.ok).toBe(true);
+
+    const gaps = await http(ISLAND, `/crypto/rooms/key-gaps?room_id=${roomId}`, {
+      token: alice.token,
+    });
+    expect(gaps.ok).toBe(true);
+    const names = (gaps.data.gaps || []).map((g) => g.username);
+    expect(names).toContain(bob.username);
+  });
+
+  it('the owner sweeps, and the new member can read what was said before', async () => {
+    // Said BEFORE they had the key: the room key is not rotated on join, so
+    // history stays readable - which is the whole reason a gap is filled with
+    // the existing key rather than a new one.
+    const earlier = await alice.sandbox.encryptMessageForRoom(roomId, 'сказано до прихода');
+
+    const swept = await alice.sandbox.sweepRoomKeyGaps({ roomId, reason: 'test' });
+    expect(swept.ran).toBe(true);
+    expect(swept.shared).toBeGreaterThanOrEqual(1);
+
+    const loaded = await bob.sandbox.loadRoomKey(roomId);
+    expect(loaded.ok).toBe(true);
+    expect(await bob.manager.decryptMessage(roomId, JSON.parse(earlier)))
+      .toBe('сказано до прихода');
+  });
+
+  it('a second sweep finds nothing left to do', async () => {
+    // The endpoint derives gaps from what is missing, so a filled one stops
+    // being reported. A sweep that kept re-sharing would be an infinite loop
+    // between two clients that both think they are helping.
+    const again = await alice.sandbox.sweepRoomKeyGaps({ roomId, reason: 'test-2' });
+    expect(again.shared).toBe(0);
+
+    const gaps = await http(ISLAND, `/crypto/rooms/key-gaps?room_id=${roomId}`, {
+      token: alice.token,
+    });
+    expect((gaps.data.gaps || []).map((g) => g.username)).not.toContain(bob.username);
+  });
+
+  it('a removed member keeps nothing, and the room moves on without them', async () => {
+    // Rotation on kick is the only thing standing between "removed" and "still
+    // reading everything". The rotated key must reach the members who stayed,
+    // and must not reach the one who left.
+    const kicked = await http(ISLAND, `/rooms/${roomId}/kick`, {
+      method: 'POST', token: alice.token, body: { username: bob.username },
+    });
+    expect(kicked.ok).toBe(true);
+
+    const rotated = await alice.sandbox.rotateRoomKey(roomId, { kickedUsername: bob.username });
+    expect(rotated.ok).toBe(true);
+
+    const afterKick = await alice.sandbox.encryptMessageForRoom(roomId, 'уже без них');
+    const theirKey = await http(ISLAND, `/crypto/room-key/${roomId}`, { token: bob.token });
+    expect(theirKey.ok).toBe(false);
+
+    // And the owner still reads both sides of the rotation.
+    expect(await alice.manager.decryptMessage(roomId, JSON.parse(afterKick))).toBe('уже без них');
   });
 });

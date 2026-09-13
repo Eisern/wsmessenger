@@ -107,8 +107,9 @@ async function unlockRealManager(sandbox, { username, password }) {
 function makePanel({ apiBase, islandId, username, token }) {
   const posted = [];
   const sandbox = {
-    crypto: globalThis.crypto, TextEncoder, TextDecoder, atob, btoa, console, URL, fetch,
-    setTimeout, clearTimeout, setInterval, clearInterval, Event, CustomEvent,
+    crypto: globalThis.crypto, TextEncoder, TextDecoder, atob, btoa, console, fetch,
+    URL, URLSearchParams, Event, CustomEvent,
+    setTimeout, clearTimeout, setInterval, clearInterval,
   };
   sandbox.globalThis = sandbox;
   sandbox.self = sandbox;
