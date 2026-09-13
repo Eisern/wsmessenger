@@ -54,6 +54,15 @@ function hasMasterKey(maxAgeMs = 10 * 60 * 1000) {
   return !!_masterKey && (Date.now() - _masterKeyTs) < maxAgeMs;
 }
 
+// Idle, not absolute: every use puts the clock back to zero, so a session
+// somebody is actually using does not stop in the middle, while one left alone
+// stops holding the key. Without this the age was only ever set when the key
+// arrived, and nothing consulted it - the worker keeps itself alive, so the key
+// lived as long as the browser did.
+function touchMasterKey() {
+  if (_masterKey) _masterKeyTs = Date.now();
+}
+
 async function setMasterKeyFromB64(master_b64) {
   const b64 = String(master_b64 || "").trim();
   if (!b64) throw new Error("No master_b64");
@@ -2007,7 +2016,8 @@ if (msg.type === "unlock_master_clear") {
 if (msg.type === "storage_encrypt") {
   (async () => {
     try {
-      if (!_masterKey) throw new Error("master_locked");
+      if (!hasMasterKey()) throw new Error("master_locked");
+      touchMasterKey();
       const iv = crypto.getRandomValues(new Uint8Array(12));
       const encoded = new TextEncoder().encode(String(msg.plaintext || ""));
       const ciphertext = await crypto.subtle.encrypt(
@@ -2029,7 +2039,8 @@ if (msg.type === "storage_encrypt") {
 if (msg.type === "storage_decrypt") {
   (async () => {
     try {
-      if (!_masterKey) throw new Error("master_locked");
+      if (!hasMasterKey()) throw new Error("master_locked");
+      touchMasterKey();
       const iv = new Uint8Array(b64decode(msg.iv));
       const ct = b64decode(msg.ct);
       const plainBuf = await crypto.subtle.decrypt(
