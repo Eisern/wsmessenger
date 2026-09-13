@@ -7439,7 +7439,442 @@ async def dm_delivery_secret(thread_id: int, request: Request, authorization: st
             "delivery_secret_b64": sec,
             "expires_at": expires_at.isoformat() if expires_at else None,
         }
-        
+
+# =========================================================
+# Cross-island direct messages: the foreign mailbox
+# =========================================================
+#
+# Two people on two independent islands write to each other without their
+# islands ever speaking. Each direction is a separate one-way mailbox living on
+# the RECIPIENT's island, and the sender delivers into it themselves:
+#
+#   Alice@A -> Bob@B   lands on island B, in a mailbox Bob created
+#   Bob@B   -> Alice@A lands on island A, in a mailbox Alice created
+#
+# Each person reads only from their own island, over the existing /ws-dm and
+# /dm/{id}/history: a mailbox IS a chat_dm_threads row whose only member is its
+# owner. Nothing in the read path changes.
+#
+# Consent is structural rather than policed. A mailbox exists only because its
+# owner created it for one specific key, out of band; there is no way to
+# address a stranger, so there is nothing to spam. The peer is identified by
+# `kid` - sha256(x25519 public key)[:32], the same identifier the key store
+# already verifies on write - and never by a username, which means nothing
+# across islands.
+#
+# See docs/internal/cross-island-dm-assessment.md for the full design.
+
+_FOREIGN_BOX_READY = False
+_FOREIGN_BOX_LOCK = asyncio.Lock()
+
+FOREIGN_CLAIM_DOMAIN = b"ws-foreign-claim-v1"
+FOREIGN_CHALLENGE_TTL_S = 120
+
+
+def _island_id() -> str:
+    return (os.getenv("ISLAND_ID") or "").strip()
+
+
+async def _ensure_foreign_box_tables(session: AsyncSession) -> None:
+    global _FOREIGN_BOX_READY
+    if _FOREIGN_BOX_READY:
+        return
+    async with _FOREIGN_BOX_LOCK:
+        if _FOREIGN_BOX_READY:
+            return
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS chat_dm_foreign_boxes (
+                thread_id BIGINT PRIMARY KEY,
+                owner_user_id BIGINT NOT NULL,
+                peer_kid VARCHAR(32) NOT NULL,
+                peer_x25519_pub TEXT NOT NULL,
+                peer_ed25519_pub TEXT NOT NULL,
+                label TEXT NOT NULL DEFAULT '',
+                peer_wrapped_key TEXT,
+                peer_wrapped_kid VARCHAR(64),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (owner_user_id, peer_kid)
+            )
+        """))
+        # The thread key wrapped for the peer lives on the box row rather than
+        # in chat_dm_thread_keys, whose user_id is a foreign key into users:
+        # the peer has no account here, which is the entire point.
+        for col, typ in (("peer_wrapped_key", "TEXT"), ("peer_wrapped_kid", "VARCHAR(64)")):
+            await session.execute(text(
+                f"ALTER TABLE chat_dm_foreign_boxes ADD COLUMN IF NOT EXISTS {col} {typ}"
+            ))
+        # The nonce table holds no kid and no user: a challenge says nothing
+        # about who asked for it or whether anything answers to it (§5.1).
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS chat_foreign_challenges (
+                nonce BYTEA PRIMARY KEY,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.execute(text("""
+            CREATE INDEX IF NOT EXISTS idx_foreign_challenges_created
+            ON chat_foreign_challenges(created_at)
+        """))
+        await session.commit()
+        _FOREIGN_BOX_READY = True
+
+
+class ForeignBoxIn(BaseModel):
+    peer_kid: str
+    peer_x25519_pub: str
+    peer_ed25519_pub: str
+    label: str | None = None
+    encrypted_thread_key: str | None = None
+    key_id: str | None = None
+
+
+class ForeignClaimIn(BaseModel):
+    kid: str
+    nonce_b64: str
+    sig_b64: str
+
+
+def _norm_kid(v: str) -> str:
+    kid = (v or "").strip().lower()
+    if len(kid) != 32 or any(c not in "0123456789abcdef" for c in kid):
+        raise HTTPException(status_code=400, detail="bad kid")
+    return kid
+
+
+def _kid_of_pub(pub_b64: str) -> str:
+    try:
+        raw = base64.b64decode((pub_b64 or "").strip(), validate=False)
+    except Exception:
+        raise HTTPException(status_code=400, detail="bad public key")
+    if len(raw) != 32:
+        raise HTTPException(status_code=400, detail="bad public key")
+    return hashlib.sha256(raw).hexdigest()[:32]
+
+
+@app.post("/foreign/box", status_code=201)
+async def foreign_box_create(
+    payload: ForeignBoxIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Open a mailbox on THIS island for one foreign key, and hand back its
+    address. Only the owner can do this, which is what makes consent structural
+    rather than a filter somebody has to tune.
+
+    The owner also uploads the thread key wrapped for the peer's X25519 key:
+    the peer has no account here and no other way to be handed one, so the
+    claim below returns it alongside the delivery secret.
+    """
+    me = require_user_from_bearer(authorization)
+    ip = get_client_ip_request(request)
+    await enforce_http_rate_limit(f"foreign:box:ip:{ip}", RL_DM_OPEN_IP_PER_10MIN, 600)
+    await enforce_http_rate_limit(
+        f"foreign:box:user:{int(me['user_id'])}", RL_DM_OPEN_USER_PER_10MIN, 600
+    )
+
+    if not _island_id():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    kid = _norm_kid(payload.peer_kid)
+    # The kid is not taken on trust: it must be the hash of the key supplied
+    # with it, or the two could name different people and the claim would
+    # verify a signature for one while delivering to the other.
+    if _kid_of_pub(payload.peer_x25519_pub) != kid:
+        raise HTTPException(status_code=400, detail="kid does not match key")
+    ed_pub = (payload.peer_ed25519_pub or "").strip()
+    if not ed_pub or len(base64.b64decode(ed_pub + "=" * (-len(ed_pub) % 4))) != 32:
+        raise HTTPException(status_code=400, detail="bad signing key")
+
+    label = (payload.label or "").strip()[:64]
+    me_id = int(me["user_id"])
+
+    async with SessionLocal() as session:
+        await _ensure_foreign_box_tables(session)
+
+        res = await session.execute(text("""
+            SELECT thread_id FROM chat_dm_foreign_boxes
+            WHERE owner_user_id = :uid AND peer_kid = :kid
+        """), {"uid": me_id, "kid": kid})
+        tid = res.scalar_one_or_none()
+
+        if tid is None:
+            r = await session.execute(text("INSERT INTO chat_dm_threads DEFAULT VALUES RETURNING id"))
+            tid = int(r.scalar_one())
+            # Only the owner is a member. No chat_dm_pairs row: there is no
+            # second local user, and /dm/list joins pairs, so a mailbox does
+            # not show up there - the client lists them from /foreign/boxes.
+            await session.execute(text("""
+                INSERT INTO chat_dm_members(thread_id, user_id) VALUES (:tid, :uid)
+            """), {"tid": tid, "uid": me_id})
+            await session.execute(text("""
+                INSERT INTO chat_dm_foreign_boxes(
+                    thread_id, owner_user_id, peer_kid, peer_x25519_pub, peer_ed25519_pub, label)
+                VALUES (:tid, :uid, :kid, :xpub, :edpub, :label)
+            """), {
+                "tid": tid, "uid": me_id, "kid": kid,
+                "xpub": (payload.peer_x25519_pub or "").strip(),
+                "edpub": ed_pub, "label": label,
+            })
+        else:
+            tid = int(tid)
+            if label:
+                await session.execute(text("""
+                    UPDATE chat_dm_foreign_boxes SET label = :label WHERE thread_id = :tid
+                """), {"tid": tid, "label": label})
+
+        await session.execute(text("""
+            INSERT INTO chat_dm_delivery(thread_id, delivery_secret, expires_at)
+            VALUES (:tid, :secret, NOW() + INTERVAL '24 hours')
+            ON CONFLICT (thread_id) DO NOTHING
+        """), {"tid": tid, "secret": secrets.token_bytes(32)})
+
+        # The wrapped thread key, if the owner sent one. Stored under the
+        # owner's row as well, so the owner's own client reloads it the usual
+        # way after a reinstall.
+        if payload.encrypted_thread_key and payload.key_id:
+            await _ensure_key_archive_tables(session)
+            await session.execute(text("""
+                INSERT INTO chat_dm_thread_keys(thread_id, user_id, encrypted_thread_key)
+                VALUES (:tid, :uid, :k)
+                ON CONFLICT (thread_id, user_id) DO UPDATE SET encrypted_thread_key = EXCLUDED.encrypted_thread_key
+            """), {"tid": tid, "uid": me_id, "k": payload.encrypted_thread_key})
+            await session.execute(text("""
+                INSERT INTO chat_dm_key_archive(thread_id, user_id, key_id, encrypted_thread_key)
+                VALUES (:tid, :uid, :kidk, :k)
+                ON CONFLICT (thread_id, user_id, key_id) DO NOTHING
+            """), {"tid": tid, "uid": me_id, "kidk": payload.key_id, "k": payload.encrypted_thread_key})
+
+        await session.commit()
+
+    return {"thread_id": int(tid), "island_id": _island_id(), "peer_kid": kid}
+
+
+@app.post("/foreign/box/{thread_id}/peer-key", status_code=201)
+async def foreign_box_peer_key(
+    thread_id: int,
+    payload: ForeignBoxIn,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Store the thread key wrapped FOR THE PEER. Kept apart from box creation so
+    the owner can rotate it later without touching the mailbox, and so the
+    wrapping happens after the peer's key has been pinned rather than during
+    the same call that first learns it.
+    """
+    me = require_user_from_bearer(authorization)
+    if not payload.encrypted_thread_key or not payload.key_id:
+        raise HTTPException(status_code=400, detail="key required")
+
+    async with SessionLocal() as session:
+        await _ensure_foreign_box_tables(session)
+        res = await session.execute(text("""
+            SELECT 1 FROM chat_dm_foreign_boxes
+            WHERE thread_id = :tid AND owner_user_id = :uid
+        """), {"tid": int(thread_id), "uid": int(me["user_id"])})
+        if not res.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="forbidden")
+
+        await session.execute(text("""
+            UPDATE chat_dm_foreign_boxes
+            SET peer_wrapped_key = :k, peer_wrapped_kid = :kidk
+            WHERE thread_id = :tid
+        """), {"tid": int(thread_id), "k": payload.encrypted_thread_key, "kidk": payload.key_id})
+        await session.commit()
+
+    return {"ok": True}
+
+
+@app.get("/foreign/boxes")
+async def foreign_boxes_list(authorization: str | None = Header(default=None)):
+    me = require_user_from_bearer(authorization)
+    async with SessionLocal() as session:
+        await _ensure_foreign_box_tables(session)
+        rows = (await session.execute(text("""
+            SELECT b.thread_id, b.peer_kid, b.peer_x25519_pub, b.peer_ed25519_pub,
+                   b.label, b.created_at, t.last_message_at
+            FROM chat_dm_foreign_boxes b
+            JOIN chat_dm_threads t ON t.id = b.thread_id
+            WHERE b.owner_user_id = :uid
+            ORDER BY COALESCE(t.last_message_at, b.created_at) DESC
+        """), {"uid": int(me["user_id"])})).mappings().all()
+    return [
+        {
+            "thread_id": int(r["thread_id"]),
+            "peer_kid": r["peer_kid"],
+            "peer_x25519_pub": r["peer_x25519_pub"],
+            "peer_ed25519_pub": r["peer_ed25519_pub"],
+            "label": r["label"] or "",
+            "last_message_at": r["last_message_at"].isoformat() if r["last_message_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@app.delete("/foreign/box/{thread_id}")
+async def foreign_box_delete(thread_id: int, authorization: str | None = Header(default=None)):
+    """
+    Close a mailbox. This is the whole moderation story for cross-island
+    traffic: whoever you let in, you can shut out, and the delivery secret they
+    hold stops opening anything.
+    """
+    me = require_user_from_bearer(authorization)
+    async with SessionLocal() as session:
+        await _ensure_foreign_box_tables(session)
+        res = await session.execute(text("""
+            DELETE FROM chat_dm_foreign_boxes
+            WHERE thread_id = :tid AND owner_user_id = :uid
+            RETURNING thread_id
+        """), {"tid": int(thread_id), "uid": int(me["user_id"])})
+        if not res.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Not found")
+        for stmt in (
+            "DELETE FROM chat_dm_delivery WHERE thread_id = :tid",
+            "DELETE FROM chat_dm_messages WHERE thread_id = :tid",
+            "DELETE FROM chat_dm_members WHERE thread_id = :tid",
+            "DELETE FROM chat_dm_thread_keys WHERE thread_id = :tid",
+            "DELETE FROM chat_dm_ud_nonces WHERE thread_id = :tid",
+            "DELETE FROM chat_dm_threads WHERE id = :tid",
+        ):
+            await session.execute(text(stmt), {"tid": int(thread_id)})
+        await session.commit()
+    return {"ok": True}
+
+
+@app.get("/foreign/challenge")
+async def foreign_challenge(request: Request):
+    """
+    Hand out a one-time nonce. Unauthenticated by necessity - the caller has no
+    account here - and deliberately incurious: it takes no kid and answers the
+    same way to everyone.
+
+    Answering 404 for a kid with no mailbox would turn this into an oracle that
+    maps public keys to islands by brute force (§5.1). There is nothing here to
+    ask about, so there is nothing to learn.
+    """
+    ip = get_client_ip_request(request)
+    await enforce_http_rate_limit(f"foreign:challenge:ip:{ip}", RL_DM_DELIVERY_SECRET_IP_PER_MIN, 60)
+    if not _island_id():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    nonce = secrets.token_bytes(32)
+    async with SessionLocal() as session:
+        await _ensure_foreign_box_tables(session)
+        await session.execute(text("""
+            DELETE FROM chat_foreign_challenges
+            WHERE created_at < NOW() - (:ttl * INTERVAL '1 second')
+        """), {"ttl": FOREIGN_CHALLENGE_TTL_S})
+        await session.execute(text("""
+            INSERT INTO chat_foreign_challenges(nonce) VALUES (:n)
+        """), {"n": nonce})
+        await session.commit()
+
+    return {
+        "island_id": _island_id(),
+        "nonce_b64": base64.b64encode(nonce).decode(),
+        "ttl_s": FOREIGN_CHALLENGE_TTL_S,
+    }
+
+
+@app.post("/foreign/claim")
+async def foreign_claim(payload: ForeignClaimIn, request: Request):
+    """
+    Prove possession of the key a mailbox was opened for, and receive its
+    address, its delivery secret and the thread key wrapped for that key.
+
+    Everything that can fail answers 403 with the same body: no mailbox, wrong
+    signature, spent nonce, expired nonce. The caller who holds the key learns
+    what they need; nobody else learns whether the question was even
+    meaningful.
+    """
+    ip = get_client_ip_request(request)
+    await enforce_http_rate_limit(f"foreign:claim:ip:{ip}", RL_DM_DELIVERY_SECRET_IP_PER_MIN, 60)
+
+    island = _island_id()
+    if not island:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except Exception:
+        raise HTTPException(status_code=503, detail="unavailable")
+
+    kid = _norm_kid(payload.kid)
+    try:
+        nonce = base64.b64decode((payload.nonce_b64 or "").strip(), validate=False)
+        sig = base64.b64decode((payload.sig_b64 or "").strip().replace("-", "+").replace("_", "/")
+                               + "=" * (-len((payload.sig_b64 or "").strip()) % 4))
+    except Exception:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if len(nonce) != 32 or len(sig) != 64:
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    async with SessionLocal() as session:
+        async with session.begin():
+            await _ensure_foreign_box_tables(session)
+
+            # The nonce is spent on sight, whatever the outcome. A nonce that
+            # survived a failed attempt would let an attacker grind signatures
+            # against one challenge.
+            res = await session.execute(text("""
+                DELETE FROM chat_foreign_challenges
+                WHERE nonce = :n
+                  AND created_at >= NOW() - (:ttl * INTERVAL '1 second')
+                RETURNING nonce
+            """), {"n": nonce, "ttl": FOREIGN_CHALLENGE_TTL_S})
+            if not res.scalar_one_or_none():
+                raise HTTPException(status_code=403, detail="forbidden")
+
+            res = await session.execute(text("""
+                SELECT b.thread_id, b.peer_ed25519_pub, b.peer_wrapped_key, b.peer_wrapped_kid
+                FROM chat_dm_foreign_boxes b
+                WHERE b.peer_kid = :kid
+                LIMIT 1
+            """), {"kid": kid})
+            box = res.mappings().first()
+            if not box:
+                raise HTTPException(status_code=403, detail="forbidden")
+
+            # Domain-separated and bound to this island and this kid, so a
+            # signature made for one island cannot be replayed at another
+            # (§5.2).
+            message = FOREIGN_CLAIM_DOMAIN + island.encode("utf-8") + kid.encode("ascii") + nonce
+            try:
+                ed_raw = base64.b64decode(box["peer_ed25519_pub"] + "=" * (-len(box["peer_ed25519_pub"]) % 4))
+                Ed25519PublicKey.from_public_bytes(ed_raw).verify(sig, message)
+            except Exception:
+                raise HTTPException(status_code=403, detail="forbidden")
+
+            tid = int(box["thread_id"])
+
+            res = await session.execute(text("""
+                SELECT delivery_secret, expires_at
+                FROM chat_dm_delivery WHERE thread_id = :tid
+            """), {"tid": tid})
+            row = res.mappings().first()
+            if not row or (row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc)):
+                await _rotate_dm_delivery_secret(session, tid)
+                res = await session.execute(text("""
+                    SELECT delivery_secret, expires_at
+                    FROM chat_dm_delivery WHERE thread_id = :tid
+                """), {"tid": tid})
+                row = res.mappings().first()
+            if not row:
+                raise HTTPException(status_code=403, detail="forbidden")
+
+            secret_b64 = base64.urlsafe_b64encode(bytes(row["delivery_secret"])).decode().rstrip("=")
+            expires_at = row["expires_at"]
+
+    return {
+        "thread_id": tid,
+        "island_id": island,
+        "delivery_secret_b64": secret_b64,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "encrypted_thread_key": box["peer_wrapped_key"],
+        "key_id": box["peer_wrapped_kid"],
+    }
+
+
 # --- Config via env ---
 # FEEDBACK_TO="support@yourdomain.com"
 # SMTP_HOST="smtp.yourmail.com"

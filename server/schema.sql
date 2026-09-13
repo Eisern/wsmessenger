@@ -8,7 +8,8 @@
 -- The server itself does NOT auto-create base tables on startup; only a few
 -- archive/migration tables are lazily ensured at runtime (see
 -- server/main.py: chat_room_key_archive, chat_dm_key_archive,
--- chat_dm_delete_requests). Everything else must exist before first request.
+-- chat_dm_delete_requests, chat_dm_foreign_boxes, chat_foreign_challenges).
+-- Everything else must exist before first request.
 --
 
 SET statement_timeout = 0;
