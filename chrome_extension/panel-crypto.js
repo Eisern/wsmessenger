@@ -1192,10 +1192,23 @@ async function rotateRoomKey(roomId, { kickedUsername = "" } = {}) {
 // with previous key versions can still be decrypted.
 //
 // Storage format:
-//   key:   "__rka:{roomId}"
+//   key:   "__rka:{roomId}" for a room, "__rka:dm:{island}:{threadId}" for a DM
 //   value: [ { kid: "hex16", b64: "base64..." }, ... ]
 
 const _ARCHIVE_PREFIX = "__rka:";
+
+/**
+ * Normalize a key slot for use as an archive storage key.
+ *
+ * Room slots are numbers; DM slots are island-qualified strings
+ * ("dm:<island>:<tid>", see `dmRid`). The blanket `Number(roomId)` these
+ * functions used turns every DM slot into NaN — which is one shared slot for
+ * every thread of every island, a worse version of the collision that made DM
+ * slots island-scoped in the first place.
+ */
+function _archiveRid(roomId) {
+  return typeof roomId === "string" && roomId.startsWith("dm:") ? roomId : Number(roomId);
+}
 
 /**
  * Read stored archive blob and return parsed entries.
@@ -1252,7 +1265,7 @@ async function _readStoredArchive(storageKey) {
  * the next save.
  */
 async function saveRoomKeyArchive(roomId) {
-  const rid = Number(roomId);
+  const rid = _archiveRid(roomId);
   const archiveB64 = CM()?.roomKeyArchiveB64?.get(rid);
   if (!archiveB64 || archiveB64.size === 0) return;
 
@@ -1306,7 +1319,7 @@ async function saveRoomKeyArchive(roomId) {
  * Called after loadRoomKey so old messages can still be decrypted.
  */
 async function loadRoomKeyArchive(roomId) {
-  const rid = Number(roomId);
+  const rid = _archiveRid(roomId);
   const storageKey = _ARCHIVE_PREFIX + rid;
 
   try {
@@ -1481,13 +1494,19 @@ async function loadRoomKey(roomId) {
 // =======================
 // DM E2EE helpers (thread key like room key)
 // =======================
-const DM_ID_OFFSET = 1000000000;
+// Key slot for a DM thread, scoped by island — endpoints.js `threadRid` carries
+// the reasoning. ISLAND_ID lives in panel.js and follows `server_config`, so a
+// slot always names the server the thread was actually read from.
 function dmRid(threadId) {
-  const tid = Number(threadId);
-  if (!Number.isInteger(tid) || tid <= 0) throw new Error("Bad threadId");
-  const rid = DM_ID_OFFSET + tid;
-  if (!Number.isSafeInteger(rid)) throw new Error("dmRid overflow");
+  const rid = globalThis.WSEndpoints?.threadRid?.(ISLAND_ID, threadId) || "";
+  if (!rid) throw new Error(`Bad threadId ${threadId} or unknown island`);
   return rid;
+}
+
+// The slot this thread occupied before slots carried an island. Nothing writes
+// here any more; only the one-time archive migration below reads it.
+function legacyDmRid(threadId) {
+  return globalThis.WSEndpoints?.legacyThreadRid?.(threadId) || 0;
 }
 
 async function fetchPeerPublicKey(peerUsername) {
@@ -1606,13 +1625,50 @@ async function loadDmKeyArchiveFromServer(threadId) {
   }
 }
 
+/**
+ * Move a thread's stored key archive from the pre-island slot to this island's.
+ *
+ * The stored blob is already encrypted with the master key and its format did
+ * not change, so this is a rename — no unlock needed, and a locked panel
+ * migrates just as well as an unlocked one.
+ *
+ * If this island already has an archive for the thread, the old blob is left
+ * where it is instead of being merged or deleted: it cannot be attributed to
+ * any island, and adopting it everywhere would hand one island's old keys to
+ * another. Left alone it is inert — nothing writes to the legacy slot again.
+ */
+async function migrateLegacyDmArchive(threadId) {
+  const legacy = legacyDmRid(threadId);
+  if (!legacy) return;
+  const legacyKey = _ARCHIVE_PREFIX + legacy;
+  let currentKey;
+  try {
+    currentKey = _ARCHIVE_PREFIX + dmRid(threadId);
+  } catch {
+    return;
+  }
+
+  try {
+    const stored = await chrome.storage.local.get([legacyKey, currentKey]);
+    if (stored[legacyKey] === undefined) return;
+    if (stored[currentKey] !== undefined) return;
+
+    await chrome.storage.local.set({ [currentKey]: stored[legacyKey] });
+    await chrome.storage.local.remove(legacyKey);
+    console.log(`[KeyArchive] Moved DM ${threadId} archive to island-scoped slot`);
+  } catch (e) {
+    console.warn("[KeyArchive] DM archive migration failed:", e?.message || e);
+  }
+}
+
 async function loadDmKey(threadId, { interactive = false } = {}) {
   const okCrypto = await ensureCryptoReady({ interactive, reason: "DM key" });
   if (!okCrypto) return { ok: false, locked: true };
 
   // DM archives use the same local persistence format as room archives
-  // (with an offset rid), so restore older generations before loading
+  // (under an island-scoped slot), so restore older generations before loading
   // the current key from the server.
+  await migrateLegacyDmArchive(threadId);
   await loadRoomKeyArchive(dmRid(threadId));
 
   const token = await requestToken();

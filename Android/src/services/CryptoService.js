@@ -17,6 +17,7 @@
 import { Alert } from 'react-native';
 import Clipboard from '@react-native-clipboard/clipboard';
 import NetworkService from './NetworkService';
+import EP from './endpoints';
 import StorageService from './StorageService';
 import { CryptoUtils, cryptoManager } from '../crypto';
 import TC from './thread-chain';
@@ -54,9 +55,6 @@ const CRYPTO_IDLE_LOCK_OPTIONS = [
   { label: '30 minutes', value: 30 * 60 * 1000 },
   { label: '1 hour', value: 60 * 60 * 1000 },
 ];
-
-// DM thread ID offset (must match Chrome Extension panel-crypto.js DM_ID_OFFSET)
-const DM_ID_OFFSET = 1_000_000_000;
 
 // TOFU cooldown: avoid hammering the server for peer key checks
 const _KC_CHECK_TTL_MS = 60_000; // 1 minute
@@ -602,13 +600,28 @@ const CryptoService = {
 
   // ---- DM key management ----
 
+  /**
+   * Key slot for a DM thread, scoped by island — `threadRid` in endpoints.js
+   * carries the reasoning, and the extension derives the same slot the same
+   * way. Rooms keep their bare numeric id.
+   * @param {number|string} threadId
+   * @returns {string}
+   */
   _dmRid(threadId) {
-    return DM_ID_OFFSET + Number(threadId);
+    const rid = EP.threadRid(EP.islandIdOf(NetworkService.getServerConfig()), threadId);
+    if (!rid) throw new Error(`Bad threadId ${threadId} or unknown island`);
+    return rid;
   },
 
   /** Check whether the DM thread key is loaded in memory (no I/O). */
   isDmKeyLoaded(threadId) {
-    return cryptoManager.roomKeys.has(CryptoService._dmRid(threadId));
+    // A slot that cannot be derived is a slot that cannot hold a key. Callers
+    // use this to decide what to render, so it answers instead of throwing.
+    try {
+      return cryptoManager.roomKeys.has(CryptoService._dmRid(threadId));
+    } catch (_e) {
+      return false;
+    }
   },
 
   /** Check whether a room key is loaded in memory (no I/O). */

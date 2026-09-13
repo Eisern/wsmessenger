@@ -366,3 +366,51 @@ describe('createSelector', () => {
     expect(sel.isUnusable('https://b.example')).toBe(null);
   });
 });
+
+describe('per-thread key slots', () => {
+  it('gives two islands different slots for the same thread id', () => {
+    const a = EP.threadRid(EP.islandIdOf(cfgOf(['alpha.example'])), 42);
+    const b = EP.threadRid(EP.islandIdOf(cfgOf(['beta.example'])), 42);
+    expect(a).toBe('dm:alpha.example:42');
+    expect(b).toBe('dm:beta.example:42');
+    expect(a).not.toBe(b);
+  });
+
+  // The slot is a key slot: a room id must never be able to reach a DM slot,
+  // and vice versa, whatever the numbers happen to be.
+  it('cannot collide with a room slot', () => {
+    expect(EP.threadRid('alpha.example', 7)).not.toBe(7);
+    expect(typeof EP.threadRid('alpha.example', 7)).toBe('string');
+  });
+
+  it('rotating to another entry point of the same island keeps the slot', () => {
+    const cfg = cfgOf(['alpha.example', 'bridge.example']);
+    const rotated = { ...cfg, activeIdx: 1, apiBase: 'https://bridge.example' };
+    expect(EP.threadRid(EP.islandIdOf(rotated), 42)).toBe(
+      EP.threadRid(EP.islandIdOf(cfg), 42),
+    );
+  });
+
+  it('refuses a slot it cannot qualify rather than inventing a shared one', () => {
+    expect(EP.threadRid('', 42)).toBe('');
+    expect(EP.threadRid('alpha.example', 0)).toBe('');
+    expect(EP.threadRid('alpha.example', -1)).toBe('');
+    expect(EP.threadRid('alpha.example', 1.5)).toBe('');
+    expect(EP.threadRid('alpha.example', 'nope')).toBe('');
+  });
+
+  it('is case- and whitespace-insensitive, so one island is one slot', () => {
+    expect(EP.threadRid('  Alpha.Example  ', '42')).toBe('dm:alpha.example:42');
+  });
+
+  it('falls back to the active host for a config written before islandId', () => {
+    expect(EP.islandIdOf({ apiBase: 'https://Legacy.Example/api' })).toBe('legacy.example');
+    expect(EP.islandIdOf(null)).toBe('');
+  });
+
+  it('still names the slot that stored archives were written under', () => {
+    expect(EP.legacyThreadRid(42)).toBe(1000000042);
+    expect(EP.legacyThreadRid(0)).toBe(0);
+    expect(EP.legacyThreadRid('x')).toBe(0);
+  });
+});

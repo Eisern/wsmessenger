@@ -8,6 +8,14 @@
 // so every key and file request kept addressing the default host.
 let API_BASE = "https://imagine-1-ws.xyz";
 
+// Which island the active backend belongs to. Per-thread key slots are scoped
+// by it (see `threadRid` in endpoints.js), so it has to be resolved on the same
+// path as API_BASE and never lag behind it — a slot addressed with a stale
+// island is a slot belonging to another server's conversation. Seeded with the
+// default backend's host so a DM opened before the bootstrap below completes
+// still addresses the island it is actually talking to.
+let ISLAND_ID = "imagine-1-ws.xyz";
+
 // --- Runtime backend resolution -------------------------------------------
 // Must run before anything issues a request. background.js resolves the same
 // `server_config` key for its own calls; the panel needs it too, otherwise the
@@ -25,6 +33,8 @@ function __applyServerConfig(raw) {
   const cfg = __EP ? __EP.normalizeServerConfig(raw, __EP_DEFAULTS) : raw;
   const api = String(cfg?.apiBase || "").trim().replace(/\/$/, "");
   if (api) API_BASE = api;
+  const island = __EP ? __EP.islandIdOf(cfg) : "";
+  if (island) ISLAND_ID = island;
   return API_BASE;
 }
 try {

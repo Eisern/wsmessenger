@@ -150,6 +150,46 @@
     };
   }
 
+  // A thread id is only unique inside one island. Thread 42 on island A and
+  // thread 42 on island B are different conversations between different people,
+  // and each has its own AES key — but both used to land in the same key slot
+  // (`1e9 + threadId`), so whichever key was loaded last decrypted, or failed to
+  // decrypt, the other conversation. Silently: a wrong key is indistinguishable
+  // from a corrupt message at the point where it is used.
+  //
+  // Room ids stay bare numbers. A room only exists on the island hosting it and
+  // its id reaches the client from that island's own database, so a room slot
+  // can never be reached with an id minted elsewhere.
+  function islandIdOf(cfg) {
+    if (!cfg) return "";
+    let id = String(cfg.islandId == null ? "" : cfg.islandId).trim().toLowerCase();
+    if (id) return id;
+    // A config written before schema 2 has no islandId; the active entry point
+    // is the same host normalizeServerConfig would have derived it from.
+    return hostOf(cfg.apiBase).toLowerCase();
+  }
+
+  // Returns "" rather than throwing: callers know whether a missing island is
+  // an error (about to use a key) or simply nothing to do (a migration sweep).
+  function threadRid(islandId, threadId) {
+    let island = String(islandId == null ? "" : islandId).trim().toLowerCase();
+    if (!island) return "";
+    let tid = Number(threadId);
+    if (!isFinite(tid) || Math.floor(tid) !== tid || tid <= 0) return "";
+    return "dm:" + island + ":" + tid;
+  }
+
+  // The slot every client wrote before threadRid existed. Kept so the stored
+  // archives can be found and moved once; nothing new is ever written here.
+  let LEGACY_DM_ID_OFFSET = 1000000000;
+
+  function legacyThreadRid(threadId) {
+    let tid = Number(threadId);
+    if (!isFinite(tid) || Math.floor(tid) !== tid || tid <= 0) return 0;
+    let rid = LEGACY_DM_ID_OFFSET + tid;
+    return rid <= Number.MAX_SAFE_INTEGER ? rid : 0;
+  }
+
   function endpointKeys(cfg) {
     let out = [];
     let list = (cfg && cfg.endpoints) || [];
@@ -452,6 +492,9 @@
     deriveWsBase: deriveWsBase,
     normalizeApiBase: normalizeApiBase,
     normalizeServerConfig: normalizeServerConfig,
+    islandIdOf: islandIdOf,
+    threadRid: threadRid,
+    legacyThreadRid: legacyThreadRid,
     classifyConfigChange: classifyConfigChange,
     classifyHttpFailure: classifyHttpFailure,
     classifyWsClose: classifyWsClose,
