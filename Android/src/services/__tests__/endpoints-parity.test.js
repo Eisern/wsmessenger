@@ -124,6 +124,53 @@ describe('outbox.js parity between the two clients', () => {
   });
 });
 
+const FD_ANDROID = path.join(__dirname, '..', 'foreign-dm.js');
+const FD_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'foreign-dm.js');
+
+describe('foreign-dm.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(FD_ANDROID)).toBe(true);
+    expect(fs.existsSync(FD_EXTENSION)).toBe(true);
+    expect(normalized(FD_ANDROID)).toBe(normalized(FD_EXTENSION));
+  });
+
+  it('both copies sign the same bytes for a claim', () => {
+    const a = require('../foreign-dm');
+    const vm = require('vm');
+    const sandbox = { console, JSON, Date, TextEncoder, TextDecoder, atob, btoa };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(FD_EXTENSION, 'utf8'), sandbox, { filename: 'foreign-dm.js' });
+    const b = sandbox.WSForeignDm;
+    expect(b).toBeTruthy();
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+
+    // A claim is a signature over these bytes, checked by the island that
+    // issued the nonce. One byte of disagreement here and a client can never
+    // collect the mailbox waiting for it on the other side.
+    const nonce = new Uint8Array(32).map((_, i) => i);
+    const hex = (u8) => Buffer.from(Array.from(u8, Number)).toString('hex');
+    for (const [island, kid] of [
+      ['island-b', 'ca2a4fe727faaecf16ecd130a86e0885'],
+      ['остров-б', '00112233445566778899aabbccddeeff'],
+    ]) {
+      expect(hex(a.claimSigBytes(island, kid, nonce)))
+        .toBe(hex(b.claimSigBytes(island, kid, nonce)));
+    }
+
+    // And the same canonical form for a contact card, which is signed once and
+    // verified on a device that may be the other client entirely.
+    const payload = { v: 1, kid: 'aa', display_name: 'Алиса', entry_points: [{ apiBase: 'https://x' }] };
+    expect(a.stableJson(payload)).toBe(b.stableJson(payload));
+    expect(hex(a.contactSigBytes(payload))).toBe(hex(b.contactSigBytes(payload)));
+
+    // Key slots are island-scoped in both, or one client would file a
+    // conversation where the other cannot find it.
+    expect(a.contactKey('Island.A', 'Me', 'KID')).toBe(b.contactKey('Island.A', 'Me', 'KID'));
+    expect(a.contactKey('island.a', 'me', 'kid')).toBe('__foreign:island.a:me:kid');
+  });
+});
+
 describe('endpoints.js parity between the two clients', () => {
   it('both copies exist', () => {
     expect(fs.existsSync(ANDROID_PATH)).toBe(true);
