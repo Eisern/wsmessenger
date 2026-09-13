@@ -307,3 +307,35 @@ docker exec wsapp-island-b bash -lc 'su postgres -c "psql -d wsapp -c \"
   GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO wsapp;
   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO wsapp;\""'
 ```
+
+---
+
+# The panel, headless
+
+`helpers/panelHarness.js` loads `chrome_extension/panel-crypto.js` into a vm
+sandbox and supplies only what a browser would: storage, permissions, a DOM
+that answers nothing, and the handful of globals `panel.js` defines. The server
+is a real island, because the point is to run the real request paths.
+
+It unlocks the **real** `CryptoManager`. The shipped unlock derives its key with
+Argon2id behind a WASM self-test that fails closed, so the harness builds the
+same v3 identity container with PBKDF2 and hands it to the same entry point.
+That detail is not cosmetic: the first version of this harness had a stand-in
+manager with the same method names, and its `createRoomKey` did not archive the
+key it replaced - so "old messages still decrypt after a rotation" failed
+against the stub while the shipped code was right. A stand-in proves nothing
+about the thing it stands in for.
+
+`panelLocal.test.js` uses it for the paths with no other coverage: a local DM
+between two accounts, the sealed envelope and its signature, a room key created
+before the room exists, a rotation that must leave yesterday readable, and a
+fresh client recovering both keys from the island.
+
+## If the signing key will not publish
+
+`setUp` fails loudly when `/crypto/ed25519-key` is refused, because the
+alternative is a suite that passes while every signature verifies as "unknown".
+A 429 there means the per-IP limit: raise `RL_ED25519_KEY_IP_PER_10MIN` and
+`RL_ED25519_KEY_USER_PER_10MIN` in the island's `.env`. Every client
+republishes that key on each unlock, so one address running a test suite - or
+an office behind one NAT - reaches the default quickly.

@@ -26,176 +26,12 @@
  * Requires both islands; see integration/README.md.
  */
 
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
+const {
+  makePanel, setUp, http, udDecode, lastMessage, unb64,
+} = require('./helpers/panelHarness');
 
 const ISLAND_A = process.env.TWO_ISLANDS_A || 'http://127.0.0.1:8000';
 const ISLAND_B = process.env.TWO_ISLANDS_B || 'http://127.0.0.1:8001';
-const PASS = 'Testpass!12345';
-
-const EXT_DIR = path.join(__dirname, '..', '..', '..', '..', '..', 'chrome_extension');
-
-const unb64 = (s) =>
-  Uint8Array.from(Buffer.from(String(s).replace(/-/g, '+').replace(/_/g, '/'), 'base64'));
-
-function makeStore() {
-  const mem = new Map();
-  return {
-    async get(keys) {
-      if (keys == null) return Object.fromEntries(mem);
-      const list = Array.isArray(keys) ? keys : [keys];
-      const out = {};
-      for (const k of list) if (mem.has(k)) out[k] = mem.get(k);
-      return out;
-    },
-    async set(obj) { for (const [k, v] of Object.entries(obj)) mem.set(k, v); },
-    async remove(keys) { for (const k of (Array.isArray(keys) ? keys : [keys])) mem.delete(k); },
-  };
-}
-
-function makeManager(CU) {
-  const m = {
-    userPrivateKey: null,
-    userPublicKeyB64: null,
-    ed25519Seed: null,
-    roomKeys: new Map(),
-    roomKeysExportable: new Map(),
-    roomKeyIds: new Map(),
-    roomKeyArchive: new Map(),
-    roomKeyArchiveB64: new Map(),
-    async loadRoomKey(rid, b64) {
-      m.roomKeys.set(rid, await CU.importRoomKey(b64));
-      m.roomKeyIds.set(rid, await CU.fingerprintRoomKeyBase64(b64));
-      return true;
-    },
-    async loadArchivedKey(rid, kid, b64) {
-      if (!m.roomKeyArchive.has(rid)) m.roomKeyArchive.set(rid, new Map());
-      if (!m.roomKeyArchiveB64.has(rid)) m.roomKeyArchiveB64.set(rid, new Map());
-      m.roomKeyArchive.get(rid).set(kid, await CU.importRoomKey(b64));
-      m.roomKeyArchiveB64.get(rid).set(kid, b64);
-      return true;
-    },
-    // Byte-identical to CryptoManager.encryptMessage, deliberately.
-    async encryptMessage(rid, text) {
-      const kid = m.roomKeyIds.get(rid) || undefined;
-      const aad = kid ? new TextEncoder().encode(String(kid)) : undefined;
-      const enc = await CU.encryptMessage(m.roomKeys.get(rid), text, aad);
-      const out = { encrypted: true, iv: enc.iv, data: enc.data, kid };
-      if (aad) out.aad_v1 = true;
-      return JSON.stringify(out);
-    },
-    async decryptMessage(rid, parsed) {
-      const kid = parsed.kid;
-      const key = (kid && m.roomKeyArchive.get(rid)?.get(kid)) || m.roomKeys.get(rid);
-      const aad = kid ? new TextEncoder().encode(String(kid)) : undefined;
-      try {
-        return await CU.decryptMessage(key, parsed, aad);
-      } catch {
-        return await CU.decryptMessage(key, parsed);
-      }
-    },
-    isReady() { return !!m.userPrivateKey; },
-    get userPublicKeyPem() { return m.userPublicKeyB64; },
-  };
-  return m;
-}
-
-function makePanel({ apiBase, islandId, username, token }) {
-  const posted = [];
-  const sandbox = {
-    crypto: globalThis.crypto, TextEncoder, TextDecoder, atob, btoa, console, URL, fetch,
-    setTimeout, clearTimeout, setInterval, clearInterval, Event, CustomEvent,
-  };
-  sandbox.globalThis = sandbox;
-  sandbox.self = sandbox;
-  sandbox.window = { addEventListener() {}, removeEventListener() {}, dispatchEvent() { return true; } };
-  sandbox.document = {
-    getElementById: () => null, querySelector: () => null, querySelectorAll: () => [],
-    createElement: () => ({ style: {}, classList: { add() {}, remove() {} }, appendChild() {} }),
-    addEventListener() {},
-  };
-  sandbox.chrome = {
-    storage: { local: makeStore(), session: makeStore(), onChanged: { addListener() {} } },
-    permissions: { async contains() { return true; }, async request() { return true; } },
-    runtime: { getManifest: () => ({ version: '0.0.0' }) },
-  };
-  vm.createContext(sandbox);
-
-  for (const f of ['crypto-utils.js', 'endpoints.js', 'thread-chain.js', 'island-list.js', 'outbox.js', 'foreign-dm.js']) {
-    vm.runInContext(fs.readFileSync(path.join(EXT_DIR, f), 'utf8'), sandbox, { filename: f });
-  }
-  const CU = sandbox.__wsCrypto.utils;
-  const manager = makeManager(CU);
-  Object.defineProperty(sandbox.__wsCrypto, 'manager', { value: manager });
-
-  // Before the load: panel-crypto runs a few statements at top level, and one
-  // of them posts to the worker.
-  sandbox.API_BASE = apiBase;
-  sandbox.ISLAND_ID = islandId;
-  sandbox.__apiBaseReady = Promise.resolve(apiBase);
-  sandbox.__activeForeignKid = null;
-  sandbox.getMeUsername = () => username;
-  sandbox.requestToken = async () => token;
-  sandbox.safePost = (msg) => { posted.push(msg); };
-  sandbox.encryptForStorage = async () => null;
-  sandbox.decryptFromStorage = async () => null;
-  sandbox.__ui = { alert: async () => {}, confirm: async () => true, prompt: async () => '' };
-
-  vm.runInContext(fs.readFileSync(path.join(EXT_DIR, 'panel-crypto.js'), 'utf8'), sandbox,
-    { filename: 'panel-crypto.js' });
-
-  // After the load: panel-crypto declares some of these itself, and a function
-  // declaration wins over anything assigned before the file ran.
-  sandbox.ensureCryptoReady = async () => true;
-  sandbox.isCryptoUsable = () => true;
-
-  return { sandbox, CU, manager, posted };
-}
-
-async function http(base, p, { method = 'GET', body, token } = {}) {
-  const r = await fetch(base + p, {
-    method,
-    headers: {
-      ...(body ? { 'content-type': 'application/json' } : {}),
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  let data = null;
-  try { data = await r.json(); } catch { /* empty body */ }
-  return { ok: r.ok, status: r.status, data };
-}
-
-async function setUp(base, islandId, username) {
-  const boot = makePanel({ apiBase: base, islandId, username, token: '' });
-  const kp = await boot.CU.generateIdentityKeyPair();
-  const pkcs8 = await boot.CU.exportPrivateKey(kp.privateKey);
-  const pubB64 = await boot.CU.exportPublicKey(kp.publicKey);
-
-  await http(base, '/auth/register', { method: 'POST', body: { username, password: PASS, public_key: pubB64 } });
-  const login = await http(base, '/auth/login', { method: 'POST', body: { username, password: PASS } });
-  if (!login.ok) throw new Error(`login ${username} on ${base}: ${login.status}`);
-
-  const panel = makePanel({ apiBase: base, islandId, username, token: login.data.access_token });
-  panel.manager.userPrivateKey = await panel.CU.importPrivateKey(pkcs8);
-  panel.manager.userPublicKeyB64 = pubB64;
-  panel.manager.ed25519Seed = await panel.CU.deriveEd25519Seed(unb64(pkcs8).slice(-32));
-
-  // The panel publishes this on every unlock; a harness that skips it leaves
-  // the island unable to answer questions the real one can.
-  await http(base, '/crypto/ed25519-key', {
-    method: 'POST',
-    token: login.data.access_token,
-    body: {
-      public_key: Buffer.from(await panel.CU.ed25519GetPublicKey(panel.manager.ed25519Seed))
-        .toString('base64'),
-    },
-  });
-  panel.token = login.data.access_token;
-  panel.username = username;
-  return panel;
-}
 
 // What foreign-dm.deliver needs from a platform, for the two places a test has
 // to put a message into a mailbox itself.
@@ -217,19 +53,6 @@ function foreignDeps(panel) {
     randomBytes: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
     now: () => Date.now(),
   };
-}
-
-// The panel decodes the sealed path's base64url before handing it to decryptDm.
-function udDecode(stored) {
-  const t = String(stored || '').trim();
-  if (t.startsWith('{')) return t;
-  return Buffer.from(t.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
-}
-
-async function lastMessage(base, threadId, token) {
-  const hist = await http(base, `/dm/${threadId}/history`, { token });
-  const rows = hist.data.messages || hist.data;
-  return udDecode(rows[rows.length - 1].text);
 }
 
 let alice;

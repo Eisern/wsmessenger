@@ -351,6 +351,11 @@ RL_ROOMS_JOINREQ_USER_PER_10MIN    = _env_int("RL_ROOMS_JOINREQ_USER_PER_10MIN",
 RL_ROOMS_INVITE_USER_PER_10MIN     = _env_int("RL_ROOMS_INVITE_USER_PER_10MIN", 20)
 RL_ROOMS_INVITE_IP_PER_10MIN       = _env_int("RL_ROOMS_INVITE_IP_PER_10MIN", 60)
 RL_KEYS_PUBLISH_IP_PER_10MIN       = _env_int("RL_KEYS_PUBLISH_IP_PER_10MIN", 120)
+# Clients republish their signing key on every unlock, so a shared address -
+# an office, a test run, a NAT - reaches the old hardcoded 10 quickly, and the
+# only symptom is DM signatures quietly failing to verify.
+RL_ED25519_KEY_IP_PER_10MIN        = _env_int("RL_ED25519_KEY_IP_PER_10MIN", 60)
+RL_ED25519_KEY_USER_PER_10MIN      = _env_int("RL_ED25519_KEY_USER_PER_10MIN", 20)
 RL_KEYS_PUBLISH_USER_PER_10MIN     = _env_int("RL_KEYS_PUBLISH_USER_PER_10MIN", 60)
 RL_CRYPTO_KEYWRITE_IP_PER_10MIN    = _env_int("RL_CRYPTO_KEYWRITE_IP_PER_10MIN", 180)
 RL_CRYPTO_KEYWRITE_USER_PER_10MIN  = _env_int("RL_CRYPTO_KEYWRITE_USER_PER_10MIN", 120)
@@ -6458,8 +6463,8 @@ async def register_ed25519_key(
     """
     u = require_user_from_bearer(authorization)
     ip = get_client_ip_request(request)
-    await enforce_http_rate_limit(f"ed25519key:ip:{ip}", 10, 600)
-    await enforce_http_rate_limit(f"ed25519key:user:{int(u['user_id'])}", 5, 600)
+    await enforce_http_rate_limit(f"ed25519key:ip:{ip}", RL_ED25519_KEY_IP_PER_10MIN, 600)
+    await enforce_http_rate_limit(f"ed25519key:user:{int(u['user_id'])}", RL_ED25519_KEY_USER_PER_10MIN, 600)
 
     pub_b64 = (payload.public_key or "").strip()
     if not pub_b64:
