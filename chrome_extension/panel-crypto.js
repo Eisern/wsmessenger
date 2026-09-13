@@ -1968,11 +1968,18 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
             // what stops a dishonest island forging messages from them.
             // Our own copies in that thread are still ours, so they verify
             // against our own key like anywhere else.
-            const __fc = _foreignThreadCache.get(Number(threadId));
+            const __fc = await _foreignForThread(threadId);
             const __mine = fromLower && fromLower === String(getMeUsername() || "").toLowerCase();
+            // Our own signing key needs no lookup: it is derived from the
+            // identity that is already unlocked. Asking the server for it was
+            // a round trip per message that could only ever agree with us or
+            // be wrong - and on a cross-island thread it is a question this
+            // island cannot answer at all.
             const peerPub = (__fc && !__mine && __fc.ed25519PubB64)
               ? new Uint8Array(CU().base64ToArrayBuffer(__fc.ed25519PubB64))
-              : await fetchPeerEd25519PubKey(from);
+              : (__mine && CM()?.ed25519Seed)
+                ? await CU().ed25519GetPublicKey(CM().ed25519Seed)
+                : await fetchPeerEd25519PubKey(from);
             if (peerPub) {
               const cu = CU();
               // v2 when the envelope carries its place in the sender's chain,
@@ -1980,9 +1987,19 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
               // domain prefix differs), so stripping sq/pv to force a v1 check
               // does not downgrade anything - it just fails.
               const chained = Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || "");
+              // A signature covers the thread the message was DELIVERED to.
+              // In a cross-island conversation that is not always the thread it
+              // is being read in: our own copy of what we sent was delivered to
+              // the peer's mailbox on their island, and kept here only so the
+              // history is whole. Verifying it against this thread's number
+              // fails - correctly, on the wrong question - and accuses us of
+              // forging our own messages.
+              const __sigTid = (__fc && __mine && __fc.outbox && __fc.outbox.threadId)
+                ? __fc.outbox.threadId
+                : threadId;
               const sigMsg = chained
-                ? cu._dmSigMessageV2(threadId, inner.sq, inner.pv, from, inner.body)
-                : cu._dmSigMessage(threadId, from, inner.body);
+                ? cu._dmSigMessageV2(__sigTid, inner.sq, inner.pv, from, inner.body)
+                : cu._dmSigMessage(__sigTid, from, inner.body);
               const sigBytes = new Uint8Array(cu.base64ToArrayBuffer(inner.sig));
               sigValid = await cu.ed25519Verify(peerPub, sigBytes, sigMsg);
               if (chained) {
@@ -2814,6 +2831,17 @@ async function checkPeerKeyChanged(peerUsername, { force = false, peerPublicKeyB
   const peer = String(peerUsername || "").trim();
   if (!peer || peer.toLowerCase() === me.toLowerCase()) return null;
 
+  // A cross-island contact is not a user here. Their key came from their
+  // contact card and is pinned against their island, so this island's key
+  // server has nothing to say about them - asking only produces a 404 per
+  // message and a warning about a missing public key.
+  try {
+    const foreign = await listForeignContacts();
+    if (foreign.some((c) => String(c.displayName || "").toLowerCase() === peer.toLowerCase())) {
+      return null;
+    }
+  } catch { /* fall through to the normal check */ }
+
   // Cooldown: avoid hammering unless caller explicitly requests fresh verification.
   const peerLower = peer.toLowerCase();
   const now = Date.now();
@@ -2973,6 +3001,23 @@ const FD = () => globalThis.WSForeignDm || null;
 // thread id -> contact, for the decrypt path: it runs per message and must not
 // read storage to find out whether a thread is a cross-island one.
 const _foreignThreadCache = new Map();
+
+/**
+ * The cross-island contact a thread belongs to, if any.
+ *
+ * Warms from storage on a miss rather than trusting the cache to be populated.
+ * Decryption can run before anything has listed the contacts - history arrives
+ * as soon as the thread opens - and a miss there is not harmless: the verifier
+ * falls back to asking THIS island for the sender's key, gets a 404 because
+ * the sender has no account here, and marks an honest message unverified.
+ */
+async function _foreignForThread(threadId) {
+  const tid = Number(threadId);
+  if (!tid) return null;
+  if (_foreignThreadCache.has(tid)) return _foreignThreadCache.get(tid);
+  try { await listForeignContacts(); } catch { /* stay with what we have */ }
+  return _foreignThreadCache.get(tid) || null;
+}
 
 function _foreignDeps() {
   const cu = CU();
@@ -3250,6 +3295,7 @@ async function claimForeignOutbox(contact) {
       }
       const updated = {
         ...contact,
+        lastClaim: null,
         outbox: {
           apiBase: base,
           threadId: r.threadId,
@@ -3267,7 +3313,23 @@ async function claimForeignOutbox(contact) {
     // mailbox here yet". Trying the next entry point is still worth it: this
     // one may simply be unreachable.
   }
-  throw new Error(`Could not claim their mailbox (${last?.status || "no answer"})`);
+
+  // Remember why, so the contact can say which of the two it was. They need
+  // different things from the user - wait for the other person, or fix the
+  // address - and until now both showed the same "waiting for them" line.
+  const failure = {
+    at: Date.now(),
+    status: last?.status ?? null,
+    kind: (last?.status === 403) ? "not-added-yet"
+      : (last?.status === 0 || last?.status == null) ? "unreachable"
+      : "refused",
+  };
+  try { await saveForeignContact({ ...contact, lastClaim: failure }); } catch { /* best effort */ }
+  throw new Error(
+    failure.kind === "not-added-yet"
+      ? "They have not added your card yet"
+      : `Could not reach their server (${last?.status || "no answer"})`,
+  );
 }
 
 /**

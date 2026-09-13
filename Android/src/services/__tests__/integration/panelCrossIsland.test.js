@@ -181,6 +181,17 @@ async function setUp(base, islandId, username) {
   panel.manager.userPrivateKey = await panel.CU.importPrivateKey(pkcs8);
   panel.manager.userPublicKeyB64 = pubB64;
   panel.manager.ed25519Seed = await panel.CU.deriveEd25519Seed(unb64(pkcs8).slice(-32));
+
+  // The panel publishes this on every unlock; a harness that skips it leaves
+  // the island unable to answer questions the real one can.
+  await http(base, '/crypto/ed25519-key', {
+    method: 'POST',
+    token: login.data.access_token,
+    body: {
+      public_key: Buffer.from(await panel.CU.ed25519GetPublicKey(panel.manager.ed25519Seed))
+        .toString('base64'),
+    },
+  });
   panel.token = login.data.access_token;
   panel.username = username;
   return panel;
@@ -283,6 +294,53 @@ describe('they write to each other', () => {
     // The copy is the same ciphertext that went abroad, so it decrypts under
     // the same key rather than needing one of its own.
     expect(JSON.parse(copies[0].text).kid).toBe(aliceSide.outbox.keyId);
+  });
+
+  it('Alice reads her own copy back without being accused of forging it', async () => {
+    // The copy carries the signature that went abroad, and that signature
+    // covers the thread it was DELIVERED to - Bob's mailbox - not the thread it
+    // is read in. Verifying it against the local thread number fails on the
+    // wrong question and shows the sender a forgery warning about themselves.
+    //
+    // The earlier version of this suite checked the copy by passing the outbox
+    // id by hand, which is precisely what the panel cannot do, so it proved
+    // nothing about the panel.
+    const copy = alice.posted.filter((m) => m.type === 'dm_send').pop();
+    const secret = await http(ISLAND_A, `/dm/${aliceSide.inbox.threadId}/delivery-secret`,
+      { token: alice.token });
+    const delivered = await alice.sandbox.WSForeignDm.deliver(
+      {
+        fetchJson: async (url, opts) => {
+          const r = await fetch(url, opts);
+          let body = null;
+          try { body = await r.json(); } catch { /* empty */ }
+          return { ok: r.ok, status: r.status, body };
+        },
+        sha256: async (b) => new Uint8Array(await alice.CU.sha256Raw(b)),
+        hmacSha256: async (k, m) => {
+          const key = await globalThis.crypto.subtle.importKey(
+            'raw', k, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+          );
+          return new Uint8Array(await globalThis.crypto.subtle.sign('HMAC', key, m));
+        },
+        randomBytes: (n) => globalThis.crypto.getRandomValues(new Uint8Array(n)),
+        now: () => Date.now(),
+      },
+      {
+        apiBase: ISLAND_A,
+        threadId: aliceSide.inbox.threadId,
+        secretB64: secret.data.delivery_secret_b64,
+      },
+      copy.text,
+    );
+    expect(delivered.ok).toBe(true);
+
+    await alice.sandbox.ensureForeignKeysReady(aliceSide);
+    const stored = await lastMessage(ISLAND_A, aliceSide.inbox.threadId, alice.token);
+    const got = await alice.sandbox.decryptDm(aliceSide.inbox.threadId, stored, '', Date.now());
+    expect(got.text).toBe(fromAlice);
+    expect(got.sealedFrom).toBe(alice.username);
+    expect(got.sigValid).toBe(true);
   });
 
   it('Bob reads it with the panel decrypt path, sender and all', async () => {

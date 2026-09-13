@@ -6339,11 +6339,14 @@ async function __renderForeignDmSection() {
     nameEl.textContent = name;
     const metaEl = document.createElement("span");
     metaEl.className = "dm-meta";
-    // Whether we can write yet is the one piece of state worth showing: until
-    // they add our card back, there is no mailbox of theirs to deliver into.
+    // Whether we can write yet is the one piece of state worth showing - and
+    // WHY not, because the two reasons need different things from the user:
+    // wait for the other person, or go and fix the address.
     metaEl.textContent = contact.outbox?.keyB64
       ? (contact.island?.islandId || "another server")
-      : "waiting for them to add you";
+      : contact.lastClaim?.kind === "unreachable"
+        ? "their server did not answer"
+        : "waiting for them to add you";
     main.appendChild(nameEl);
     main.appendChild(metaEl);
     btn.appendChild(main);
