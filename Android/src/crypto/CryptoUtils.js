@@ -1145,6 +1145,44 @@ const CryptoUtils = {
   },
 
   /**
+   * The canonical byte-string signed for a ROOM message.
+   *
+   * Format: [14b domain] [4b roomId big-endian] [2b from_len] [from utf8] [body utf8]
+   *
+   * A room message is encrypted under a key every member holds, so the key
+   * proves membership and nothing else: until now the author was whoever the
+   * server said in the row, and a server could hand one member's words to
+   * another member's name. This is what makes that claim checkable.
+   *
+   * The domain differs from the DM one, so a signature made over a direct
+   * message can never be replayed as a room message, or the other way round.
+   *
+   * @param {number|string} roomId
+   * @param {string} from  - sender username
+   * @param {string} body  - message payload, exactly as encrypted
+   * @returns {Uint8Array}
+   */
+  _roomSigMessage(roomId, from, body) {
+    const enc = new TextEncoder();
+    const domainB = enc.encode('ws-room-sig-v1');   // 14 bytes exactly
+    const fromB   = enc.encode(from || '');
+    const bodyB   = enc.encode(body || '');
+    const rid = (Number(roomId) >>> 0);             // clamp to uint32
+    const buf = new Uint8Array(14 + 4 + 2 + fromB.length + bodyB.length);
+    let off = 0;
+    buf.set(domainB, off); off += 14;
+    buf[off++] = (rid >>> 24) & 0xff;
+    buf[off++] = (rid >>> 16) & 0xff;
+    buf[off++] = (rid >>>  8) & 0xff;
+    buf[off++] =  rid         & 0xff;
+    buf[off++] = (fromB.length >> 8) & 0xff;
+    buf[off++] =  fromB.length       & 0xff;
+    buf.set(fromB, off); off += fromB.length;
+    buf.set(bodyB, off);
+    return buf;
+  },
+
+  /**
    * Sign a DM envelope byte-string with the Ed25519 seed.
    * Returns base64url-encoded 64-byte signature.
    *

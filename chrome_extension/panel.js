@@ -1861,11 +1861,14 @@ if (msg.type === "history_res") {
     const user = m.username || "unknown";
     const text = m.text || "";
     const meName = (nameInput.value || "anon").trim().toLowerCase();
-    // Decrypt message
-    const decryptedText = await decryptMessageFromRoom(rid, text);
+    // Decrypt message. The author the server named is passed in, so a signed
+    // envelope can be checked against it rather than trusted alongside it.
+    const dec = await decryptMessageFromRoom(rid, text, user);
+    const decryptedText = (dec && typeof dec === "object") ? dec.text : dec;
     const msgTs = m.created_at || m.ts || null;
     const { text: _hmText, reply: _hmReply } = parseV2Payload(decryptedText || "");
     addMsg(user, _hmText, user.toLowerCase() === meName, msgTs, _hmReply);
+    __warnAboutRoomSignature(dec, user);
   }
   if (appendOlder) __applyOlderScrollRestore("room", rid);
   __roomOlderLoading = false;
@@ -1961,10 +1964,12 @@ if (msg.type === "message") {
   }
 
   const roomIdForDecrypt = msg.room_id != null ? Number(msg.room_id) : Number(activeRoomId);
-  const decryptedText = await decryptMessageFromRoom(roomIdForDecrypt, msg.text);
+  const dec = await decryptMessageFromRoom(roomIdForDecrypt, msg.text, msg.from);
+  const decryptedText = (dec && typeof dec === "object") ? dec.text : dec;
   const msgTs = msg.ts || Date.now();
   const { text: _rmText, reply: _rmReply } = parseV2Payload(decryptedText || "");
   addMsg(msg.from, _rmText, fromMe, msgTs, _rmReply);
+  __warnAboutRoomSignature(dec, msg.from);
 
   // --- Key change check for message sender (Step 5) ---
   if (!fromMe && msg.from && window.__keyChangeNotifications) {
@@ -3542,6 +3547,26 @@ function __appendTextWithLinks(containerEl, text) {
 
   if (last < s.length) {
     containerEl.appendChild(document.createTextNode(s.slice(last)));
+  }
+}
+
+/**
+ * Say so when a room message does not stand behind its author.
+ *
+ * Unsigned messages say nothing at all: that is the whole history written
+ * before signing existed, and warning about each of them would teach everyone
+ * to ignore the warning that matters.
+ */
+function __warnAboutRoomSignature(dec, claimedAuthor) {
+  if (!dec || typeof dec !== "object") return;
+  try {
+    if (dec.sigValid === false && typeof addSigFailWarning === "function") {
+      addSigFailWarning(dec.from || claimedAuthor);
+    } else if (dec.mismatch && typeof addSigFailWarning === "function") {
+      addSigFailWarning(dec.from || claimedAuthor);
+    }
+  } catch (e) {
+    console.warn("room signature warning failed:", e?.message || e);
   }
 }
 

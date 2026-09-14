@@ -143,6 +143,17 @@ let _ed25519Seed = null;                  // Uint8Array(32) | null — cleared o
 // both clients ship the reader that landed in a3f7d33.
 const CHAIN_WRITE_ENABLED = false;
 
+// Signing ROOM messages is OFF until readers are deployed on both clients, for
+// the same reason: a client that has not learned the envelope would show the
+// JSON of it as the message text. Readers first (this build), then this flag.
+//
+// What it is for: a room message is encrypted under a key every member holds,
+// so the key proves membership and nothing more. The author is whatever the
+// server wrote in the row - which means a dishonest server can move one
+// member's words under another member's name, and nothing in the message can
+// contradict it. The signature is what makes the claim checkable.
+const ROOM_SIG_WRITE_ENABLED = false;
+
 const _threadChain = TC.createThreadChain({
   sha256: async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
 });
@@ -586,7 +597,7 @@ const CryptoService = {
    * @param {string} text
    * @returns {Promise<string|null>} JSON string or null
    */
-  async encryptMessage(roomId, text) {
+  async encryptMessage(roomId, text, senderUsername) {
     if (!CryptoService.isReady()) {
       await CryptoService.ensureReady({ interactive: false });
     }
@@ -597,7 +608,19 @@ const CryptoService = {
       if (!cryptoManager.roomKeys.has(roomId)) {
         await CryptoService.ensureRoomKeyReady(roomId).catch(() => {});
       }
-      return await cryptoManager.encryptMessage(roomId, text);
+
+      let payload = text;
+      if (ROOM_SIG_WRITE_ENABLED) {
+        const me = senderUsername || NetworkService.username || await _resolveUsername();
+        if (!me) throw new Error('Cannot sign a room message without knowing who is sending it');
+        payload = JSON.stringify({
+          rs: 1,
+          from: me,
+          body: text,
+          sig: CryptoService.signEd25519B64(CryptoUtils._roomSigMessage(roomId, me, text)),
+        });
+      }
+      return await cryptoManager.encryptMessage(roomId, payload);
     } catch (_e) {
       console.warn('[CryptoService] encryptMessage error:', _e?.message);
       return null;
@@ -610,7 +633,16 @@ const CryptoService = {
    * @param {string} encryptedJson
    * @returns {Promise<string|null>}
    */
-  async decryptMessage(roomId, encryptedJson) {
+  /**
+   * Decrypt a room message.
+   *
+   * Answers a plain string for a message with no envelope - everything written
+   * before signing existed - and an object when there is one to report on:
+   * `{ text, from, sigValid, mismatch }`. `claimedAuthor` is who the SERVER
+   * says wrote it; a signature that verifies over a different name is the
+   * server moving somebody's words, and is reported rather than accepted.
+   */
+  async decryptMessage(roomId, encryptedJson, claimedAuthor = null) {
     if (!CryptoService.isReady()) {
       // Auto-re-unlock from Keychain (handles idle lock transparently)
       await CryptoService.ensureReady({ interactive: false });
@@ -622,7 +654,8 @@ const CryptoService = {
       if (!cryptoManager.roomKeys.has(roomId)) {
         await CryptoService.ensureRoomKeyReady(roomId).catch(() => {});
       }
-      return await cryptoManager.decryptMessage(roomId, encryptedJson);
+      const plain = await cryptoManager.decryptMessage(roomId, encryptedJson);
+      return await _openRoomEnvelope(roomId, plain, claimedAuthor);
     } catch (_e) {
       console.warn('[decryptMessage] decrypt failed for room', roomId, ':', _e?.message);
       return null;
@@ -1570,6 +1603,51 @@ function _deriveSigningSeed() {
     _ed25519Seed = null;
     console.warn('[CryptoService] signing seed derivation failed:', e?.message);
   }
+}
+
+/**
+ * Unwrap a room message and say what its signature proves.
+ *
+ * Unsigned messages stay exactly what they were - a string - because that is
+ * every message written before this existed, and a reader that turned them into
+ * "unverified" noise would cry wolf over the whole history.
+ */
+async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
+  if (typeof plain !== 'string' || !plain.startsWith('{')) return plain;
+  let inner;
+  try {
+    inner = JSON.parse(plain);
+  } catch (_e) {
+    return plain;
+  }
+  if (!inner || inner.rs !== 1 || inner.body === undefined) return plain;
+
+  const from = String(inner.from || '');
+  const body = String(inner.body);
+  const claimed = String(claimedAuthor || '').trim().toLowerCase();
+  // The server said one name, the signed envelope says another: exactly the
+  // move this signature exists to expose.
+  const mismatch = !!claimed && !!from && claimed !== from.toLowerCase();
+
+  let sigValid = null;
+  if (inner.sig && from) {
+    try {
+      const me = await _resolveUsername();
+      const pub = (me && from.toLowerCase() === me)
+        ? CryptoService.ed25519PublicKey()
+        : await CryptoService._fetchPeerEd25519PubKey(from);
+      if (pub) {
+        sigValid = CryptoUtils.ed25519Verify(
+          pub,
+          new Uint8Array(CryptoUtils.base64ToArrayBuffer(inner.sig)),
+          CryptoUtils._roomSigMessage(roomId, from, body),
+        );
+      }
+    } catch (e) {
+      if (__DEV__) console.warn('[room] signature check failed to run:', e?.message);
+    }
+  }
+  return { text: body, from, sigValid, mismatch };
 }
 
 async function _resolveUsername() {

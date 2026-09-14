@@ -76,6 +76,15 @@ function CU() { return globalThis.__wsCrypto?.utils || null; }
 // both clients ship the reader that landed in a3f7d33.
 const CHAIN_WRITE_ENABLED = false;
 
+// Signing ROOM messages is OFF until readers are deployed on both clients, for
+// the same reason: a client that has not learned the envelope would show its
+// JSON as the message text. Readers first (this build), then this flag.
+//
+// What it buys: a room message is encrypted under a key every member holds, so
+// the key proves membership and nothing more - the author is whatever the
+// server wrote in the row. The signature makes that claim checkable.
+const ROOM_SIG_WRITE_ENABLED = false;
+
 const _threadChain = (globalThis.WSThreadChain || null) && globalThis.WSThreadChain.createThreadChain({
   sha256: async (bytes) => new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
 });
@@ -2127,7 +2136,70 @@ async function encryptMessageForRoom(roomId, plaintext) {
   if (!cm || !cm.roomKeys?.has(rid)) {
     throw new Error("Room key unavailable (crypto was locked during send)");
   }
-  return await cm.encryptMessage(rid, plaintext);
+
+  let payload = plaintext;
+  if (ROOM_SIG_WRITE_ENABLED) {
+    const me = getMeUsername();
+    const seed = cm.ed25519Seed;
+    if (!me || !seed) throw new Error("Cannot sign a room message: locked or nameless");
+    payload = JSON.stringify({
+      rs: 1,
+      from: me,
+      body: plaintext,
+      sig: await CU().ed25519Sign(seed, CU()._roomSigMessage(rid, me, plaintext)),
+    });
+  }
+  return await cm.encryptMessage(rid, payload);
+}
+
+/**
+ * Unwrap a room message and say what its signature proves.
+ *
+ * A message with no envelope stays exactly what it was - a string - because
+ * that is every message written before this existed, and turning those into
+ * "unverified" would cry wolf over the whole history.
+ *
+ * @param {number} rid
+ * @param {string} plain
+ * @param {string|null} claimedAuthor who the SERVER says wrote it
+ * @returns {Promise<string|{text:string, from:string, sigValid:boolean|null, mismatch:boolean}>}
+ */
+async function openRoomEnvelope(rid, plain, claimedAuthor) {
+  if (typeof plain !== "string" || !plain.startsWith("{")) return plain;
+  let inner;
+  try {
+    inner = JSON.parse(plain);
+  } catch {
+    return plain;
+  }
+  if (!inner || inner.rs !== 1 || inner.body === undefined) return plain;
+
+  const from = String(inner.from || "");
+  const body = String(inner.body);
+  const claimed = String(claimedAuthor || "").trim().toLowerCase();
+  // The server said one name and the signed envelope says another: exactly the
+  // move this signature exists to expose.
+  const mismatch = !!claimed && !!from && claimed !== from.toLowerCase();
+
+  let sigValid = null;
+  if (inner.sig && from) {
+    try {
+      const me = String(getMeUsername() || "").trim().toLowerCase();
+      const pub = (me && from.toLowerCase() === me && CM()?.ed25519Seed)
+        ? await CU().ed25519GetPublicKey(CM().ed25519Seed)
+        : await fetchPeerEd25519PubKey(from);
+      if (pub) {
+        sigValid = await CU().ed25519Verify(
+          pub,
+          new Uint8Array(CU().base64ToArrayBuffer(inner.sig)),
+          CU()._roomSigMessage(rid, from, body),
+        );
+      }
+    } catch (e) {
+      console.warn("[room] signature check failed to run:", e?.message || e);
+    }
+  }
+  return { text: body, from, sigValid, mismatch };
 }
 
 // --- transport helpers ---
@@ -2153,7 +2225,7 @@ function isPingPayloadText(text) {
 }
 
 //Decrypt received message
-async function decryptMessageFromRoom(roomId, text) {
+async function decryptMessageFromRoom(roomId, text, claimedAuthor = null) {
   if (isPingPayloadText(text)) return null;
   if (typeof text !== "string") return text;
 
@@ -2191,7 +2263,7 @@ if (!CM()?.roomKeys?.has(rid)) {
 }
   try {
     const decrypted = await CM().decryptMessage(rid, parsed);
-    return decrypted;
+    return await openRoomEnvelope(rid, decrypted, claimedAuthor);
 } catch (error) {
   const name = error?.name || "";
   const msg  = error?.message || String(error);

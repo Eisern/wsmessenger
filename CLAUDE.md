@@ -59,6 +59,8 @@ Argon2id is loaded from `chrome_extension/argon2id/argon2.js` (Emscripten WASM w
 
 ### Message Encryption Format
 
+Room messages are signed as well as encrypted, behind `ROOM_SIG_WRITE_ENABLED` (off until readers ship on both clients): the plaintext becomes `{rs:1, from, body, sig}`, signed over `_roomSigMessage(roomId, from, body)` — domain `"ws-room-sig-v1"`, pinned in the cross-client vectors. A room key only proves membership, so without this the author is whatever the server wrote in the row. Readers accept both shapes and report `sigValid` / `mismatch`; an unsigned message stays a plain string, because that is the whole history written before this existed.
+
 Wrapped room keys use X25519 ECDH + HKDF-SHA256 (info: `"ws-e2ee-wrap-v2"`, salt: ephemeral pubkey) → AES-256-GCM. Binary format (prefix byte `0x02`): `[version(1)] [ephemeral_pubkey(32)] [IV(12)] [ciphertext+tag]`, base64-encoded. Messages use AES-256-GCM with power-of-2 padding buckets (starting at 64 bytes, 5-byte header) and a `kid` field for key versioning/archival.
 
 ### Key Recovery

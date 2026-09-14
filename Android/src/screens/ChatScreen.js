@@ -214,6 +214,16 @@ function MessageBubble({ msg, myUsername, isSearchHit, isSearchActive, onReply }
         {msg._decrypted === undefined && !decryptFailed && msg.encrypted && (
           <Text style={styles.encNote}>encrypted</Text>
         )}
+        {/* What the signature proved. A room key only proves membership, so
+            without these two lines the author is whatever the server said. */}
+        {msg._roomSigFailed && (
+          <Text style={styles.sigWarnText}>⚠ Signature verification failed</Text>
+        )}
+        {!msg._roomSigFailed && msg._roomSigMismatch && (
+          <Text style={styles.sigWarnText}>
+            ⚠ Signed by {msg._signedBy || 'somebody else'}, not by {author}
+          </Text>
+        )}
         {timeStr ? <Text style={styles.timeText}>{timeStr}</Text> : null}
       </View>
     </TouchableOpacity>
@@ -663,20 +673,28 @@ export default function ChatScreen({ navigation, route }) {
     const body = msg.body || msg.text || msg.content || '';
     if (!body || !body.includes('"encrypted"')) return msg;
     try {
-      const text = await CryptoService.decryptMessage(roomId, body);
-      if (text !== null) {
+      const claimedAuthor = msg.author || msg.username || msg.from || null;
+      const result = await CryptoService.decryptMessage(roomId, body, claimedAuthor);
+      if (result !== null) {
+        // A plain string is a message written before room signatures existed;
+        // an object carries what its signature proved, or failed to.
+        const text = typeof result === 'string' ? result : result.text;
+        const verdict = typeof result === 'string' ? {} : {
+          ...(result.sigValid === false ? { _roomSigFailed: true } : {}),
+          ...(result.mismatch ? { _roomSigMismatch: true, _signedBy: result.from } : {}),
+        };
         // Strip stale failure/needs-decrypt flags — render logic hides text if _decryptFailed
         // is set, so a successful re-decryption must clear it.
         const { _decryptFailed: _f, _needsDecrypt: _n, ...rest } = msg;
-        if (text.startsWith('{')) {
+        if (typeof text === 'string' && text.startsWith('{')) {
           try {
             const parsed = JSON.parse(text);
             if (parsed.v === 2 && parsed.t !== undefined) {
-              return { ...rest, _decrypted: parsed.t, ...(parsed.reply ? { _reply: parsed.reply } : {}) };
+              return { ...rest, ...verdict, _decrypted: parsed.t, ...(parsed.reply ? { _reply: parsed.reply } : {}) };
             }
           } catch (_pe) {}
         }
-        return { ...rest, _decrypted: text };
+        return { ...rest, ...verdict, _decrypted: text };
       }
     } catch (_e) {
       console.warn('[ChatScreen] decryptMessage failed:', _e?.message);
@@ -715,7 +733,7 @@ export default function ChatScreen({ navigation, route }) {
       const payload = replyTo
         ? JSON.stringify({ v: 2, t: text, reply: { id: replyTo.id, author: replyTo.author, text: replyTo.text } })
         : text;
-      const body = await CryptoService.encryptMessage(roomId, payload);
+      const body = await CryptoService.encryptMessage(roomId, payload, myUsername);
       if (!body) {
         Alert.alert('Encryption failed', 'Unable to encrypt the message. Room key may not be loaded yet — please try again.');
         setInputText(text);
@@ -796,7 +814,7 @@ export default function ChatScreen({ navigation, route }) {
       if (!upload?.token) throw new Error('Upload failed — no token');
 
       const marker = makeFileMarker(upload.token, upload.filename || res.name, upload.size_bytes || 0);
-      const body = await CryptoService.encryptMessage(roomId, marker);
+      const body = await CryptoService.encryptMessage(roomId, marker, myUsername);
       if (!body) {
         Alert.alert('Encryption failed', 'Unable to encrypt file marker. Please try again.');
         setSending(false);
@@ -1935,6 +1953,7 @@ const styles = StyleSheet.create({
     color: Colors.textMuted,
     marginTop: 2,
   },
+  sigWarnText: { fontSize: Typography.xs, color: '#fbbf24', fontStyle: 'italic', marginTop: 2 },
   decryptFailedText: {
     fontSize: Typography.sm,
     color: '#f87171',

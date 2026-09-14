@@ -90,6 +90,13 @@ const V = {
   ed25519Pub: '8070f93cd4bd6badc92dfab631fd390e2d976725cd49db539e9b2abdad22132f',
   ed25519Sig: 'ZjzuK99luiHyd2QNT9qtamPRBLcwT8-6DToCH8663m60hZOK121Vrko0AQ1VT5qhlOQI9s94jSV-7MqN8eIeDg',
 
+  // "ws-room-sig-v1" ‖ uint32BE(roomId) ‖ uint16BE(len(from)) ‖ from ‖ body.
+  // Same shape as the DM string with its own domain, so neither signature can
+  // ever be replayed as the other.
+  roomSigMessage: '77732d726f6f6d2d7369672d76310000002a0005616c69636568656c6c6f20776f726c64',
+  roomSigMessageEmpty: '77732d726f6f6d2d7369672d7631000000000000',
+  roomSigMessageUnicode: '77732d726f6f6d2d7369672d7631ffffffff0006d096d0a3d09ad0bad0bbd18ed18720e29aa1',
+
   dmSigMessageV2: '77732d646d2d7369672d76320000002a00000007' + 'aa'.repeat(32) + '0005616c69636568656c6c6f20776f726c64',
   dmSigMessageV2Genesis: '77732d646d2d7369672d7632000000010000000100000000000000000000000000000000000000000000000000000000000000000000',
 
@@ -119,6 +126,9 @@ const CASES = [
   ['_dmSigMessage (unicode, max thread id)', async (U) => hex(await U._dmSigMessage(4294967295, 'ЖУК', 'ключ ⚡')), V.dmSigMessageUnicode],
   // v2 binds the message to its place in the sender's chain. v1 above stays
   // pinned forever: history signed before v2 existed must remain verifiable.
+  ['_roomSigMessage', async (U) => hex(await U._roomSigMessage(42, 'alice', 'hello world')), V.roomSigMessage],
+  ['_roomSigMessage (empty)', async (U) => hex(await U._roomSigMessage(0, '', '')), V.roomSigMessageEmpty],
+  ['_roomSigMessage (unicode, max room id)', async (U) => hex(await U._roomSigMessage(4294967295, 'ЖУК', 'ключ ⚡')), V.roomSigMessageUnicode],
   ['_dmSigMessageV2', async (U) => hex(await U._dmSigMessageV2(42, 7, 'aa'.repeat(32), 'alice', 'hello world')), V.dmSigMessageV2],
   ['_dmSigMessageV2 (genesis)', async (U) => hex(await U._dmSigMessageV2(1, 1, '00'.repeat(32), '', '')), V.dmSigMessageV2Genesis],
   ['bip39Encode', async (U) => U.bip39Encode(PRIV), V.bip39],

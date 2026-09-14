@@ -1580,6 +1580,35 @@ const CryptoUtils = {
   },
 
   /**
+   * The canonical byte-string signed for a ROOM message.
+   *
+   * Format: [14b domain] [4b roomId big-endian] [2b from_len] [from utf8] [body utf8]
+   *
+   * A room message is encrypted under a key every member holds, so the key
+   * proves membership and nothing else: until now the author was whoever the
+   * server said in the row, and a server could hand one member's words to
+   * another member's name. This is what makes that claim checkable.
+   *
+   * The domain differs from the DM one, so a signature made over a direct
+   * message can never be replayed as a room message, or the other way round.
+   */
+  _roomSigMessage(roomId, from, body) {
+    const prefix    = new TextEncoder().encode("ws-room-sig-v1"); // 14 bytes
+    const fromBytes = new TextEncoder().encode(String(from || ""));
+    const bodyBytes = new TextEncoder().encode(String(body || ""));
+    const ridNum    = (parseInt(roomId, 10) >>> 0);
+    const buf = new Uint8Array(14 + 4 + 2 + fromBytes.length + bodyBytes.length);
+    const dv  = new DataView(buf.buffer);
+    let off = 0;
+    buf.set(prefix, off);            off += 14;
+    dv.setUint32(off, ridNum, false); off += 4;   // big-endian
+    dv.setUint16(off, fromBytes.length, false); off += 2;  // big-endian
+    buf.set(fromBytes, off);         off += fromBytes.length;
+    buf.set(bodyBytes, off);
+    return buf;
+  },
+
+  /**
    * Sign msgBytes with Ed25519 seed. Returns base64url-encoded 64-byte signature.
    */
   async ed25519Sign(seed, msgBytes) {
