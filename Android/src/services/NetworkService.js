@@ -2139,6 +2139,13 @@ class NetworkService {
     if (raw && Number(raw.schema) !== 2) {
       try { await AsyncStorage.setItem(SERVER_CONFIG_KEY, JSON.stringify(cfg)); } catch {}
     }
+
+    // Screens read the config when they mount, which can be before this has
+    // run: the login screen then offers to "Connect to another server" while
+    // every request already goes to the island the user configured. Nothing
+    // here changes the config - this only tells whoever is on screen to look
+    // again.
+    this._post({ type: 'endpoint_changed', apiBase: _apiBase, change: 'loaded' });
   }
 
   /** Reset to the official server and remove persisted config. */
