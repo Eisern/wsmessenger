@@ -1348,6 +1348,36 @@ const CryptoService = {
   },
 
   /**
+   * Sign with this identity's Ed25519 key.
+   *
+   * The seed itself stays in this module. A cross-island contact card, and the
+   * claim that proves possession of the key a mailbox was opened for, are both
+   * signed with it - and the protocol that builds them must stay free of any
+   * key handling of its own, so it gets these two calls instead of the seed.
+   *
+   * @param {Uint8Array} msgBytes
+   * @returns {Uint8Array} 64-byte signature
+   */
+  signEd25519(msgBytes) {
+    if (!_ed25519Seed) throw new Error('Locked: no signing key');
+    return new Uint8Array(
+      CryptoUtils.base64ToArrayBuffer(CryptoUtils.ed25519Sign(_ed25519Seed, msgBytes)),
+    );
+  },
+
+  /** The same signature, base64url — the form a sealed envelope carries. */
+  signEd25519B64(msgBytes) {
+    if (!_ed25519Seed) throw new Error('Locked: no signing key');
+    return CryptoUtils.ed25519Sign(_ed25519Seed, msgBytes);
+  },
+
+  /** This identity's Ed25519 public key, Uint8Array(32). Throws when locked. */
+  ed25519PublicKey() {
+    if (!_ed25519Seed) throw new Error('Locked: no signing key');
+    return CryptoUtils.ed25519GetPublicKey(_ed25519Seed);
+  },
+
+  /**
    * Fetch and cache a peer's Ed25519 signing public key.
    * Returns Uint8Array(32) or null if the peer has no registered key.
    */
@@ -1447,6 +1477,29 @@ const CryptoService = {
  * Tries NetworkService first (live session), falls back to the active-user
  * pointer in Keychain (cold start before auth restore).
  */
+/**
+ * Derive the Ed25519 signing seed from the identity key that was just unlocked.
+ *
+ * Every unlock path has to do this, and until now only the BIP39 import did: a
+ * password sign-in and a Keychain auto-unlock both left the seed null. An
+ * unsigned DM is not a small thing - the recipient shows it as unverified, and
+ * once they have seen a signed message from the same person, as FORGED. The
+ * same null also made ensureEd25519KeyRegistered() return early, so the key a
+ * peer would verify against was never published either.
+ *
+ * The seed is deterministic (HKDF of the X25519 private key), so this stores no
+ * new key material; it re-derives what the identity already implies.
+ */
+function _deriveSigningSeed() {
+  try {
+    const raw = cryptoManager.userPrivateKey && cryptoManager.userPrivateKey.priv;
+    _ed25519Seed = (raw && raw.length === 32) ? CryptoUtils.deriveEd25519Seed(raw) : null;
+  } catch (e) {
+    _ed25519Seed = null;
+    console.warn('[CryptoService] signing seed derivation failed:', e?.message);
+  }
+}
+
 async function _resolveUsername() {
   const fromNs = String(NetworkService.username || '').trim().toLowerCase();
   if (fromNs) return fromNs;
@@ -1476,6 +1529,7 @@ async function _initWithPassword(password) {
 
     if (u) await StorageService.setActiveUsername(u).catch(() => {});
 
+    _deriveSigningSeed();
     _initialized = true;
     _unlocked = true;
     _unlockRateLimit.reset();
@@ -1486,6 +1540,7 @@ async function _initWithPassword(password) {
     await _cachePrivKeyToKeychain().catch(e => console.warn('[CryptoService] Keychain cache failed:', e?.message));
     _emit('unlocked');
     CryptoService.publishIdentityKey().catch(() => {});
+    CryptoService.ensureEd25519KeyRegistered().catch(() => {});
     return true;
   } catch (e) {
     if (e?.code === 'RATE_LIMITED') throw e;
@@ -1511,12 +1566,14 @@ async function _initWithKek(kekKey) {
     );
     if (!ok) return false;
 
+    _deriveSigningSeed();
     _initialized = true;
     _unlocked = true;
     CryptoService.resetIdleTimer();
     _emit('unlocked');
     // Auto-publish identity key to server keyring (fire-and-forget)
     CryptoService.publishIdentityKey().catch(() => {});
+    CryptoService.ensureEd25519KeyRegistered().catch(() => {});
     return true;
   } catch (_e) {
     return false;
@@ -1549,11 +1606,13 @@ async function _tryAutoUnlockFromKeychain() {
     const ok = await cryptoManager.initializeUserKeyFromRaw(raw, cached.pub);
     raw.fill(0); // wipe temporary copy — initializeUserKeyFromRaw makes its own copy
     if (!ok) return false;
+    _deriveSigningSeed();
     _initialized = true;
     _unlocked = true;
     CryptoService.resetIdleTimer();
     _emit('unlocked');
     CryptoService.publishIdentityKey().catch(() => {});
+    CryptoService.ensureEd25519KeyRegistered().catch(() => {});
     return true;
   } catch (_e) {
     if (raw) raw.fill(0);
