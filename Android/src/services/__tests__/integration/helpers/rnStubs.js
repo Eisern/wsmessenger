@@ -42,4 +42,11 @@ const AppState = {
 
 const Linking = { openURL: async () => {} };
 
-module.exports = { AsyncStorage, Keychain, AppState, Linking, _mem, _kc };
+// Recorded rather than shown: a test that unlocks the real CryptoService can
+// reach a path that alerts, and swallowing it silently would hide that.
+const _alerts = [];
+const Alert = {
+  alert(title, message) { _alerts.push({ title, message }); },
+};
+
+module.exports = { AsyncStorage, Keychain, AppState, Linking, Alert, _alerts, _mem, _kc };

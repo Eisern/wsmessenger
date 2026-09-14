@@ -39,10 +39,14 @@ module.exports = {
       // StorageService is a plain module over two platform APIs, so the pin
       // tests run here with the same stubs the integration project uses —
       // in `npm test`, where a trust-critical store belongs, rather than in
-      // the suite that needs a live server.
+      // the suite that needs a live server. The two React Native entries are
+      // what let the cross-island test drive the REAL CryptoService and
+      // ForeignService against stubbed islands, with no backend anywhere.
       moduleNameMapper: {
+        '^react-native$': '<rootDir>/src/services/__tests__/integration/helpers/reactNativeStub.js',
         '^react-native-keychain$': '<rootDir>/src/services/__tests__/integration/helpers/keychainStub.js',
         '^@react-native-async-storage/async-storage$': '<rootDir>/src/services/__tests__/integration/helpers/asyncStorageStub.js',
+        '^@react-native-clipboard/clipboard$': '<rootDir>/src/services/__tests__/integration/helpers/clipboardStub.js',
       },
     },
     {
@@ -75,7 +79,11 @@ module.exports = {
         '<rootDir>/__tests__/**/*.test.[jt]s?(x)',
         '<rootDir>/src/**/!(crypto)/**/__tests__/**/*.test.[jt]s?(x)',
       ],
-      testPathIgnorePatterns: ['<rootDir>/src/services/__tests__/'],
+      // Written as a separator-agnostic pattern on purpose: with a literal "/"
+      // this matches nothing on Windows, where the paths jest compares are
+      // backslashed — so the service tests ran a second time in the RN project
+      // too, and failed there on imports they are stubbed for elsewhere.
+      testPathIgnorePatterns: ['[\\\\/]src[\\\\/]services[\\\\/]__tests__[\\\\/]'],
       // Integration tests need a live backend; they never run by default.
 
       transformIgnorePatterns: [
