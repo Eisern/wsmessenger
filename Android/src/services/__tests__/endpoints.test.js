@@ -105,6 +105,50 @@ describe('normalizeServerConfig', () => {
       expect(mk(bad).apiBase).toBe('https://a.example');
     }
   });
+
+  // React Native ships a URL polyfill, not a URL: its `origin` getter matches
+  // ^https?:// and answers "" for every other scheme. Reading a stored ws base
+  // through it therefore lost the address, and the caller fell back to the
+  // bundled default server - so on a phone every socket quietly left the
+  // self-hoster's island while REST stayed on it. Node and Chrome cannot
+  // reproduce that, which is why the platform is imitated here.
+  it('keeps a stored ws base where the platform URL has no origin for ws://', () => {
+    const RealURL = global.URL;
+    class ReactNativeURL {
+      constructor(url) { this._url = String(url); }
+      get protocol() {
+        const m = this._url.match(/^([a-zA-Z][a-zA-Z\d+\-.]*):/);
+        return m ? m[1] + ':' : '';
+      }
+      get origin() {
+        const m = this._url.match(/^(https?:\/\/[^/]+)/);
+        return m ? m[1] : '';
+      }
+      get host() {
+        const m = this._url.match(/^https?:\/\/(?:[^@]+@)?([^:/?#]+)/);
+        const p = this._url.match(/:(\d+)(?=[/?#]|$)/);
+        return m ? m[1] + (p ? ':' + p[1] : '') : '';
+      }
+      toString() { return this._url; }
+    }
+    global.URL = ReactNativeURL;
+    try {
+      const stored = {
+        schema: 2,
+        endpoints: [{ apiBase: 'http://localhost:8000', wsBase: 'ws://localhost:8000', label: '' }],
+        activeIdx: 0,
+      };
+      const cfg = EP.normalizeServerConfig(stored, DEFAULTS);
+      expect(cfg.wsBase).toBe('ws://localhost:8000');
+      expect(cfg.endpoints[0].wsBase).toBe('ws://localhost:8000');
+      // And a saved config must survive being reloaded - this is the round trip
+      // that actually happens on the second launch.
+      expect(EP.normalizeServerConfig(JSON.parse(JSON.stringify(cfg)), DEFAULTS).wsBase)
+        .toBe('ws://localhost:8000');
+    } finally {
+      global.URL = RealURL;
+    }
+  });
 });
 
 describe('classifyConfigChange', () => {

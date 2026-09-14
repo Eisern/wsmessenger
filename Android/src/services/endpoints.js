@@ -65,9 +65,17 @@
     return api.replace(/^https:\/\//, "wss://").replace(/^http:\/\//, "ws://");
   }
 
+  // Deliberately NOT via URL.origin. React Native's URL is a polyfill whose
+  // `origin` getter matches ^https?:// and answers "" for anything else, so a
+  // stored ws:// base parsed there came back empty and the caller fell through
+  // to the bundled default server. On the device that meant every socket -
+  // rooms, DMs, notifications - left a self-hoster's island for the author's,
+  // silently, while REST kept going to the right place. Matching the scheme
+  // and the authority here is the same answer a complete URL gives, on every
+  // platform this runs on.
   function normalizeWsBase(s, apiBase) {
-    let u = parseUrl(stripSlash(s));
-    if (u && (u.protocol === "wss:" || u.protocol === "ws:")) return u.origin;
+    let m = /^(wss?:\/\/[^\/?#]+)/i.exec(stripSlash(s) || "");
+    if (m) return m[1];
     return deriveWsBase(apiBase);
   }
 
