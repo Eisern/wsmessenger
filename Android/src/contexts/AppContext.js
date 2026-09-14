@@ -550,9 +550,8 @@ export function useApp() {
 // Room/DM messages are intentionally NOT dispatched here — ChatScreen/DMChatScreen
 // handle them directly with inline decryption to avoid storing encrypted ciphertext.
 
-function _handleNetworkMessage(msg, dispatch, stateRef) {
+function _handleNetworkMessage(msg, dispatch, _stateRef) {
   if (!msg || !msg.type) return;
-  const state = stateRef?.current;
 
   switch (msg.type) {
     // Room WebSocket connection status

@@ -21,7 +21,7 @@ import React, { useState, useRef } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ActivityIndicator,
-  ScrollView, Alert,
+  ScrollView,
 } from 'react-native';
 import NetworkService from '../services/NetworkService';
 import StorageService from '../services/StorageService';

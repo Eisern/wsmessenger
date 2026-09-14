@@ -23,7 +23,6 @@
  *      Follow React Native Firebase setup guide
  */
 
-import { Platform, AppState } from 'react-native';
 
 // ---- Optional imports (graceful fallback if not installed) ----
 let notifee = null;

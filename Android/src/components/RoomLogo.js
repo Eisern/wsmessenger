@@ -10,7 +10,7 @@
 import React, { useState } from 'react';
 import { View, Image, Text, StyleSheet } from 'react-native';
 import NetworkService from '../services/NetworkService';
-import { Colors, Radii } from '../theme';
+import { Colors } from '../theme';
 
 function roomInitials(name) {
   const trimmed = (name || '').trim();

@@ -1013,7 +1013,7 @@ const CryptoService = {
    * @param {string} [peerUsername]
    * @returns {Promise<string|null>}
    */
-  async decryptDm(threadId, encryptedJson, peerUsername) {
+  async decryptDm(threadId, encryptedJson, _peerUsername) {
     if (!CryptoService.isReady()) {
       await CryptoService.ensureReady({ interactive: false });
     }

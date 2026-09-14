@@ -14,7 +14,8 @@
     "test:failover": "jest --selectProjects integration --runInBand --forceExit",
     "test:relay": "jest --selectProjects integration --runInBand --forceExit -t \"relay prototype\"",
     "test:island-list": "jest --selectProjects integration --runInBand --forceExit -t \"signed island list\"",
-    "test:two-islands": "jest --selectProjects integration --runInBand --forceExit twoIslands"
+    "test:two-islands": "jest --selectProjects integration --runInBand --forceExit twoIslands",
+    "test:unit": "jest --selectProjects crypto selector"
   },
   "dependencies": {
     "@noble/curves": "^2.0.1",

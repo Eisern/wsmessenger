@@ -12,7 +12,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useFocusEffect } from '@react-navigation/native';
 import {
   View, Text, FlatList, TextInput, TouchableOpacity, ScrollView,
-  StyleSheet, Platform, Modal,
+  StyleSheet, Modal,
   Alert, ActivityIndicator, Linking, Keyboard,
 } from 'react-native';
 import { KeyboardAvoidingView } from 'react-native-keyboard-controller';
@@ -231,7 +231,7 @@ function MessageBubble({ msg, myUsername, isSearchHit, isSearchActive, onReply }
 }
 
 export default function ChatScreen({ navigation, route }) {
-  const { state, dispatch, disconnectRoom } = useApp();
+  const { state, dispatch } = useApp();
   const insets = useSafeAreaInsets();
   const { roomId, roomName } = route?.params || {};
   const screenReady = !!state.isLoggedIn && !!roomId;
@@ -239,7 +239,7 @@ export default function ChatScreen({ navigation, route }) {
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
   const [showMembers, setShowMembers] = useState(false);
-  const [cryptoReady, setCryptoReady] = useState(false);
+  const [setCryptoReady] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [pinnedContext, setPinnedContext] = useState(null);
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
@@ -1366,7 +1366,10 @@ function RoomSettingsModal({ visible, onClose, roomId, currentRoom, myRole, disp
             {/* Logo */}
             <Text style={styles.settingsLabel}>Room Logo</Text>
             <View style={styles.logoRow}>
-              <RoomLogo logoUrl={logoUrl} roomName={currentRoom?.name || roomName || 'Room'} size={48} />
+              {/* `currentRoom` is what this modal was given; the screen's own
+                  `roomName` prop is not in scope here, and reaching for it
+                  threw a ReferenceError whenever a room had no name yet. */}
+              <RoomLogo logoUrl={logoUrl} roomName={currentRoom?.name || 'Room'} size={48} />
               {!logoUrl && (
                 <Text style={[styles.noLogoText, { marginLeft: Spacing.sm }]}>No logo</Text>
               )}

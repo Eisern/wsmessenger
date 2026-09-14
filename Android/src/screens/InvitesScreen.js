@@ -10,7 +10,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, FlatList, TouchableOpacity,
+  View, Text, TouchableOpacity,
   StyleSheet, RefreshControl, Alert, SectionList, ActivityIndicator,
   TextInput, Modal,
 } from 'react-native';

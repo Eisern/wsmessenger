@@ -212,7 +212,6 @@ let bob;
 let tokenA;
 let tokenB;
 let blobFromAlice;
-let blobFromBob;
 
 jest.setTimeout(120000);
 
@@ -320,8 +319,10 @@ describe('Alice and Bob hold a conversation across two databases', () => {
 
   it('each opens a mailbox at home for the other', async () => {
     const docB = await fetch(`${ISLAND_B}/.well-known/wsapp-island`).then((r) => r.json());
+    // Built and checked here rather than kept: this side of the exchange is
+    // Bob's card, and what matters is that it stands on its own.
     SIGN_SEED = bob.edSeed;
-    blobFromBob = await FD.buildContactBlob(
+    const blobFromBob = await FD.buildContactBlob(
       { kid: bob.kid, x25519PubB64: bob.pubB64, ed25519PubB64: bob.edPubB64, displayName: 'bob' },
       {
         islandId: docB.payload.island_id,
@@ -330,6 +331,8 @@ describe('Alice and Bob hold a conversation across two databases', () => {
       },
       deps().sign,
     );
+
+    expect((await FD.verifyContactBlob(blobFromBob, deps())).ok).toBe(true);
 
     bobInbox = await openMailbox(ISLAND_B, tokenB, bob, alice);
     aliceInbox = await openMailbox(ISLAND_A, tokenA, alice, bob);

@@ -207,7 +207,7 @@ export default function DMChatScreen({ navigation, route }) {
 
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
-  const [cryptoReady, setCryptoReady] = useState(false);
+  const [setCryptoReady] = useState(false);
   const [peerPubKey, setPeerPubKey] = useState(null); // used for safety numbers only
   const [safetyNumber, setSafetyNumber] = useState(null);
   const [showSafety, setShowSafety] = useState(false);

@@ -8,7 +8,7 @@
  * Ported from panel-ui.js DM section
  */
 
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View, Text, FlatList, TouchableOpacity,
   StyleSheet, TextInput, RefreshControl, Modal, Alert, ActivityIndicator,
@@ -73,11 +73,6 @@ export default function DMListScreen({ navigation }) {
       } catch {}
     });
   }, []);
-
-  function savePins(ids) {
-    setPinnedIds(ids);
-    AsyncStorage.setItem(DM_PINNED_KEY, JSON.stringify(ids)).catch(() => {});
-  }
 
   function togglePin(threadId) {
     const tid = String(threadId);

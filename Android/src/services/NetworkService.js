@@ -100,7 +100,7 @@ function decodeJwtPayload(token) {
   }
 }
 
-function sleep(ms) {
+function _sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 

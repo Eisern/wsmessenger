@@ -23,7 +23,6 @@ globalThis.__DEV__ = false;
 import CryptoUtils from '../../crypto/CryptoUtils';
 import { cryptoManager } from '../../crypto';
 import StorageService from '../StorageService';
-import NetworkService from '../NetworkService';
 import CryptoService from '../CryptoService';
 
 const b64 = (u8) => CryptoUtils.arrayBufferToBase64(u8);

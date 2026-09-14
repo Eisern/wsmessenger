@@ -61,7 +61,7 @@ describe('CryptoUtils — X25519 + AES-GCM', () => {
   });
 
   test('ECDH key wrapping (encryptRoomKeyForUser → decryptRoomKeyForUser)', async () => {
-    const alice = await CryptoUtils.generateIdentityKeyPair();
+    await CryptoUtils.generateIdentityKeyPair();
     const bob = await CryptoUtils.generateIdentityKeyPair();
     const bobPubB64 = await CryptoUtils.exportPublicKey(bob.publicKey);
 

@@ -4,7 +4,6 @@
  * which Jest's default resolver doesn't handle well.
  * This resolver tries the original path first, and if it fails, appends .js.
  */
-const path = require('path');
 
 const NOBLE_SCURE_RE = /^@(noble|scure)\//;
 

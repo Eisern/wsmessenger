@@ -27,7 +27,7 @@
  */
 
 const {
-  makePanel, setUp, http, udDecode, lastMessage, unb64,
+  makePanel, setUp, http, lastMessage,
 } = require('./helpers/panelHarness');
 
 const ISLAND_A = process.env.TWO_ISLANDS_A || 'http://127.0.0.1:8000';

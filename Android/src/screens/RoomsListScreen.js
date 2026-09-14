@@ -10,13 +10,12 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  View, Text, FlatList, TouchableOpacity,
+  View, Text, TouchableOpacity,
   StyleSheet, TextInput, RefreshControl, ActivityIndicator,
-  SectionList, Alert, Modal, ScrollView,
+  SectionList, Alert, Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NetworkService from '../services/NetworkService';
-import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
 import { useApp } from '../contexts/AppContext';
 import { Colors, Spacing, Radii, Typography } from '../theme';
@@ -215,7 +214,7 @@ export default function RoomsListScreen({ navigation }) {
     );
   }
 
-  function handleJoinOrChat(item, isPublic) {
+  function handleJoinOrChat(item, _isPublic) {
     const isMember = myRooms.some(r => (r.id || r.room_id) === (item.id || item.room_id));
     if (isMember) {
       handleRoomPress(item);

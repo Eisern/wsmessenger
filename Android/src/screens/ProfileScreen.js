@@ -8,7 +8,7 @@
  * Ported from panel-ui.js profile drawer + 2FA settings
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, ScrollView, Switch, Alert,
@@ -16,7 +16,6 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NetworkService from '../services/NetworkService';
-import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
 import ServerSetup from '../components/ServerSetup';
 import { useApp } from '../contexts/AppContext';
@@ -31,7 +30,7 @@ const FONT_SCALES = [
 ];
 
 export default function ProfileScreen() {
-  const { state, dispatch, logout, loadMyProfile, setFontScale } = useApp();
+  const { state, logout, loadMyProfile, setFontScale } = useApp();
   const insets = useSafeAreaInsets();
 
   const [loading, setLoading] = useState(false);

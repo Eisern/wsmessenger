@@ -42,4 +42,10 @@ jobs:
           cache: "npm"
           cache-dependency-path: Android/package-lock.json
       - run: npm ci --legacy-peer-deps
-      - run: npm run test:crypto
+      # The whole offline suite, not just the crypto primitives: the selector
+      # project is where the key-trust gate, the signed wraps, the entry-point
+      # failover and the cross-island client are covered, and until now it ran
+      # nowhere but the author's machine. The integration project is left out
+      # on purpose - it needs two live islands.
+      - run: npm run test:unit
+      - run: npm run lint
