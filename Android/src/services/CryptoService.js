@@ -870,7 +870,7 @@ const CryptoService = {
         console.warn('[CryptoService] encryptDm: DM key not ready');
         return null;
       }
-      const myUsername = senderUsername || NetworkService.username || '';
+      const myUsername = senderUsername || NetworkService.username || await _resolveUsername();
       const envelopeObj = { ss: 1, from: myUsername, body: text };
       // Sign the envelope so the recipient can verify the sender identity.
       // Signature covers (threadId, from, body) — prevents peer from forging `from`.
@@ -1511,7 +1511,7 @@ const CryptoService = {
    */
   async checkRoomPeersKeyChanges(usernames) {
     if (!Array.isArray(usernames) || !usernames.length) return;
-    const me = (NetworkService.username || '').toLowerCase();
+    const me = await _resolveUsername();
     for (const u of usernames) {
       if (String(u || '').toLowerCase() === me) continue;
       try { await CryptoService.checkAndAlertKeyChange(u); } catch (_e) { /* ignore */ }
@@ -1821,7 +1821,11 @@ async function _kidFromPublicKeyB64(publicKeyB64) {
  * Returns { changed: true/false, username } or null if skipped.
  */
 async function _checkPeerKeyChanged(peerUsername, { force = false, peerPublicKeyB64 = null } = {}) {
-  const me = NetworkService.username;
+  // Resolved, never read straight off NetworkService: that field is empty until
+  // a server answers the login with a name, and every pin is addressed by it.
+  // Returning null here is not "no problem" - it is "cannot tell", and the
+  // caller that shares keys treats it as a refusal.
+  const me = await _resolveUsername();
   if (!me) return null;
   const peer = String(peerUsername || '').trim();
   if (!peer || peer.toLowerCase() === me.toLowerCase()) return null;
@@ -1868,7 +1872,12 @@ async function _checkPeerKeyChanged(peerUsername, { force = false, peerPublicKey
     }
 
     // *** KEY CHANGED ***
-    await StorageService.setKnownFingerprint(island, me, peer, peerFp);
+    // The pin is deliberately NOT advanced to the new key. Advancing it makes
+    // the very next check say "same key", which cleared the flag below and let
+    // the next attempt through - one refusal, then the door opens. The user has
+    // to confirm the new key (verifyPeerKey) before anything is wrapped for it,
+    // and until they do, every check re-detects the change. The extension
+    // carries the same rule, and says so in a comment this port dropped.
     await StorageService.setKeyChanged(island, me, peer);
     // Reset verification status only (keep fingerprint + _changed intact)
     try { await StorageService.clearVerifiedFlag(island, me, peer); } catch (_e) {}
@@ -1889,9 +1898,16 @@ async function _assertPeerKeyTrustedForSharing(peerUsername, actionLabel = 'shar
   const peer = String(peerUsername || '').trim();
   if (!peer) throw new Error('Missing peer username');
 
-  const me = NetworkService.username;
-  // Self-sharing is OK (e.g. wrapping room key for own account)
-  if (!me || peer.toLowerCase() === me.toLowerCase()) return;
+  const me = await _resolveUsername();
+  // Self-sharing is OK (e.g. wrapping room key for own account).
+  //
+  // Not knowing who we are is NOT one of those cases, and it used to be: the
+  // guard returned here when the name was missing, which on this client was
+  // always - so a key went out wrapped for whatever public key the server
+  // offered, unpinned and unannounced. That is precisely the substitution this
+  // function exists to stop, so an unknown name now falls through to the
+  // check, where `null` means refuse.
+  if (me && peer.toLowerCase() === me.toLowerCase()) return;
 
   const keyCheck = await _checkPeerKeyChanged(peer, { force: true, peerPublicKeyB64 });
 
@@ -1913,7 +1929,7 @@ async function _assertPeerKeyTrustedForSharing(peerUsername, actionLabel = 'shar
   // in the narrow window of first detection. Once the fingerprint is updated,
   // keyCheck.changed becomes false and sharing would be allowed even without re-verification.
   try {
-    const stillChanged = await StorageService.getKeyChanged(await _pinScope(), me, peer);
+    const stillChanged = await StorageService.getKeyChanged(await _pinScope(), me || keyCheck.username, peer);
     if (stillChanged) {
       throw new Error(
         `Public key for "${peer}" has recently changed and requires re-verification. ` +

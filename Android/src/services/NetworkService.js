@@ -400,7 +400,7 @@ class NetworkService {
       return { requires_2fa: true, temp_token: resp.temp_token };
     }
 
-    await this._setSession(resp);
+    await this._setSession(resp, username);
     this._loginRateLimit.reset();
     return { ok: true, username: resp.username || username, token: this._token, refreshToken: this._refreshToken };
   }
@@ -435,6 +435,9 @@ class NetworkService {
       noAuth: true,
     });
 
+    // No typed name to fall back on here - the 2FA step only carries the
+    // temporary token - so an old server without `username` in its answer
+    // leaves this empty. `_resolveUsername` on the crypto side covers that.
     await this._setSession(resp);
     this._twoFaRateLimit.reset();
     return {
@@ -512,10 +515,21 @@ class NetworkService {
     }
   }
 
-  async _setSession(resp) {
+  /**
+   * Install a fresh session.
+   *
+   * `fallbackUsername` is what the caller typed, and it matters: a server that
+   * answers with tokens and no name used to leave `_username` empty for good -
+   * it was written empty into the Keychain record too, so no restart could
+   * recover it. Everything this client keeps per user then had no user to key
+   * on: the session was never restored, the token never refreshed, and the
+   * check that a peer's public key has not been swapped returned before it
+   * checked anything.
+   */
+  async _setSession(resp, fallbackUsername = '') {
     this._token        = resp.access_token  || resp.token || '';
     this._refreshToken = resp.refresh_token || '';
-    this._username     = resp.username      || '';
+    this._username     = resp.username || fallbackUsername || this._username || '';
 
     await StorageService.setAuth({
       username:     this._username,
