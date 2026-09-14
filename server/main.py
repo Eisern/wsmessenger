@@ -2163,6 +2163,12 @@ async def _issue_token_pair(user_id: int, username: str) -> dict:
         "refresh_token": refresh,
         "token_type": "bearer",
         "expires_in": ACCESS_TOKEN_EXPIRES_MIN * 60,
+        # The name the client just authenticated as, canonicalised. It is inside
+        # the token anyway; answering with it saves every client from having to
+        # decode a JWT to learn who it is - and a client that does not know its
+        # own name cannot address anything it keeps per user, which is how the
+        # Android client ended up with no key-change protection at all.
+        "username": username,
     }
 
 
