@@ -54,6 +54,10 @@ Unlike the Chrome Extension (two contexts via `chrome.runtime` ports), the Andro
 | `src/services/NetworkService.js` | WebSocket + REST singleton; emits `message`, `dm_message`, `wsOnline`, `sessionExpired` etc. |
 | `src/services/CryptoService.js` | Crypto session lifecycle: unlock, auto-lock (20 min idle), DM key management |
 | `src/services/StorageService.js` | AsyncStorage (rooms, pinned context) + react-native-keychain (auth tokens) |
+| `src/services/ForeignService.js` | Cross-island DMs: contacts, mailboxes, delivery, queue — the Android half of panel-crypto.js's "Cross-island contacts" |
+| `src/services/foreign-dm.js` | Cross-island protocol — **byte-identical** to `chrome_extension/foreign-dm.js` |
+| `src/services/endpoints.js` | Entry-point list, failure classification, rotation — **byte-identical** to the extension's copy |
+| `src/services/island-list.js`, `outbox.js`, `thread-chain.js` | Signed island list, durable send queue, hash chains — all byte-identical duplicates |
 | `src/crypto/CryptoUtils.js` | Raw crypto primitives — adapted from `../crypto-utils.js` |
 | `src/crypto/CryptoManager.js` | Room key lifecycle, archival — adapted from `../crypto-manager.js` |
 | `src/components/PasswordModal.js` | Promise-based password prompt (legacy — no longer used in Chat/DM screens) |
@@ -188,12 +192,72 @@ DMs use **UD (Unsealed Delivery)** — `POST /ud/dm/send` with no `Authorization
 - WS (`/ws-dm`) is **receive-only** — server rejects all send attempts except `ping`
 - **Delivery secret TTL**: `expires_at` column (24h) added to `chat_dm_delivery`. Server returns `401` on expired secret; client invalidates cache and re-fetches with Bearer token (re-checks membership). `GET /dm/{threadId}/delivery-secret` returns `expires_at` in ISO format. Client cache (`_deliverySecretCache`) stores `{ secret, expiresAt }` and pre-emptively re-fetches with >60s margin.
 
+### Cross-Island Direct Messages
+
+Writing to somebody whose account is on **another island** (another backend with
+another database). The two servers never speak to each other: each direction is
+a one-way **mailbox** on the recipient's island, opened by the recipient for one
+specific key, and the sender delivers into it personally.
+
+```
+Alice@A ──write──> [mailbox Bob opened on B] ──read──> Bob@B
+Bob@B   ──write──> [mailbox Alice opened on A] ──read──> Alice@A
+```
+
+A mailbox is an ordinary DM thread whose only member is its owner, so the read
+path (`/ws-dm`, history, decryption) does not know this feature exists. It is
+not in `/dm/list` either — there is no pair row — which is why the DM list
+renders foreign contacts from local storage as a separate "Other servers"
+section.
+
+| Piece | Where |
+|---|---|
+| Protocol (cards, claims, delivery, relay envelopes) | `src/services/foreign-dm.js` — byte-identical to the extension |
+| Contacts, keys, sending, queue, island refresh | `src/services/ForeignService.js` |
+| Signing a card / a claim with the identity key | `CryptoService.signEd25519`, `signEd25519B64`, `ed25519PublicKey()` |
+| Mailbox endpoints on **our** island | `NetworkService.createForeignBox / putForeignPeerKey / listForeignBoxes / deleteForeignBox` |
+| UI: card, add, contact actions | `DMListScreen.js` |
+| UI: send, safety number, refusals | `DMChatScreen.js` (`foreignContact`) |
+
+**Rules that everything else follows from:**
+
+- **Identity is a key, not an account.** `kid = sha256(x25519 pub)[:32]` travels
+  between islands; a username never does. A contact card is signed by its owner
+  and self-checking (the kid must hash the key printed beside it), so neither
+  island has to be trusted for it.
+- **Consent is structural.** A mailbox exists only because its owner pasted a
+  card. There is no way to address a stranger, so there is no spam to filter.
+- **Each direction has its own thread key**, distinguished by `kid`. Both go
+  into the same slot's archive (`ForeignService.ensureKeysReady`), so one
+  conversation decrypts from one slot with no new message format.
+- **A foreign thread must never enter the local key path.** `ensureDmKeyReady`
+  would read this island's 404 as "create a key and share it with the peer" —
+  for a peer with no account here. Every branch that asks this island about the
+  peer (`ensureDmKeyReady`, `checkAndAlertKeyChange`, `_fetchPeerEd25519PubKey`,
+  `_loadDmKey` on a decrypt retry, reporting a user) is guarded on
+  `foreignContact` / `foreign`.
+- **Our own copy is signed with the thread it was DELIVERED to** — their
+  mailbox — and read back under ours. `decryptDm` tries both numbers for our own
+  messages; verifying only against the thread it is read in accuses us of
+  forging our own messages.
+- **Their signing key comes from the card**, never from a key server. That is
+  what stops a dishonest island forging messages from a cross-island contact.
+- **Files and reports are refused** for a foreign contact, with a reason: a file
+  lives on the island it was uploaded to, and reports go to moderators of the
+  island the account is on.
+
+**Not yet on Android:** relaying is implemented (`setUseRelay`, per-contact) but
+only reachable from the contact's long-press menu; there is no equivalent of the
+extension's islands-and-bridges settings UI.
+
 ### Tests
 
 Two Jest environments configured in `jest.config.js`:
 
-- **`crypto` project** (Node env) — `src/crypto/__tests__/` — runs against native Node Web Crypto; 30 tests covering X25519, AES-GCM, PBKDF2, Argon2id, safety numbers
-- **`react-native` project** (RN env) — `__tests__/` and non-crypto `src/` tests
+- **`crypto` project** (Node env) — `src/crypto/__tests__/` — runs against native Node Web Crypto; X25519, AES-GCM, PBKDF2, Argon2id, safety numbers, cross-client vectors
+- **`selector` project** (Node env) — `src/services/__tests__/*.test.js` — plain-JS services with React Native, AsyncStorage, Keychain and Clipboard stubbed. `crossIslandClient.test.js` drives the **real** ForeignService + CryptoService + CryptoManager against two in-process islands, so the cross-island client path is covered with no backend at all.
+- **`integration` project** (Node env) — `src/services/__tests__/integration/` — the real NetworkService and the extension's own files against **live** servers; needs the two test islands up (see `integration/README.md`). Not part of a useful `npm test` run without them.
+- **`react-native` project** (RN env) — `__tests__/` only; its ignore pattern is separator-agnostic so the service tests do not run twice on Windows.
 
 ```bash
 npm run test:crypto   # Run crypto tests only (fastest feedback loop)

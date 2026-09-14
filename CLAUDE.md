@@ -88,6 +88,33 @@ A room key reaches a new member by being wrapped for their public key and upload
 
 The old behaviour required the owner to be connected to that specific room's socket at the moment of acceptance; since a client holds one room socket at a time, that failed whenever the owner was offline or simply in another room.
 
+### Cross-Island Direct Messages
+
+Two people on **different islands** reach each other through one-way mailboxes:
+each opens a mailbox on their own island for the other's key, and the sender
+delivers into it personally. The servers never speak to each other, and a
+mailbox is an ordinary DM thread whose only member is its owner, so nothing in
+the read path knows the feature exists.
+
+Identity is a key (`kid = sha256(x25519 pub)[:32]`), never a username: a contact
+card is handed over out of band, signed by its owner and self-checking, so
+neither island has to be trusted for it. Opening a mailbox IS the consent —
+there is no way to address a stranger.
+
+- Protocol: `chrome_extension/foreign-dm.js` / `Android/src/services/foreign-dm.js`
+  (byte-identical, platform-free — probe, clock and crypto are injected).
+- Client wiring: the "Cross-island contacts" section of `panel-crypto.js`, and
+  `Android/src/services/ForeignService.js`.
+- Server: `POST /foreign/box` (+ `/peer-key`), `GET /foreign/boxes`,
+  `DELETE /foreign/box/{tid}`, `GET /foreign/challenge`, `POST /foreign/claim` —
+  one 403 for every refusal, nonce spent either way.
+
+A foreign thread must never enter the local DM key path: `ensureDmKeyReady`
+reads this island's 404 as "create a key and share it with the peer", for a peer
+with no account here. Both clients guard every branch that would ask the local
+island about such a peer. Design and threat model:
+`docs/internal/cross-island-dm-assessment.md`.
+
 ### RPC Transport (`rpc.js`)
 
 `panel-crypto.js` and `panel.js` communicate with the background via a port RPC abstraction in `chrome_extension/rpc.js`. Requests carry a unique `id`; responses are matched by `id`. Reconnects with exponential backoff (1s → 30s + jitter). API relay requests time out after 10 seconds.
@@ -182,6 +209,7 @@ Full reasoning, threat model and what this deliberately does *not* buy:
 | `chrome_extension/crypto-manager.js` | CryptoKey lifecycle, room key versioning/archival |
 | `chrome_extension/rpc.js` | chrome.runtime port transport with reconnect/backoff; exposes `window.{connectPort,safePost,rpcOnMessage,rpcOffMessage,rpcOnConnect,rpcOnDisconnect,rpcDisconnect,rpcGetPort}` |
 | `chrome_extension/endpoints.js` | Entry-point list, failure classification and rotation state machine — byte-identical to `Android/src/services/endpoints.js` |
+| `chrome_extension/foreign-dm.js` | Cross-island DM protocol (contact cards, mailbox claims, delivery, relay envelopes) — byte-identical to `Android/src/services/foreign-dm.js` |
 | `chrome_extension/notifications.js` | Badge management; exposes `window.Notifications` singleton |
 | `chrome_extension/login.js` | Login, registration, 2FA, BIP39 recovery form, KEK derivation → background handoff |
 | `chrome_extension/argon2-selftest.js` | WASM integrity check (pinned SHA-256) + KDF test vector; blocks unlock on failure |
