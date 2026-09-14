@@ -74,7 +74,7 @@
   // and the authority here is the same answer a complete URL gives, on every
   // platform this runs on.
   function normalizeWsBase(s, apiBase) {
-    let m = /^(wss?:\/\/[^\/?#]+)/i.exec(stripSlash(s) || "");
+    let m = /^(wss?:\/\/[^/?#]+)/i.exec(stripSlash(s) || "");
     if (m) return m[1];
     return deriveWsBase(apiBase);
   }
@@ -392,7 +392,7 @@
       // change, such as "this entry point rejected our session". Those cannot
       // storm either, because the entry point is blacklisted before the call.
       reportFailure: function (kind, observedGen, opts) {
-        var force = !!(opts && opts.force);
+        let force = !!(opts && opts.force);
         if (kind === "ignore" || !kind) return Promise.resolve({ rotated: false, ignored: true });
 
         // Stale report: it describes an entry point we already left. Three

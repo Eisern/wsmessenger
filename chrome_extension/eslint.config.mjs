@@ -2,6 +2,10 @@ import js from "@eslint/js";
 import globals from "globals";
 
 export default [
+  // The config is an ES module; the rest of this directory is classic scripts,
+  // and linting it under `sourceType: "script"` only ever reports its own
+  // imports as a parse error.
+  { ignores: ["eslint.config.mjs"] },
   js.configs.recommended,
   {
     languageOptions: {

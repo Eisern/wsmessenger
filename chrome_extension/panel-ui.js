@@ -2809,15 +2809,6 @@ function highlightActiveRoom() {
 }
 
  // helpers
-function makeInitials(name) {
-  const s = String(name || "").trim();
-  if (!s) return "??";
-  const parts = s.split(/[\s._-]+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return (parts[0][0] + parts[1][0]).toUpperCase();
-  }
-  return (s[0] + (s[1] || "")).toUpperCase();
-}
 
 function renderDmList(items) {
   if (!dmListEl) return;

@@ -947,7 +947,7 @@ const DEBUG_LOGS = false;
 function redactJwt(s) {
   const str = String(s || "");
   // very small heuristic: three base64url-ish parts separated by dots
-  if (/^[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/.test(str)) {
+  if (/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(str)) {
     return str.slice(0, 18) + "..." + str.slice(-10);
   }
   return str;
@@ -2263,7 +2263,7 @@ if (msg.type === "rooms_kick") {
               false, Date.now());
           } else {
             addMsg("System",
-              `\u26A0\u00A0  Room key rotation failed: ${result.error || "unknown error"}. Old key is still in use.`,
+              `\u26A0\u00A0  Room key rotation failed: ${result.error || "unknown error"}. Old key is still in use.`,
               false, Date.now());
           }
         } catch (e) {
@@ -3232,7 +3232,7 @@ function parseFileMarker(text) {
     const sizeBytes = Number.isFinite(sizeNum) && sizeNum >= 0 ? sizeNum : null;
 
     // token should be url-safe token from backend
-    if (!token || token.length > 256 || /[^A-Za-z0-9_\-]/.test(token)) return null;
+    if (!token || token.length > 256 || /[^A-Za-z0-9_-]/.test(token)) return null;
 
     return { token, filename: filename || "file", sizeBytes };
   } catch {

@@ -390,7 +390,7 @@ function serr(...args) {
 function redactSecrets(s) {
   let out = String(s || "");
 
-  out = out.replace(/\beyJ[A-Za-z0-9_\-]+?\.[A-Za-z0-9_\-]+?\.[A-Za-z0-9_\-]+?\b/g, "[REDACTED_JWT]");
+  out = out.replace(/\beyJ[A-Za-z0-9_-]+?\.[A-Za-z0-9_-]+?\.[A-Za-z0-9_-]+?\b/g, "[REDACTED_JWT]");
 
   out = out.replace(/(authorization\s*:\s*bearer\s+)[^\s'"]+/ig, "$1[REDACTED]");
   out = out.replace(/(bearer\s+)[^\s'"]+/ig, "$1[REDACTED]");
