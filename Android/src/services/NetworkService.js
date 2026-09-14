@@ -67,10 +67,21 @@ let _wsBase  = DEFAULT_WS_BASE;
 let _serverCfg = EP.normalizeServerConfig(null, EP_DEFAULTS);
 let _selector  = null;
 
+// Until the stored config has been applied, _serverCfg is the bundled default
+// island — which is a different island from the one a self-hoster's data is
+// filed under. Anything keyed by island (a cross-island contact, a pin) that
+// reads before then looks in the wrong drawer and finds nothing, and "nothing"
+// is never a safe default for those. So they wait for this instead.
+let _cfgLoaded = false;
+let _cfgReadyResolve = null;
+const _cfgReady = new Promise((res) => { _cfgReadyResolve = res; });
+
 function _applyCfg(cfg) {
   _serverCfg = cfg;
   _apiBase = cfg.apiBase || DEFAULT_API_BASE;
   _wsBase  = cfg.wsBase  || DEFAULT_WS_BASE;
+  _cfgLoaded = true;
+  if (_cfgReadyResolve) { _cfgReadyResolve(); _cfgReadyResolve = null; }
 }
 
 // ============================
@@ -1651,8 +1662,13 @@ class NetworkService {
     return p;
   }
 
-  // peer is passed explicitly to avoid relying on this._dmPeer being set
-  async getDeliverySecret(threadId, peer = null) {
+  // peer is passed explicitly to avoid relying on this._dmPeer being set.
+  //
+  // `openThread: false` is for a thread with no second member — a cross-island
+  // mailbox. POST /dm/open names a peer, and falling back to whoever happens to
+  // be in _dmPeer would open somebody else's conversation and file ITS delivery
+  // secret under this thread id, which then fails every send with a 403.
+  async getDeliverySecret(threadId, peer = null, { openThread = true } = {}) {
     const tid = String(threadId);
 
     // Wait for any in-flight prefetch to complete before checking cache
@@ -1669,7 +1685,7 @@ class NetworkService {
     );
     if (cacheValid) return cached.secret;
 
-    const peerToUse = peer || this._dmPeer;
+    const peerToUse = openThread ? (peer || this._dmPeer) : null;
     console.log('[NS] getDeliverySecret: fetching');
 
     // POST /dm/open so server initialises this user's slot in the thread
@@ -1699,6 +1715,54 @@ class NetworkService {
       console.warn('[NS] delivery-secret fetch failed: status', e?.status || 'unknown');
       throw e;
     }
+  }
+
+  // ============================
+  // Cross-island mailboxes
+  // ============================
+  //
+  // These four are the only authenticated half of the cross-island path: they
+  // run against OUR island, about a mailbox we own. Everything addressed to the
+  // other island is a plain fetch in ForeignService, because we have no account
+  // there and the delivery secret, not a token, is what opens the box.
+
+  /** Open (or re-open) a mailbox on this island for one foreign key. */
+  async createForeignBox({ peerKid, peerX25519Pub, peerEd25519Pub, label, encryptedThreadKey, keyId }) {
+    return this._fetch('/foreign/box', {
+      method: 'POST',
+      body: {
+        peer_kid: peerKid,
+        peer_x25519_pub: peerX25519Pub,
+        peer_ed25519_pub: peerEd25519Pub,
+        label: label || null,
+        encrypted_thread_key: encryptedThreadKey || null,
+        key_id: keyId || null,
+      },
+    });
+  }
+
+  /** Leave the mailbox's thread key wrapped for the peer, for them to claim. */
+  async putForeignPeerKey(threadId, { peerKid, peerX25519Pub, peerEd25519Pub, encryptedThreadKey, keyId }) {
+    return this._fetch(`/foreign/box/${encodeURIComponent(threadId)}/peer-key`, {
+      method: 'POST',
+      body: {
+        peer_kid: peerKid,
+        peer_x25519_pub: peerX25519Pub,
+        peer_ed25519_pub: peerEd25519Pub,
+        encrypted_thread_key: encryptedThreadKey,
+        key_id: keyId || null,
+      },
+    });
+  }
+
+  /** The mailboxes this account owns here. Not in /dm/list: they have no pair row. */
+  async listForeignBoxes() {
+    return this._fetch('/foreign/boxes');
+  }
+
+  /** Close a mailbox. The delivery secret the peer holds then opens nothing. */
+  async deleteForeignBox(threadId) {
+    return this._fetch(`/foreign/box/${encodeURIComponent(threadId)}`, { method: 'DELETE' });
   }
 
   // ============================
@@ -2146,6 +2210,23 @@ class NetworkService {
     // here changes the config - this only tells whoever is on screen to look
     // again.
     this._post({ type: 'endpoint_changed', apiBase: _apiBase, change: 'loaded' });
+  }
+
+  /**
+   * Resolves once a server config has been applied — the stored one at
+   * startup, or whichever one a later save or reset installed.
+   *
+   * Callers that key anything by island await this first. The wait is bounded:
+   * a client that never loads a config (a test, a screen reached before
+   * bootstrap) carries on with the bundled default rather than hanging, which
+   * is the same island it would have used anyway.
+   */
+  serverConfigReady(timeoutMs = 5000) {
+    if (_cfgLoaded) return Promise.resolve();
+    return Promise.race([
+      _cfgReady,
+      new Promise((res) => setTimeout(res, timeoutMs)),
+    ]);
   }
 
   /** Reset to the official server and remove persisted config. */

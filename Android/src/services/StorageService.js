@@ -288,6 +288,7 @@ const StorageService = {
 
   async get(key) { return _asyncGet(key); },
   async set(key, value) { return _asyncSet(key, value); },
+  async remove(key) { return _asyncRemove(key); },
 
   // --- Auth (SecureStore) ← chrome.storage.session "auth" ---
 

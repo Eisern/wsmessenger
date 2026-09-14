@@ -22,6 +22,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NetworkService from '../services/NetworkService';
 import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
+import ForeignService from '../services/ForeignService';
 
 // Auto-clear clipboard 60s after copying a message (plaintext is sensitive).
 let _clipClearTimer = null;
@@ -192,8 +193,17 @@ function _deleteEchoEntry(pendingSet, value) {
 export default function DMChatScreen({ navigation, route }) {
   const { state, dispatch } = useApp();
   const insets = useSafeAreaInsets();
-  const { threadId, peer } = route?.params || {};
+  const { threadId, peer, foreignKid } = route?.params || {};
   const screenReady = !!state.isLoggedIn && !!threadId;
+
+  // The contact this thread belongs to, when it is a mailbox rather than a
+  // local conversation. Looked up rather than taken from the route alone: a
+  // notification can land here without one, and every branch below that asks
+  // this island about the peer is wrong for a thread whose peer has no account
+  // on it.
+  const [foreignContact, setForeignContact] = useState(null);
+  const foreignRef = useRef(null);
+  foreignRef.current = foreignContact;
 
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
@@ -226,6 +236,17 @@ export default function DMChatScreen({ navigation, route }) {
 
   async function handleReport() {
     if (!peer) return;
+    if (foreignContact) {
+      // Reports go to the moderators of the island the account is on. This
+      // person has no account here, so there is nobody here to report them to —
+      // and naming them to our server would only leak who we talk to.
+      Alert.alert(
+        'Not here',
+        `${foreignContact.displayName} has no account on this server, so its moderators cannot ` +
+        'act on a report. Removing the contact closes their mailbox and stops them writing to you.',
+      );
+      return;
+    }
     setReporting(true);
     try {
       await NetworkService.reportUser(peer, reportReason, reportComment.trim());
@@ -411,18 +432,37 @@ export default function DMChatScreen({ navigation, route }) {
     _initialScrollDoneRef.current = false;
 
     (async () => {
+      // Before any key work: which kind of thread this is decides where the
+      // key comes from and who may be asked about the sender.
+      const contact = await ForeignService.forThread(threadId)
+        || (foreignKid ? await ForeignService.getContact(foreignKid) : null);
+      if (!_initActiveRef.current) return;
+      setForeignContact(contact || null);
+
       const ok = await CryptoService.ensureReady({ interactive: false });
       if (!_initActiveRef.current) return; // thread changed while awaiting
       if (ok) {
         setCryptoReady(true);
         // Load DM key BEFORE fetching history — otherwise decryptBatch fails silently
-        await CryptoService.ensureDmKeyReady(threadId, peer).catch(e =>
-          console.warn('[DMChat] ensureDmKeyReady failed:', e?.message));
+        if (contact) {
+          // Both directions' keys came with the contact; this island has none
+          // for a mailbox and asking it would mint one nobody can read.
+          await ForeignService.ensureKeysReady(contact).catch(e =>
+            console.warn('[DMChat] foreign keys not ready:', e?.message));
+        } else {
+          await CryptoService.ensureDmKeyReady(threadId, peer).catch(e =>
+            console.warn('[DMChat] ensureDmKeyReady failed:', e?.message));
+        }
         if (!_initActiveRef.current) return;
         // NOTE: _dmKeyReadyRef stays false here — WS messages queue in _pendingIncomingRef.
         // Gate opens AFTER SET_DM_MESSAGES to prevent WS messages being wiped by SET.
         // (mirrors ChatScreen._roomKeyReadyRef pattern)
-        await loadPeerKeyForSafetyNumber();
+        if (contact) {
+          // Their number is computed from the card, not from a key server.
+          await showForeignSafety(contact);
+        } else {
+          await loadPeerKeyForSafetyNumber();
+        }
         if (!_initActiveRef.current) return;
       }
 
@@ -586,7 +626,16 @@ export default function DMChatScreen({ navigation, route }) {
       setCryptoReady(true);
       // Load DM key if it wasn't loaded during init (crypto wasn't ready then)
       if (!_dmKeyReadyRef.current) {
-        await CryptoService.ensureDmKeyReady(threadId, peer).catch(() => {});
+        // Never down the local path for a mailbox: ensureDmKeyReady would find
+        // no key on this island, take the 404 as "create one and share it with
+        // the peer", and replace the key this conversation is actually
+        // encrypted under — with one addressed to somebody who has no account
+        // here. The contact carries both keys already.
+        if (foreignRef.current) {
+          await ForeignService.ensureKeysReady(foreignRef.current).catch(() => {});
+        } else {
+          await CryptoService.ensureDmKeyReady(threadId, peer).catch(() => {});
+        }
         // If init effect is still running, it will open the gate itself after SET_DM_MESSAGES.
         // Opening the gate here would let APPEND_DM_MESSAGE interleave before SET, causing those
         // messages to be wiped when SET fires. Loading the key above is still useful — it makes
@@ -631,6 +680,24 @@ export default function DMChatScreen({ navigation, route }) {
 
     return () => { unsubLocked(); unsub(); unsubDmKey(); };
   }, [screenReady, threadId]);
+
+  /**
+   * The safety number for a cross-island contact.
+   *
+   * Nothing is fetched and nothing is pinned here: their key arrived in the
+   * card, the card is the pin, and the number is what confirms it was theirs.
+   * "Verified" and "key changed" belong to the local TOFU store, which knows
+   * nothing about a person with no account on this island.
+   */
+  async function showForeignSafety(contact) {
+    try {
+      const sn = await ForeignService.safetyNumber(contact);
+      setSafetyNumber(sn?.safetyNumber || null);
+      setPeerPubKey(contact.x25519PubB64 || null);
+      setPeerKeyVerified(false);
+      setPeerKeyChanged(false);
+    } catch (_e) { /* the conversation still works without the number */ }
+  }
 
   async function loadPeerKeyForSafetyNumber() {
     if (!screenReady || !peer) return;
@@ -705,9 +772,12 @@ export default function DMChatScreen({ navigation, route }) {
     (async () => {
       const dec = normMsg(await tryDecrypt(p));
       dispatch({ type: 'APPEND_DM_MESSAGE', threadId, message: dec });
-      // TOFU: check sender's key on each incoming DM (extension parity)
+      // TOFU: check sender's key on each incoming DM (extension parity).
+      // Never for a cross-island sender: that check asks THIS island for their
+      // key, which it has never had, so it would answer 404 for every message
+      // of an honest conversation — and their key is pinned by the card anyway.
       const sender = dec.author || dec.username || dec.from;
-      if (sender) CryptoService.checkAndAlertKeyChange(sender).catch(() => {});
+      if (sender && !foreignRef.current) CryptoService.checkAndAlertKeyChange(sender).catch(() => {});
     })();
   }
 
@@ -788,8 +858,15 @@ export default function DMChatScreen({ navigation, route }) {
         }
 
         // Sealed sender: "from" should be either the peer or ourselves.
+        //
+        // Not across islands, where the name is not the identity: the signature
+        // above was checked against the key their card pinned, and that is what
+        // says who wrote this. A name that does not match their card name is
+        // then only a name — while a name that does match but was not signed by
+        // that key is already flagged above.
         const meLower = (myUsername || '').toLowerCase();
-        if (from && peer && from.toLowerCase() !== String(peer).toLowerCase() && from.toLowerCase() !== meLower) {
+        if (!foreignRef.current && from && peer
+            && from.toLowerCase() !== String(peer).toLowerCase() && from.toLowerCase() !== meLower) {
           console.warn('[DMChat] sealed sender mismatch — from:', from, 'expected:', peer);
           return { ...base, _decrypted: messageText, ...replyProp, author: from, username: from, _sealedSenderMismatch: true };
         }
@@ -1002,6 +1079,19 @@ export default function DMChatScreen({ navigation, route }) {
   }
 
   function showAttachMenu() {
+    if (foreignContact) {
+      // A file lives on the island it was uploaded to, and is fetched with an
+      // account there. A cross-island contact has no account here, so a file
+      // sent this way would reach nobody — the marker would land in our own
+      // mailbox and the download would be ours alone. Refusing is the honest
+      // answer until the transfer itself crosses the border.
+      Alert.alert(
+        'Not yet',
+        `Files cannot be sent to someone on another server yet — ${foreignContact.displayName} has ` +
+        'no account on this one to download from. Text messages work.',
+      );
+      return;
+    }
     Alert.alert(
       'Attach',
       null,
@@ -1011,6 +1101,70 @@ export default function DMChatScreen({ navigation, route }) {
         { text: 'Cancel', style: 'cancel' },
       ],
     );
+  }
+
+  /**
+   * Send to somebody on another island.
+   *
+   * Two deliveries, one ciphertext: their island, where they will read it, and
+   * ours, so our own outgoing half survives a reinstall. ForeignService owns
+   * both; what belongs here is the bubble and what to say when their server did
+   * not answer — the message is kept and repeated, which is not an error to
+   * report as one, but is also not silence.
+   */
+  async function sendToForeign(payload, text) {
+    const contact = await ForeignService.getContact(foreignContact.kid) || foreignContact;
+    const outcome = await ForeignService.sendMessage(contact, payload);
+
+    // The ciphertext is what the server echoes back to us; registering it here
+    // is what stops the echo turning into a second bubble.
+    if (outcome?.ciphertext) {
+      _addEchoEntry(_pendingSentRef.current, outcome.ciphertext);
+      const t = setTimeout(() => {
+        _deleteEchoEntry(_pendingSentRef.current, outcome.ciphertext);
+        _echoTimersRef.current.delete(t);
+      }, 30000);
+      _echoTimersRef.current.add(t);
+    }
+
+    let localCiphertextB64 = null;
+    try {
+      localCiphertextB64 = btoa(outcome.ciphertext).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    } catch (_e) {}
+    if (localCiphertextB64 && myUsername) {
+      _sentBySelfSet(localCiphertextB64, { author: myUsername, username: myUsername });
+    }
+
+    setReplyTo(null);
+    dispatch({
+      type: 'APPEND_DM_MESSAGE',
+      threadId,
+      message: {
+        id: `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        author: myUsername,
+        username: myUsername,
+        body: text,
+        text,
+        _decrypted: text,
+        ts: Date.now(),
+        _localCiphertextB64: localCiphertextB64,
+        ...(replyTo ? { _reply: { id: replyTo.id, author: replyTo.author, text: replyTo.text } } : {}),
+      },
+    });
+
+    // Refresh what the screen holds: a first send claims their mailbox, and the
+    // contact it was claimed into is the one the next send needs.
+    ForeignService.getContact(foreignContact.kid).then((c) => {
+      if (c) setForeignContact(c);
+    }).catch(() => {});
+
+    if (outcome && outcome.queued) {
+      Alert.alert(
+        'Queued',
+        'Their server did not answer. The message is kept and will be sent as soon as it can be — ' +
+        'you can close the app.',
+      );
+    }
   }
 
   async function handleSend() {
@@ -1042,6 +1196,12 @@ export default function DMChatScreen({ navigation, route }) {
       const payload = replyTo
         ? JSON.stringify({ v: 2, t: text, reply: { id: replyTo.id, author: replyTo.author, text: replyTo.text } })
         : text;
+
+      if (foreignContact) {
+        await sendToForeign(payload, text);
+        return;
+      }
+
       const encryptedBody = await CryptoService.encryptDm(threadId, payload, peer, myUsername);
       if (!encryptedBody) {
         Alert.alert('Encryption failed', 'Could not encrypt message. The DM key may not be established yet — please try again in a moment.');
@@ -1380,6 +1540,9 @@ export default function DMChatScreen({ navigation, route }) {
             <Text style={styles.safetyTitle}>Safety Number</Text>
             <Text style={styles.safetySubtitle}>
               Compare this number with {peer} in person or via a trusted channel.
+              {foreignContact
+                ? ' It is computed from the key in their contact card, not from either server.'
+                : ''}
             </Text>
 
             {peerKeyChanged && (
@@ -1394,12 +1557,18 @@ export default function DMChatScreen({ navigation, route }) {
 
             {/* Verification status */}
             <Text style={[styles.verifyStatus, peerKeyVerified && styles.verifyStatusOk]}>
-              {peerKeyChanged ? '' : peerKeyVerified ? 'Verified' : 'Not yet verified'}
+              {foreignContact
+                ? `Pinned by their card · ${foreignContact.kid.slice(0, 8)}`
+                : peerKeyChanged ? '' : peerKeyVerified ? 'Verified' : 'Not yet verified'}
             </Text>
 
             {/* Action buttons */}
             <View style={styles.safetyActions}>
-              {(!peerKeyVerified || peerKeyChanged) && (
+              {/* "I verified this" records a pin under a username on THIS island.
+                  A cross-island contact has none: the card is the pin, and a
+                  second one under a display name would only be a store nothing
+                  reads back. */}
+              {!foreignContact && (!peerKeyVerified || peerKeyChanged) && (
                 <TouchableOpacity
                   style={styles.verifyBtn}
                   onPress={async () => {

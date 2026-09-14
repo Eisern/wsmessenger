@@ -13,6 +13,7 @@ import { Alert } from 'react-native';
 import NetworkService from '../services/NetworkService';
 import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
+import ForeignService from '../services/ForeignService';
 
 // ==============================
 // State shape
@@ -413,6 +414,9 @@ export function AppProvider({ children }) {
 
   const logout = useCallback(async () => {
     CryptoService.lockSession();
+    // Cross-island contacts are filed under (island, me); the cache in front of
+    // that store would otherwise still answer for the account that just left.
+    ForeignService.clearCache();
     await NetworkService.logout();
     await StorageService.clearAll();
     dispatch({ type: 'CLEAR_AUTH' });

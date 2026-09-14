@@ -150,6 +150,14 @@ const _threadChain = TC.createThreadChain({
 const _ed25519PubKeyCache = new Map();    // username_lower → { key: Uint8Array(32)|null, ts }
 const _ED25519_ABSENT_TTL_MS = 5 * 60 * 1000;
 
+// Cross-island contacts, required at call time rather than imported.
+// ForeignService is built on this module - it signs cards and claims with the
+// identity held here - so a static import back would be a cycle, and the decrypt
+// path is the only thing on this side that needs it.
+function _foreign() {
+  return require('./ForeignService').default;
+}
+
 // ==============================
 // Public API
 // ==============================
@@ -934,10 +942,25 @@ const CryptoService = {
     try {
       CryptoService.resetIdleTimer();
       const rid = CryptoService._dmRid(threadId);
+
+      // A cross-island thread has no key on this island and no peer here to
+      // share one with. Left to the local path, a missing key becomes "the
+      // server has none, so create and share one" - which would mint a key for
+      // a mailbox the other side cannot read, addressed to a display name that
+      // is not a username here. Its keys came with the contact instead.
+      const foreign = await _foreign().forThread(threadId);
+      if (foreign) {
+        try {
+          await _foreign().ensureKeysReady(foreign);
+        } catch (e) {
+          console.warn('[decryptDm] foreign keys not ready:', e?.message);
+        }
+      }
+
       // Pass null for peerUsername — on RECEIVE path we must NOT create a new key.
       // Creating a new key here would replace the key the sender used, making decryption impossible.
       // Key creation only happens on the SEND path (encryptDm passes peerUsername).
-      if (!cryptoManager.roomKeys.has(rid)) {
+      if (!foreign && !cryptoManager.roomKeys.has(rid)) {
         await CryptoService.ensureDmKeyReady(threadId, null).catch((e) => {
           console.warn('[decryptDm] ensureDmKeyReady threw:', e?.message);
         });
@@ -950,6 +973,9 @@ const CryptoService = {
       } catch (decryptErr) {
         // Key mismatch — force-reload from server and retry.
         // Happens when Extension used a different key version than what Android has in memory.
+        // Never for a cross-island thread: this island holds no key for a
+        // mailbox, so the reload would 404 and the retry would fail anyway.
+        if (foreign) return null;
         if (__DEV__) console.warn('[decryptDm] decryptMessage failed:', decryptErr?.message, '— force-reloading key from server');
         try {
           await CryptoService._loadDmKey(threadId);
@@ -974,19 +1000,53 @@ const CryptoService = {
           let sigMsgBytes = null;
           if (sig && from) {
             try {
-              const peerPubKey = await CryptoService._fetchPeerEd25519PubKey(from);
+              // Resolved, not read off NetworkService: after a fresh sign-in
+              // that field is empty (the login response carries no name), and
+              // taking it at face value here would make our own copies look
+              // like somebody else's - verified against the contact's key, and
+              // reported as forged.
+              const mine = String(from).trim().toLowerCase() === await _resolveUsername();
+              // A cross-island contact has no entry in this island's key store,
+              // and should not need one: their signing key came from the card,
+              // out of band. Verifying against that is strictly stronger than
+              // verifying against whatever a key server hands over - it is what
+              // stops a dishonest island forging messages from them. Our own
+              // key needs no lookup at all; it is already unlocked.
+              const peerPubKey = (foreign && !mine && foreign.ed25519PubB64)
+                ? new Uint8Array(CryptoUtils.base64ToArrayBuffer(foreign.ed25519PubB64))
+                : (mine && CryptoService.isReady())
+                  ? CryptoService.ed25519PublicKey()
+                  : await CryptoService._fetchPeerEd25519PubKey(from);
               if (peerPubKey) {
                 // v2 when the envelope carries its place in the sender's chain,
                 // v1 otherwise. Which one was signed is inside the signature
                 // (the domain prefix differs), so stripping sq/pv to force a v1
                 // check does not downgrade anything - it just fails.
                 const chained = Number.isInteger(inner.sq) && /^[0-9a-f]{64}$/.test(inner.pv || '');
-                const sigMsg = chained
-                  ? CryptoUtils._dmSigMessageV2(threadId, inner.sq, inner.pv, from, String(inner.body))
-                  : CryptoUtils._dmSigMessage(threadId, from, String(inner.body));
-                sigMsgBytes = chained ? sigMsg : null;
+
+                // A signature covers the thread the message was DELIVERED to.
+                // In a cross-island conversation that is not always the thread
+                // it is read in: our own copy of what we sent went to the
+                // peer's mailbox on their island and is kept here only so the
+                // history is whole. Verifying it against this thread's number
+                // fails - correctly, on the wrong question - and accuses us of
+                // forging our own messages. Both numbers are tried, because not
+                // every message of ours went abroad; anybody who could produce
+                // either signature already holds our signing key.
+                const tids = [];
+                if (foreign && mine && foreign.outbox?.threadId) tids.push(foreign.outbox.threadId);
+                tids.push(threadId);
+
                 const sigBytes = new Uint8Array(CryptoUtils.base64ToArrayBuffer(sig));
-                sigValid = CryptoUtils.ed25519Verify(peerPubKey, sigBytes, sigMsg);
+                let sigMsg = null;
+                for (const tid of tids) {
+                  sigMsg = chained
+                    ? CryptoUtils._dmSigMessageV2(tid, inner.sq, inner.pv, from, String(inner.body))
+                    : CryptoUtils._dmSigMessage(tid, from, String(inner.body));
+                  sigValid = CryptoUtils.ed25519Verify(peerPubKey, sigBytes, sigMsg);
+                  if (sigValid === true) break;
+                }
+                sigMsgBytes = chained ? sigMsg : null;
                 if (!sigValid) {
                   if (__DEV__) console.warn('[CryptoService] DM Ed25519 signature INVALID — from:', from, 'thread:', threadId);
                 }
@@ -1345,6 +1405,18 @@ const CryptoService = {
     } catch (e) {
       console.warn('[CryptoService] Ed25519 key registration failed:', e?.message);
     }
+  },
+
+  /**
+   * Who is signed in, resolved the way every key path here resolves it.
+   *
+   * `/auth/login` answers with tokens and no name, so NetworkService.username
+   * is empty for the whole first session after a fresh sign-in - the same race
+   * that once put an empty `from` into sealed envelopes. The persisted active
+   * user is the fallback, and it is written at login.
+   */
+  async activeUsername() {
+    return _resolveUsername();
   },
 
   /**

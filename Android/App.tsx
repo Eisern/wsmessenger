@@ -49,6 +49,7 @@ import StorageService from './src/services/StorageService';
 import NetworkService from './src/services/NetworkService';
 import NotificationService from './src/services/NotificationService';
 import CryptoService from './src/services/CryptoService';
+import ForeignService from './src/services/ForeignService';
 import { CryptoUtils } from './src/crypto';
 
 // Screens
@@ -437,6 +438,10 @@ function RootNavigator() {
     const s = stateRef.current;
     if (s.currentRoomId) NotificationService.cancelRoom(s.currentRoomId);
     if (s.currentDmThreadId) NotificationService.cancelDm(s.currentDmThreadId);
+    // Coming back is usually also the moment connectivity did. A cross-island
+    // message that could not be delivered is waiting for exactly this; the
+    // queue decides on its own what is due, so this costs nothing when empty.
+    if (s.isLoggedIn) ForeignService.drainOutbox().catch(() => {});
   }
 
   function _handleBackground() {
@@ -520,7 +525,12 @@ function RootNavigator() {
       const thread = (dmThreadsRef.current || []).find(
         t => String(t.thread_id || t.id) === threadId
       );
-      const peer = thread?.peer_username;
+      // A cross-island mailbox is not in /dm/list — it has no second member and
+      // so no pair row. Without this it has no peer name here, and a message
+      // arriving while its screen is closed would be stored as ciphertext with
+      // nothing saying it could be read.
+      const foreignContact = thread ? null : await ForeignService.forThread(threadId);
+      const peer = thread?.peer_username || foreignContact?.displayName;
 
       // Try to decrypt if crypto is already unlocked (no interactive prompt here)
       let normalized = { ...p };
@@ -636,7 +646,9 @@ function RootNavigator() {
           const thread = (st.dmThreads || []).find(
             t => String(t.thread_id || t.id) === String(msg.thread_id)
           );
-          const peer = thread?.peer_username || msg.author || msg.username || msg.from || 'Someone';
+          const peer = thread?.peer_username
+            || ForeignService.cachedForThread(msg.thread_id)?.displayName
+            || msg.author || msg.username || msg.from || 'Someone';
           NotificationService.showDmMessage({
             threadId: msg.thread_id,
             peer,
