@@ -81,6 +81,16 @@ const V = {
   dmSigMessageEmpty: '77732d646d2d7369672d7631000000000000',
   dmSigMessageUnicode: '77732d646d2d7369672d7631ffffffff0006d096d0a3d09ad0bad0bbd18ed18720e29aa1',
 
+  // "ws-keywrap-v1" ‖ u8 len(scope) ‖ scope ‖ u32BE(scopeId)
+  //   ‖ u16BE len(signer) ‖ signer ‖ u16BE len(recipient) ‖ recipient
+  //   ‖ u16BE len(keyId) ‖ keyId ‖ eph_pub ‖ iv ‖ ciphertext
+  // A key wrap that says who wrapped it. Pinned because a disagreement here
+  // means one client refuses keys the other hands out.
+  keyWrapSigMessage:
+    '77732d6b6579777261702d76310472' + '6f6f6d' + '0000002a' +
+    '0005616c696365' + '00036' + '26f62' + '0004' + '6b696431' +
+    'aa'.repeat(32) + 'bb'.repeat(12) + 'cc'.repeat(8),
+
   bip39:
     'absurd avoid scissors anxiety gather lottery category door army half long cage ' +
     'bachelor another expect people blade school educate curtain scrub monitor lady beyond',
@@ -131,6 +141,12 @@ const CASES = [
   ['_roomSigMessage (unicode, max room id)', async (U) => hex(await U._roomSigMessage(4294967295, 'ЖУК', 'ключ ⚡')), V.roomSigMessageUnicode],
   ['_dmSigMessageV2', async (U) => hex(await U._dmSigMessageV2(42, 7, 'aa'.repeat(32), 'alice', 'hello world')), V.dmSigMessageV2],
   ['_dmSigMessageV2 (genesis)', async (U) => hex(await U._dmSigMessageV2(1, 1, '00'.repeat(32), '', '')), V.dmSigMessageV2Genesis],
+  ['_keyWrapSigMessage', async (U) => hex(U._keyWrapSigMessage({
+    scope: 'room', scopeId: 42, signer: 'alice', recipient: 'bob', keyId: 'kid1',
+    ephemPub: new Uint8Array(32).fill(0xaa),
+    iv: new Uint8Array(12).fill(0xbb),
+    ciphertext: new Uint8Array(8).fill(0xcc),
+  })), V.keyWrapSigMessage],
   ['bip39Encode', async (U) => U.bip39Encode(PRIV), V.bip39],
   ['deriveEd25519Seed', async (U) => hex(await U.deriveEd25519Seed(PRIV)), V.deriveEd25519Seed],
   ['deriveRecoveryAuth', async (U) => hex(await U.deriveRecoveryAuth(PRIV)), V.deriveRecoveryAuth],
@@ -173,6 +189,53 @@ describe('round trips agree across clients', () => {
     expect(v1).not.toBe(V.safetyNumberV2);
     expect(await AND.computeSafetyNumber('alice', PUB2_B64, 'bob', PUB_B64)).toBe(v1);
   });
+
+  // A key wrapped on a phone has to be openable in a browser, and the name and
+  // signature inside it have to survive the trip - otherwise one client refuses
+  // keys the other hands out, which looks exactly like an attack.
+  it.each([['extension wraps, Android opens', 'EXT', 'AND'], ['Android wraps, extension opens', 'AND', 'EXT']])(
+    '%s',
+    async (_name, fromName, toName) => {
+      const FROM = fromName === 'EXT' ? EXT : AND;
+      const TO = toName === 'EXT' ? EXT : AND;
+
+      const seed = await FROM.deriveEd25519Seed(PRIV);
+      const signerEdPub = await FROM.ed25519GetPublicKey(seed);
+      const roomKeyB64 = await FROM.exportRoomKey(await FROM.generateRoomKey(true));
+      const kid = await FROM.fingerprintRoomKeyBase64(roomKeyB64);
+
+      // A real pair, so the blob can actually be opened on the other side:
+      // PUB_B64 above is a fabricated 32 bytes with no private half.
+      const { x25519 } = require('@noble/curves/ed25519');
+      const recipientPriv = x25519.utils.randomSecretKey();
+      const recipientPubB64 = Buffer.from(x25519.getPublicKey(recipientPriv)).toString('base64');
+      const pkcs8 = Buffer.concat([
+        Buffer.from('302e020100300506032b656e042204 20'.replace(/ /g, ''), 'hex'),
+        Buffer.from(recipientPriv),
+      ]).toString('base64');
+
+      const wrapped = await FROM.encryptRoomKeyForUser(recipientPubB64, roomKeyB64, {
+        seed, signer: 'alice', scope: 'room', scopeId: 42, recipient: 'bob', keyId: kid,
+      });
+
+      const info = TO.inspectWrappedKey(wrapped, {
+        scope: 'room', scopeId: 42, recipient: 'bob', keyId: kid,
+      });
+      expect(info.version).toBe(3);
+      expect(info.signer).toBe('alice');
+      expect(await TO.ed25519Verify(signerEdPub, info.sig, info.sigMessage)).toBe(true);
+
+      const priv = await TO.importPrivateKey(pkcs8);
+      expect(await TO.decryptRoomKeyForUser(priv, wrapped)).toBe(roomKeyB64);
+
+      // The same blob under a different room, member or key id must NOT verify:
+      // that is what stops a genuine wrap being re-filed somewhere else.
+      const elsewhere = TO.inspectWrappedKey(wrapped, {
+        scope: 'room', scopeId: 43, recipient: 'bob', keyId: kid,
+      });
+      expect(await TO.ed25519Verify(signerEdPub, elsewhere.sig, elsewhere.sigMessage)).toBe(false);
+    },
+  );
 
   it('bip39 decodes on either side what the other encoded', async () => {
     const fromExt = await EXT.bip39Encode(PRIV);

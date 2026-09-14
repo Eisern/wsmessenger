@@ -85,6 +85,68 @@ const CHAIN_WRITE_ENABLED = false;
 // server wrote in the row. The signature makes that claim checkable.
 const ROOM_SIG_WRITE_ENABLED = false;
 
+// Signing the key WRAP is staged the same way, and for a harder reason: a
+// signed wrap is a new blob format (v3), and a client that only knows v2 cannot
+// open it at all - it would see a room it can no longer read. Readers first
+// (this build understands both), then this flag.
+//
+// What it is for: the wrap derives from an ephemeral key, so it says only that
+// somebody who knew your public key made it, and the row is written by the
+// server. A signature inside the blob makes "who gave me this key" answerable.
+const KEY_WRAP_SIG_WRITE_ENABLED = false;
+
+/**
+ * Signing options for a key wrap, or null when that is switched off.
+ *
+ * One place, so every path that hands out a key signs the same thing: a wrap
+ * bound to another room, member or key version cannot be moved there.
+ */
+function wrapSignOpts(scopeId, recipient, keyId, scope = "room") {
+  if (!KEY_WRAP_SIG_WRITE_ENABLED) return null;
+  const signer = getMeUsername();
+  const seed = CM()?.ed25519Seed;
+  if (!signer || !seed) return null;
+  return { seed, signer, scope, scopeId, recipient, keyId };
+}
+
+/**
+ * Decide whether a wrapped key may be used at all.
+ *
+ * An unsigned wrap (v2) is everything handed out before signing existed, so it
+ * passes - refusing those would lock people out of their own rooms. A signed
+ * one has to hold up: checked against the ed25519 key of whoever the blob
+ * names, over bytes that bind this room, this recipient and this key version.
+ * A wrap that fails is not "unverified" - it is a key from somebody who could
+ * not have wrapped it, and it is refused.
+ */
+async function checkWrapSignature(encryptedB64, { scope, scopeId, keyId }) {
+  const me = getMeUsername();
+  let info;
+  try {
+    info = CU().inspectWrappedKey(encryptedB64, { scope, scopeId, keyId, recipient: me });
+  } catch (e) {
+    console.warn("[keywrap] unreadable wrapped key:", e?.message || e);
+    return false;
+  }
+  if (!info.signed) return true;
+
+  try {
+    const pub = (me && info.signer.toLowerCase() === String(me).toLowerCase() && CM()?.ed25519Seed)
+      ? await CU().ed25519GetPublicKey(CM().ed25519Seed)
+      : await fetchPeerEd25519PubKey(info.signer);
+    if (!pub) {
+      console.warn(`[keywrap] no signing key known for ${info.signer} - refusing the key`);
+      return false;
+    }
+    const ok = await CU().ed25519Verify(pub, info.sig, info.sigMessage);
+    if (!ok) console.warn(`[keywrap] signature from ${info.signer} does not hold - refusing the key`);
+    return ok;
+  } catch (e) {
+    console.warn("[keywrap] signature check could not run:", e?.message || e);
+    return false;
+  }
+}
+
 const _threadChain = (globalThis.WSThreadChain || null) && globalThis.WSThreadChain.createThreadChain({
   sha256: async (bytes) => new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
 });
@@ -920,7 +982,9 @@ async function createAndSaveRoomKeyForMe(roomId) {
     const pub = CM()?.userPublicKeyPem;
     if (!pub) throw new Error("User public key not available");
 
-    const encryptedForMe = await CU().encryptRoomKeyForUser(pub, roomKeyBase64);
+    const encryptedForMe = await CU().encryptRoomKeyForUser(
+      pub, roomKeyBase64, wrapSignOpts(rid, getMeUsername(), keyId),
+    );
 
     const token = await requestToken();
     if (!token) throw new Error("No token");
@@ -1059,7 +1123,9 @@ async function rotateRoomKey(roomId, { kickedUsername = "" } = {}) {
         }
 
         await assertPeerKeyTrustedForSharing(uname, "sharing room key", { peerPublicKeyB64: pkBody.public_key });
-        const encryptedForMember = await cu.encryptRoomKeyForUser(pkBody.public_key, newKeyBase64);
+        const encryptedForMember = await cu.encryptRoomKeyForUser(
+          pkBody.public_key, newKeyBase64, wrapSignOpts(rid, uname, keyId),
+        );
         preparedShares.push({ uname, encryptedForMember });
       } catch (e) {
         console.warn(`[KeyRotation] Preflight failed for ${uname}:`, e?.message || e);
@@ -1145,7 +1211,9 @@ async function rotateRoomKey(roomId, { kickedUsername = "" } = {}) {
     // 6. Persist the new key for the owner only after all recipient shares
     // have succeeded, so the room switches generations as atomically as the
     // current API allows.
-    const encryptedForMe = await cu.encryptRoomKeyForUser(myPub, newKeyBase64);
+    const encryptedForMe = await cu.encryptRoomKeyForUser(
+      myPub, newKeyBase64, wrapSignOpts(rid, getMeUsername(), keyId),
+    );
     let ownerSaved = false;
     let ownerSaveError = "";
 
@@ -1399,6 +1467,9 @@ async function loadRoomKeyArchiveFromServer(roomId) {
       if (!encrypted) continue;
       const kidHint = String(entry?.key_id || "").trim().toLowerCase();
       if (kidHint && existing.has(kidHint)) continue;
+      // An archived key opens old messages, so a forged one is worth as much to
+      // an attacker as a current one.
+      if (!await checkWrapSignature(encrypted, { scope: "room", scopeId: rid, keyId: kidHint })) continue;
       try {
         const keyBase64 = await cu.decryptRoomKeyForUser(cm.userPrivateKey, encrypted);
         const kid = kidHint || await cu.fingerprintRoomKeyBase64(keyBase64);
@@ -1485,6 +1556,12 @@ async function loadRoomKey(roomId) {
     if (!data?.encrypted_room_key) {
       console.warn("room key response has no encrypted_room_key");
       return { ok: false, error: true };
+    }
+
+    if (!await checkWrapSignature(data.encrypted_room_key, {
+      scope: "room", scopeId: rid, keyId: String(data.key_id || ""),
+    })) {
+      return { ok: false, refused: true };
     }
 
     const roomKeyBase64 = await CU().decryptRoomKeyForUser(
@@ -1620,6 +1697,7 @@ async function loadDmKeyArchiveFromServer(threadId) {
       if (!encrypted) continue;
       const kidHint = String(entry?.key_id || "").trim().toLowerCase();
       if (kidHint && existing.has(kidHint)) continue;
+      if (!await checkWrapSignature(encrypted, { scope: "dm", scopeId: threadId, keyId: kidHint })) continue;
       try {
         const keyBase64 = await cu.decryptRoomKeyForUser(cm.userPrivateKey, encrypted);
         const kid = kidHint || await cu.fingerprintRoomKeyBase64(keyBase64);
@@ -1705,6 +1783,12 @@ async function loadDmKey(threadId, { interactive = false } = {}) {
   if (!cm?.userPrivateKey) return { ok: false, locked: true };
   if (!cu?.decryptRoomKeyForUser) throw new Error("Crypto utils not available");
 
+  if (!await checkWrapSignature(body.encrypted_thread_key, {
+    scope: "dm", scopeId: threadId, keyId: String(body.key_id || ""),
+  })) {
+    return { ok: false, refused: true };
+  }
+
   const keyBase64 = await cu.decryptRoomKeyForUser(
     cm.userPrivateKey,
     body.encrypted_thread_key
@@ -1729,7 +1813,9 @@ async function createAndShareDmKey(threadId, peerUsername) {
 
   const myPub = CM().userPublicKeyPem;
   if (!myPub) throw new Error("No my public key");
-  const encryptedForMe = await CU().encryptRoomKeyForUser(myPub, keyBase64);
+  const encryptedForMe = await CU().encryptRoomKeyForUser(
+    myPub, keyBase64, wrapSignOpts(threadId, getMeUsername(), keyId, "dm"),
+  );
 
   const peerPub = await fetchPeerPublicKey(peerUsername);
   await assertPeerKeyTrustedForSharing(peerUsername, "sharing DM key", { peerPublicKeyB64: peerPub });
@@ -1748,7 +1834,9 @@ async function createAndShareDmKey(threadId, peerUsername) {
     throw new Error(`Peer "${peerUsername}" public key is not valid base64: ${e.message}`);
   }
 
-  const encryptedForPeer = await CU().encryptRoomKeyForUser(peerPub, keyBase64);
+  const encryptedForPeer = await CU().encryptRoomKeyForUser(
+    peerPub, keyBase64, wrapSignOpts(threadId, peerUsername, keyId, "dm"),
+  );
   {
     const r = await fetch(API_BASE + `/crypto/dm-key`, {
       method: "POST",
@@ -2347,8 +2435,10 @@ async function shareRoomKeyToUser(roomId, targetUsername, { interactive = true, 
   // null = skipped (cooldown / crypto not ready) — proceed; changed:true = block.
   await assertPeerKeyTrustedForSharing(uname, "sharing the room key", { peerPublicKeyB64: inviteePubKeyB64 });
 
-  const encryptedForInvitee = await CU().encryptRoomKeyForUser(inviteePubKeyB64, roomKeyBase64);
   const keyId = CM()?.roomKeyIds?.get(rid) || await CU().fingerprintRoomKeyBase64(roomKeyBase64);
+  const encryptedForInvitee = await CU().encryptRoomKeyForUser(
+    inviteePubKeyB64, roomKeyBase64, wrapSignOpts(rid, uname, keyId),
+  );
 
   const r2 = await fetch(
     API_BASE + `/crypto/room/${rid}/share?target_username=${encodeURIComponent(uname)}`,

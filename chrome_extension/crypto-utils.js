@@ -231,6 +231,113 @@ const CryptoUtils = {
   // ============================
   // Constants
   // ============================
+  // ============================
+  // Signed key wrap (v3)
+  // ============================
+  //
+  // The v2 wrap above is anonymous: it derives from an EPHEMERAL key, so the
+  // recipient learns that somebody who knew their public key wrapped this, and
+  // nothing more. The rows are written by the server. So a server can hand a
+  // member a room key of its own choosing, that member encrypts under it, and
+  // the server reads the room - with no signature anywhere to contradict it.
+  //
+  // v3 carries the sharer's name and their signature over everything that
+  // matters, INSIDE the blob. Inside, because a field beside it is a field the
+  // server can simply drop; changing the blob instead breaks decryption.
+  //
+  //   0x03 | eph_pub(32) | iv(12) | sig(64) | signer_len(1) | signer | ct+tag
+  //
+  // What the signature covers binds the wrap to one place and one recipient, so
+  // a blob cannot be re-filed as another room's key or another member's copy:
+  //
+  //   "ws-keywrap-v1" | u8 len(scope) | scope | u32BE(scopeId)
+  //                   | u16BE len(signer)    | signer
+  //                   | u16BE len(recipient) | recipient
+  //                   | u16BE len(keyId)     | keyId
+  //                   | eph_pub | iv | ciphertext
+  //
+  // Verifying is deliberately NOT done here: this file decides nothing about
+  // trust. It says who claims to have wrapped the key and hands over the bytes
+  // they signed; whether that person was entitled to give you this key is a
+  // question about rooms and members, and belongs where those are known.
+  _WRAP_VERSION_SIGNED: 0x03,
+  _WRAP_SIG_LEN: 64,
+  _KEYWRAP_DOMAIN: "ws-keywrap-v1",
+
+  /** The exact bytes a sharer signs. Both clients must produce these identically. */
+  _keyWrapSigMessage({ scope, scopeId, signer, recipient, keyId, ephemPub, iv, ciphertext }) {
+    const enc = new TextEncoder();
+    const domainB = enc.encode(this._KEYWRAP_DOMAIN);
+    const scopeB = enc.encode(String(scope || ""));
+    const signerB = enc.encode(String(signer || ""));
+    const recipB = enc.encode(String(recipient || ""));
+    const keyIdB = enc.encode(String(keyId || ""));
+    const total = domainB.length + 1 + scopeB.length + 4
+      + 2 + signerB.length + 2 + recipB.length + 2 + keyIdB.length
+      + ephemPub.length + iv.length + ciphertext.length;
+    const buf = new Uint8Array(total);
+    const dv = new DataView(buf.buffer);
+    let off = 0;
+    buf.set(domainB, off); off += domainB.length;
+    buf[off++] = scopeB.length & 0xff;
+    buf.set(scopeB, off); off += scopeB.length;
+    dv.setUint32(off, (parseInt(scopeId, 10) >>> 0), false); off += 4;
+    dv.setUint16(off, signerB.length, false); off += 2;
+    buf.set(signerB, off); off += signerB.length;
+    dv.setUint16(off, recipB.length, false); off += 2;
+    buf.set(recipB, off); off += recipB.length;
+    dv.setUint16(off, keyIdB.length, false); off += 2;
+    buf.set(keyIdB, off); off += keyIdB.length;
+    buf.set(ephemPub, off); off += ephemPub.length;
+    buf.set(iv, off); off += iv.length;
+    buf.set(ciphertext, off);
+    return buf;
+  },
+
+  /**
+   * What a wrapped key says about itself, without decrypting anything.
+   *
+   * @returns {{version:number, signed:boolean, signer:string,
+   *            sig:Uint8Array|null, sigMessage:Uint8Array|null}}
+   *          `sigMessage` is what the signature must verify over, and it is
+   *          built from the caller's idea of scope/recipient/keyId - so a blob
+   *          lifted from another room or another member fails to verify even
+   *          though its signature is genuine.
+   */
+  inspectWrappedKey(encryptedBase64, { scope = "", scopeId = 0, recipient = "", keyId = "" } = {}) {
+    const blob = new Uint8Array(this.base64ToArrayBuffer(encryptedBase64));
+    if (!blob.length) throw new Error("Empty wrapped key");
+    if (blob[0] === this._WRAP_VERSION) {
+      return { version: 2, signed: false, signer: "", sig: null, sigMessage: null };
+    }
+    if (blob[0] !== this._WRAP_VERSION_SIGNED) {
+      throw new Error(`Unsupported wrapped key format (byte ${blob[0]})`);
+    }
+    const sigStart = this._WRAP_HEADER;
+    const nameLenAt = sigStart + this._WRAP_SIG_LEN;
+    if (blob.length < nameLenAt + 1) throw new Error("Truncated signed wrapped key");
+    const nameLen = blob[nameLenAt];
+    const nameStart = nameLenAt + 1;
+    const ctStart = nameStart + nameLen;
+    if (blob.length <= ctStart) throw new Error("Truncated signed wrapped key");
+
+    const ephemPub = blob.slice(1, 1 + this._WRAP_EPHEM_LEN);
+    const iv = blob.slice(1 + this._WRAP_EPHEM_LEN, sigStart);
+    const sig = blob.slice(sigStart, nameLenAt);
+    const signer = new TextDecoder().decode(blob.slice(nameStart, ctStart));
+    const ciphertext = blob.slice(ctStart);
+
+    return {
+      version: 3,
+      signed: true,
+      signer,
+      sig,
+      sigMessage: this._keyWrapSigMessage({
+        scope, scopeId, signer, recipient, keyId, ephemPub, iv, ciphertext,
+      }),
+    };
+  },
+
   _WRAP_VERSION: 0x02,
   _WRAP_EPHEM_LEN: 32,
   _WRAP_IV_LEN: 12,
@@ -858,7 +965,7 @@ const CryptoUtils = {
    * @param {string} roomKeyBase64       â€” raw AES room key (32 bytes, base64)
    * @returns {Promise<string>}          â€” wrapped blob (base64)
    */
-  async encryptRoomKeyForUser(peerPublicKeyBase64, roomKeyBase64) {
+  async encryptRoomKeyForUser(peerPublicKeyBase64, roomKeyBase64, signOpts = null) {
     // 1. Import peer's static public key
     const peerPub = await this.importPublicKey(peerPublicKeyBase64);
 
@@ -894,6 +1001,35 @@ const CryptoUtils = {
 
     // 7. Assemble blob: version || ephemeral_pub || iv || ciphertext
     const ctBytes = new Uint8Array(ciphertext);
+
+    // 7a. Signed variant: the sharer puts their name and signature inside the
+    // blob, so a recipient can ask who gave them this key instead of taking the
+    // server's word for it. See _keyWrapSigMessage for what is bound.
+    if (signOpts && signOpts.seed && signOpts.signer) {
+      const sigMsg = this._keyWrapSigMessage({
+        scope: signOpts.scope, scopeId: signOpts.scopeId, signer: signOpts.signer,
+        recipient: signOpts.recipient, keyId: signOpts.keyId,
+        ephemPub: ephemPubRaw, iv, ciphertext: ctBytes,
+      });
+      const sig = new Uint8Array(
+        this.base64ToArrayBuffer(await this.ed25519Sign(signOpts.seed, sigMsg)),
+      );
+      const nameB = new TextEncoder().encode(String(signOpts.signer));
+      if (nameB.length > 255) throw new Error("Signer name too long for a key wrap");
+      const out = new Uint8Array(
+        this._WRAP_HEADER + this._WRAP_SIG_LEN + 1 + nameB.length + ctBytes.length,
+      );
+      let at = 0;
+      out[at++] = this._WRAP_VERSION_SIGNED;
+      out.set(ephemPubRaw, at); at += this._WRAP_EPHEM_LEN;
+      out.set(iv, at); at += this._WRAP_IV_LEN;
+      out.set(sig, at); at += this._WRAP_SIG_LEN;
+      out[at++] = nameB.length;
+      out.set(nameB, at); at += nameB.length;
+      out.set(ctBytes, at);
+      return this.arrayBufferToBase64(out.buffer);
+    }
+
     const blob = new Uint8Array(this._WRAP_HEADER + ctBytes.length);
     blob[0] = this._WRAP_VERSION;
     blob.set(ephemPubRaw, 1);
@@ -913,15 +1049,26 @@ const CryptoUtils = {
   async decryptRoomKeyForUser(privateKey, encryptedBase64) {
     const blob = new Uint8Array(this.base64ToArrayBuffer(encryptedBase64));
 
-    // Validate version
-    if (blob.length < this._WRAP_HEADER + 1 || blob[0] !== this._WRAP_VERSION) {
-      throw new Error("Unsupported wrapped key format (expected v2 X25519)");
+    // Validate version. v3 says the same thing as v2 with the sharer's name and
+    // signature in the middle; unwrapping does not care who signed, only where
+    // the ciphertext starts. Who signed is a question for inspectWrappedKey and
+    // for the caller that knows what the signer was entitled to.
+    const signed = blob.length && blob[0] === this._WRAP_VERSION_SIGNED;
+    if (blob.length < this._WRAP_HEADER + 1 || (!signed && blob[0] !== this._WRAP_VERSION)) {
+      throw new Error("Unsupported wrapped key format (expected v2 or v3 X25519)");
     }
 
     // Parse components
     const ephemPubRaw = blob.slice(1, 1 + this._WRAP_EPHEM_LEN);
     const iv = blob.slice(1 + this._WRAP_EPHEM_LEN, this._WRAP_HEADER);
-    const ciphertext = blob.slice(this._WRAP_HEADER);
+    let ctStart = this._WRAP_HEADER;
+    if (signed) {
+      const nameLenAt = this._WRAP_HEADER + this._WRAP_SIG_LEN;
+      if (blob.length < nameLenAt + 2) throw new Error("Truncated signed wrapped key");
+      ctStart = nameLenAt + 1 + blob[nameLenAt];
+      if (blob.length <= ctStart) throw new Error("Truncated signed wrapped key");
+    }
+    const ciphertext = blob.slice(ctStart);
 
     // Import ephemeral public key
     const ephemPub = await crypto.subtle.importKey(

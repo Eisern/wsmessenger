@@ -154,6 +154,18 @@ const CHAIN_WRITE_ENABLED = false;
 // contradict it. The signature is what makes the claim checkable.
 const ROOM_SIG_WRITE_ENABLED = false;
 
+// Signing the key WRAP is staged the same way, and for a harder reason than the
+// others: a signed wrap is a new blob format (v3), and a client that only knows
+// v2 cannot open it at all - it would see a room it can no longer read. Readers
+// ship first (this build understands both), then this flag.
+//
+// What it is for: the wrap derives from an ephemeral key, so it says only that
+// somebody who knew your public key made it. The rows are written by the
+// server, so the server can hand you a key it made itself and read everything
+// you write under it. A signature inside the blob is what makes "who gave me
+// this key" a question with an answer.
+const KEY_WRAP_SIG_WRITE_ENABLED = false;
+
 const _threadChain = TC.createThreadChain({
   sha256: async (bytes) => new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)),
 });
@@ -484,12 +496,29 @@ const CryptoService = {
    * @param {string} ownerPubB64
    * @returns {Promise<string|null>} raw room key b64 or null
    */
+  /**
+   * The signing options for a key wrap, or null when that is switched off.
+   *
+   * Kept in one place so every path that hands out a room key signs the same
+   * thing: a wrap that binds to a different room, member or key version is a
+   * wrap that cannot be moved there.
+   */
+  async _wrapSignOpts(scopeId, recipient, keyId, scope = 'room') {
+    if (!KEY_WRAP_SIG_WRITE_ENABLED) return null;
+    const signer = await _resolveUsername();
+    if (!signer || !_ed25519Seed) return null;
+    return { seed: _ed25519Seed, signer, scope, scopeId, recipient, keyId };
+  },
+
   async createAndShareRoomKey(roomId, ownerPubB64) {
     if (!CryptoService.isReady()) return null;
     try {
       const rawB64 = await cryptoManager.createRoomKey(roomId);
       const keyId = await CryptoUtils.fingerprintRoomKeyBase64(rawB64);
-      const wrapped = await CryptoUtils.encryptRoomKeyForUser(ownerPubB64, rawB64);
+      const me = await _resolveUsername();
+      const wrapped = await CryptoUtils.encryptRoomKeyForUser(
+        ownerPubB64, rawB64, await CryptoService._wrapSignOpts(roomId, me, keyId),
+      );
       await NetworkService.postRoomKey(roomId, wrapped, keyId);
       await _persistRoomKeyArchive(roomId);
       _emit('room_key_loaded', { roomId });
@@ -521,7 +550,9 @@ const CryptoService = {
           await _assertPeerKeyTrustedForSharing(
             m.username, 'sharing room key', { peerPublicKeyB64: m.public_key },
           );
-          const wrapped = await CryptoUtils.encryptRoomKeyForUser(m.public_key, newRawB64);
+          const wrapped = await CryptoUtils.encryptRoomKeyForUser(
+            m.public_key, newRawB64, await CryptoService._wrapSignOpts(roomId, m.username, keyId),
+          );
           await NetworkService.shareRoomKey(roomId, m.username, wrapped, keyId);
           shared++;
         } catch (_e) {
@@ -567,7 +598,9 @@ const CryptoService = {
         targetUsername, 'sharing room key (invite)', { peerPublicKeyB64: peerPubB64 },
       );
 
-      const wrapped = await CryptoUtils.encryptRoomKeyForUser(peerPubB64, rawB64);
+      const wrapped = await CryptoUtils.encryptRoomKeyForUser(
+        peerPubB64, rawB64, await CryptoService._wrapSignOpts(roomId, targetUsername, keyId),
+      );
       await NetworkService.shareRoomKey(roomId, targetUsername, wrapped, keyId);
       return true;
     } catch (_e) {
@@ -701,6 +734,10 @@ const CryptoService = {
     try {
       const data = await NetworkService.getRoomKey(roomId);
       if (!data?.encrypted_room_key) return { notFound: true };
+      const ok = await _checkWrapSignature(data.encrypted_room_key, {
+        scope: 'room', scopeId: roomId, keyId: data.key_id || '',
+      });
+      if (!ok) return { refused: true };
       const keyB64 = await CryptoUtils.decryptRoomKeyForUser(
         cryptoManager.userPrivateKey,
         data.encrypted_room_key,
@@ -779,6 +816,10 @@ const CryptoService = {
     try {
       const data = await NetworkService.getDmKey(threadId);
       if (!data?.encrypted_thread_key) return { notFound: true };
+      const ok = await _checkWrapSignature(data.encrypted_thread_key, {
+        scope: 'dm', scopeId: threadId, keyId: data.key_id || '',
+      });
+      if (!ok) return { refused: true };
       const keyB64 = await CryptoUtils.decryptRoomKeyForUser(
         cryptoManager.userPrivateKey,
         data.encrypted_thread_key,
@@ -817,8 +858,13 @@ const CryptoService = {
     // TOFU: verify peer key is trusted before sharing
     await _assertPeerKeyTrustedForSharing(peerUsername, 'sharing DM key', { peerPublicKeyB64: peerPubB64 });
 
-    const encForMe   = await CryptoUtils.encryptRoomKeyForUser(myPubB64, rawB64);
-    const encForPeer = await CryptoUtils.encryptRoomKeyForUser(peerPubB64, rawB64);
+    const me = await _resolveUsername();
+    const encForMe = await CryptoUtils.encryptRoomKeyForUser(
+      myPubB64, rawB64, await CryptoService._wrapSignOpts(threadId, me, kid, 'dm'),
+    );
+    const encForPeer = await CryptoUtils.encryptRoomKeyForUser(
+      peerPubB64, rawB64, await CryptoService._wrapSignOpts(threadId, peerUsername, kid, 'dm'),
+    );
 
     await NetworkService.postDmKey(threadId, encForMe, kid);
     await NetworkService.shareDmKey(threadId, peerUsername, encForPeer, kid);
@@ -1650,6 +1696,50 @@ async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
   return { text: body, from, sigValid, mismatch };
 }
 
+/**
+ * Decide whether a wrapped key may be used at all.
+ *
+ * An unsigned wrap (v2) is everything handed out before signing existed, so it
+ * passes - refusing those would lock people out of their own rooms. A signed
+ * one has to hold up: the signature is checked against the ed25519 key of
+ * whoever the blob names, over bytes that bind this room, this recipient and
+ * this key version. A wrap that fails is not "unverified", it is a key from
+ * somebody who could not have wrapped it, and it is refused.
+ *
+ * What this cannot do is tell whether a genuine member should have been giving
+ * you a key at all: room membership is the server's word. It stops the server
+ * minting keys of its own and attributing them to people.
+ */
+async function _checkWrapSignature(encryptedB64, { scope, scopeId, keyId }) {
+  let info;
+  try {
+    info = CryptoUtils.inspectWrappedKey(encryptedB64, {
+      scope, scopeId, keyId, recipient: await _resolveUsername(),
+    });
+  } catch (e) {
+    console.warn('[keywrap] unreadable wrapped key:', e?.message);
+    return false;
+  }
+  if (!info.signed) return true;                       // v2: nothing to check
+
+  try {
+    const me = await _resolveUsername();
+    const pub = (me && info.signer.toLowerCase() === me)
+      ? CryptoService.ed25519PublicKey()
+      : await CryptoService._fetchPeerEd25519PubKey(info.signer);
+    if (!pub) {
+      console.warn(`[keywrap] no signing key known for ${info.signer} - refusing the key`);
+      return false;
+    }
+    const ok = CryptoUtils.ed25519Verify(pub, info.sig, info.sigMessage);
+    if (!ok) console.warn(`[keywrap] signature from ${info.signer} does not hold - refusing the key`);
+    return ok;
+  } catch (e) {
+    console.warn('[keywrap] signature check could not run:', e?.message);
+    return false;
+  }
+}
+
 async function _resolveUsername() {
   const fromNs = String(NetworkService.username || '').trim().toLowerCase();
   if (fromNs) return fromNs;
@@ -1799,6 +1889,9 @@ async function _loadRoomKeyArchiveFromServer(roomId) {
       const encKey = entry.encrypted_room_key;
       const kid = entry.key_id;
       if (!encKey) continue;
+      // An archived key opens old messages, so a forged one is just as useful
+      // to an attacker as a current one.
+      if (!await _checkWrapSignature(encKey, { scope: 'room', scopeId: roomId, keyId: kid || '' })) continue;
       try {
         const keyB64 = await CryptoUtils.decryptRoomKeyForUser(
           cryptoManager.userPrivateKey,
