@@ -7552,6 +7552,13 @@ async def _ensure_foreign_box_tables(session: AsyncSession) -> None:
             await session.execute(text(
                 f"ALTER TABLE chat_dm_foreign_boxes ADD COLUMN IF NOT EXISTS {col} {typ}"
             ))
+        # Clients used to send the name from the contact card as the mailbox
+        # label, and it sat here in the clear: which local user writes to whom,
+        # by name, on the one server that should know least about it. Nothing
+        # reads it back, so it is no longer stored, and what was stored goes.
+        await session.execute(text(
+            "UPDATE chat_dm_foreign_boxes SET label = '' WHERE label <> ''"
+        ))
         # The nonce table holds no kid and no user: a challenge says nothing
         # about who asked for it or whether anything answers to it (§5.1).
         await session.execute(text("""
@@ -7635,7 +7642,8 @@ async def foreign_box_create(
     if not ed_pub or len(base64.b64decode(ed_pub + "=" * (-len(ed_pub) % 4))) != 32:
         raise HTTPException(status_code=400, detail="bad signing key")
 
-    label = (payload.label or "").strip()[:64]
+    # payload.label is accepted so older clients keep working, and dropped:
+    # a contact's name is not this island's to keep (see the table setup).
     me_id = int(me["user_id"])
 
     async with SessionLocal() as session:
@@ -7658,19 +7666,15 @@ async def foreign_box_create(
             """), {"tid": tid, "uid": me_id})
             await session.execute(text("""
                 INSERT INTO chat_dm_foreign_boxes(
-                    thread_id, owner_user_id, peer_kid, peer_x25519_pub, peer_ed25519_pub, label)
-                VALUES (:tid, :uid, :kid, :xpub, :edpub, :label)
+                    thread_id, owner_user_id, peer_kid, peer_x25519_pub, peer_ed25519_pub)
+                VALUES (:tid, :uid, :kid, :xpub, :edpub)
             """), {
                 "tid": tid, "uid": me_id, "kid": kid,
                 "xpub": (payload.peer_x25519_pub or "").strip(),
-                "edpub": ed_pub, "label": label,
+                "edpub": ed_pub,
             })
         else:
             tid = int(tid)
-            if label:
-                await session.execute(text("""
-                    UPDATE chat_dm_foreign_boxes SET label = :label WHERE thread_id = :tid
-                """), {"tid": tid, "label": label})
 
         await session.execute(text("""
             INSERT INTO chat_dm_delivery(thread_id, delivery_secret, expires_at)

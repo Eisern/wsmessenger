@@ -97,55 +97,153 @@ const ROOM_SIG_WRITE_ENABLED = true;
 const KEY_WRAP_SIG_WRITE_ENABLED = true;
 
 /**
- * Signing options for a key wrap, or null when that is switched off.
+ * Signing options for a key wrap.
  *
  * One place, so every path that hands out a key signs the same thing: a wrap
  * bound to another room, member or key version cannot be moved there.
+ *
+ * Throws rather than returning "no signature" when it cannot sign: readers
+ * refuse an unsigned wrap that would bring them a key they do not already
+ * hold (acceptWrappedKey), so a key handed out unsigned is a key nobody can
+ * open - better to fail here, where the user can unlock and retry.
  */
 function wrapSignOpts(scopeId, recipient, keyId, scope = "room") {
   if (!KEY_WRAP_SIG_WRITE_ENABLED) return null;
   const signer = getMeUsername();
   const seed = CM()?.ed25519Seed;
-  if (!signer || !seed) return null;
+  if (!signer || !seed) throw new Error("Cannot sign the key: unlock and try again.");
   return { seed, signer, scope, scopeId, recipient, keyId };
 }
 
 /**
- * Decide whether a wrapped key may be used at all.
+ * Decide whether a wrapped key may be used, and return it if so.
  *
- * An unsigned wrap (v2) is everything handed out before signing existed, so it
- * passes - refusing those would lock people out of their own rooms. A signed
- * one has to hold up: checked against the ed25519 key of whoever the blob
- * names, over bytes that bind this room, this recipient and this key version.
- * A wrap that fails is not "unverified" - it is a key from somebody who could
- * not have wrapped it, and it is refused.
+ * Each rule closes one way for the island - which writes every key row - to
+ * hand a member a key of its own making and then read what they write:
+ *
+ *   - A SIGNED wrap must verify under the signer's PINNED Ed25519 key
+ *     (fetchPeerEd25519PubKey), or under our own.
+ *   - The signer must be entitled to hand this key out: ourselves, the DM peer,
+ *     or a member of the room. Membership comes from the island, so this does
+ *     not stop it outright; it makes it show the signer in the member list
+ *     rather than mint an account nobody ever sees.
+ *   - An UNSIGNED wrap can never bring a key this device did not already hold.
+ *     Every key handed out before signing existed is unsigned, and a device
+ *     that had one keeps it; but an unsigned wrap is exactly what an island
+ *     would forge, so it cannot introduce anything new.
+ *
+ * A refused wrap is not "unverified" - it is a key from somebody who could not
+ * have wrapped it - and the caller treats it as no key at all.
+ *
+ * @param {object} o
+ * @param {string} o.scope        "room" | "dm"
+ * @param {number|string} o.scopeId  room id / thread id, as signed
+ * @param {string} o.keyId        key id the island claims, as signed
+ * @param {number|string} o.rid   this client's key slot (room id / dmRid)
+ * @param {function} o.signers    async () => Set<lowercase username> | null
+ * @returns {Promise<string|null>} the key (base64), or null when refused
  */
-async function checkWrapSignature(encryptedB64, { scope, scopeId, keyId }) {
-  const me = getMeUsername();
+async function acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, signers }) {
+  const cm = CM();
+  const cu = CU();
+  const meName = getMeUsername();
+  const me = String(meName || "").toLowerCase();
+  if (!me || !cm?.userPrivateKey) return null;
+
   let info;
   try {
-    info = CU().inspectWrappedKey(encryptedB64, { scope, scopeId, keyId, recipient: me });
+    info = cu.inspectWrappedKey(encryptedB64, { scope, scopeId, keyId, recipient: meName });
   } catch (e) {
     console.warn("[keywrap] unreadable wrapped key:", e?.message || e);
-    return false;
+    return null;
   }
-  if (!info.signed) return true;
 
-  try {
-    const pub = (me && info.signer.toLowerCase() === String(me).toLowerCase() && CM()?.ed25519Seed)
-      ? await CU().ed25519GetPublicKey(CM().ed25519Seed)
-      : await fetchPeerEd25519PubKey(info.signer);
-    if (!pub) {
-      console.warn(`[keywrap] no signing key known for ${info.signer} - refusing the key`);
-      return false;
+  if (info.signed) {
+    const signer = String(info.signer || "").toLowerCase();
+    try {
+      let pub = null;
+      if (signer === me) {
+        pub = cm.ed25519Seed ? await cu.ed25519GetPublicKey(cm.ed25519Seed) : null;
+      } else {
+        const allowed = await Promise.resolve(signers ? signers() : null).catch(() => null);
+        if (!allowed || !allowed.has(signer)) {
+          console.warn(`[keywrap] ${info.signer} is not entitled to hand out this ${scope} key - refusing it`);
+          return null;
+        }
+        pub = await fetchPeerEd25519PubKey(info.signer);
+      }
+      if (!pub) {
+        console.warn(`[keywrap] no signing key known for ${info.signer} - refusing the key`);
+        return null;
+      }
+      if (!await cu.ed25519Verify(pub, info.sig, info.sigMessage)) {
+        console.warn(`[keywrap] signature from ${info.signer} does not hold - refusing the key`);
+        return null;
+      }
+    } catch (e) {
+      console.warn("[keywrap] signature check could not run:", e?.message || e);
+      return null;
     }
-    const ok = await CU().ed25519Verify(pub, info.sig, info.sigMessage);
-    if (!ok) console.warn(`[keywrap] signature from ${info.signer} does not hold - refusing the key`);
-    return ok;
-  } catch (e) {
-    console.warn("[keywrap] signature check could not run:", e?.message || e);
-    return false;
   }
+
+  let keyBase64;
+  try {
+    keyBase64 = await cu.decryptRoomKeyForUser(cm.userPrivateKey, encryptedB64);
+  } catch (e) {
+    console.warn(`[keywrap] could not open a ${scope} key:`, e?.message || e);
+    return null;
+  }
+
+  if (!info.signed) {
+    const kid = await cu.fingerprintRoomKeyBase64(keyBase64);
+    if (!cm.roomKeyArchive?.get(rid)?.has(kid)) {
+      console.warn(`[keywrap] an unsigned wrap carries a ${scope} key this device never held - refusing it`);
+      return null;
+    }
+  }
+  return keyBase64;
+}
+
+// Who may hand out a room's key: its members, as the island lists them. Kept
+// briefly - one key load asks for the current key and the whole archive.
+const _SIGNER_SET_TTL_MS = 60 * 1000;
+const _roomSignerCache = new Map();   // rid -> { at, set }
+const _dmPeerCache = new Map();       // threadId -> lowercase peer
+
+async function _roomSigners(roomId) {
+  const rid = Number(roomId);
+  const hit = _roomSignerCache.get(rid);
+  if (hit && Date.now() - hit.at < _SIGNER_SET_TTL_MS) return hit.set;
+  const token = await requestToken().catch(() => null);
+  if (!token) return null;
+  const r = await fetch(API_BASE + `/rooms/${encodeURIComponent(rid)}/members`, {
+    headers: { Authorization: "Bearer " + token },
+  });
+  if (!r.ok) return null;           // not an answer: refuse now, ask again next time
+  const rows = await r.json().catch(() => null);
+  if (!Array.isArray(rows)) return null;
+  const set = new Set(rows.map((m) => String(m?.username || "").toLowerCase()).filter(Boolean));
+  _roomSignerCache.set(rid, { at: Date.now(), set });
+  return set;
+}
+
+// Who may hand out a DM's key: the other person in it. Callers usually know
+// them; when they do not, the island's own thread list says.
+async function _dmSigners(threadId, peerUsername) {
+  const tid = Number(threadId);
+  let peer = String(peerUsername || "").trim().toLowerCase() || _dmPeerCache.get(tid) || "";
+  if (!peer) {
+    const token = await requestToken().catch(() => null);
+    if (!token) return null;
+    const r = await fetch(API_BASE + "/dm/list", { headers: { Authorization: "Bearer " + token } });
+    if (!r.ok) return null;
+    const rows = await r.json().catch(() => null);
+    const row = Array.isArray(rows) ? rows.find((t) => Number(t?.thread_id ?? t?.id) === tid) : null;
+    peer = String(row?.peer_username || "").trim().toLowerCase();
+    if (!peer) return null;
+  }
+  _dmPeerCache.set(tid, peer);
+  return new Set([peer]);
 }
 
 const _threadChain = (globalThis.WSThreadChain || null) && globalThis.WSThreadChain.createThreadChain({
@@ -321,12 +419,57 @@ async function fetchPeerEd25519PubKey(username) {
     const body = await r.json().catch(() => null);
     if (!body) return null;
     const b64 = String(body.ed25519_public_key || "").trim();
-    const pubKey = b64 ? new Uint8Array(CU().base64ToArrayBuffer(b64)) : null;
+    const served = b64 ? new Uint8Array(CU().base64ToArrayBuffer(b64)) : null;
+    const pubKey = await _pinnedEd25519(username, served && served.length === 32 ? served : null);
     _ed25519PubKeyCache.set(username, { key: pubKey, ts: Date.now() });
     return pubKey;
   } catch {
     return null;
   }
+}
+
+/**
+ * The Ed25519 key to check `username`'s signatures against.
+ *
+ * Every signature this client verifies - DMs, room messages, key wraps - was
+ * checked against whatever key the island served for that name, and the island
+ * is the party those signatures exist to keep honest. It could serve a key of
+ * its own and sign anything as anyone. So the key is pinned on first sight,
+ * next to the X25519 pin and under the same address, and a different key later
+ * is NOT used: it is parked under `:ed:pending` and the pinned one stays what
+ * signatures must match, until markKeyVerified - the user confirming the peer -
+ * promotes it. The signing key is derived from the identity key, so an honest
+ * change only ever comes with an X25519 change the user is asked about anyway.
+ *
+ * Trust-on-first-use, with TOFU's weakness: the first contact must be honest.
+ * Safety numbers cover the X25519 key only, so they do not yet close that.
+ */
+async function _pinnedEd25519(username, served) {
+  const me = getMeUsername();
+  if (!me || !username) return null;   // no address for a pin: trust nothing
+  const key = (await _fpBase(me, username)) + ":ed";
+  let pinnedB64 = "";
+  try {
+    pinnedB64 = String((await chrome.storage.local.get([key]))[key] || "");
+  } catch {
+    return null;
+  }
+  const servedB64 = served ? CU().arrayBufferToBase64(served) : "";
+  if (!pinnedB64) {
+    if (!servedB64) return null;
+    try {
+      await chrome.storage.local.set({ [key]: servedB64 });
+    } catch {
+      return null;   // an unrecorded first contact would be re-decided next time
+    }
+    return served;
+  }
+  if (servedB64 && servedB64 !== pinnedB64) {
+    console.warn(`[ed25519] the island now serves a different signing key for ${username}; ` +
+      "keeping the pinned one until they are verified");
+    try { await chrome.storage.local.set({ [key + ":pending"]: servedB64 }); } catch {}
+  }
+  return new Uint8Array(CU().base64ToArrayBuffer(pinnedB64));
 }
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1016,6 +1159,36 @@ async function createAndSaveRoomKeyForMe(roomId) {
   }
 }
 
+/**
+ * Replace the unsigned copy a room was created with by a signed one.
+ *
+ * The create request carries the creator's key before the room has an id, and
+ * a wrap signature binds the id - so that first copy cannot be signed. Readers
+ * refuse an unsigned wrap that brings a key they do not already hold, so until
+ * this runs the creator's other devices could not open their own room. Called
+ * once the island answers with the id; the row it replaces is the creator's own.
+ */
+async function signCreatedRoomKey(roomId, roomKeyBase64) {
+  const rid = Number(roomId);
+  const pub = CM()?.userPublicKeyPem;
+  if (!rid || !pub) throw new Error("Cannot sign the new room's key: crypto is locked");
+  const keyId = await CU().fingerprintRoomKeyBase64(roomKeyBase64);
+  const wrapped = await CU().encryptRoomKeyForUser(
+    pub, roomKeyBase64, wrapSignOpts(rid, getMeUsername(), keyId),
+  );
+  const token = await requestToken();
+  if (!token) throw new Error("No token");
+  const resp = await fetch(API_BASE + "/crypto/room-key", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify({ room_id: rid, encrypted_room_key: wrapped, key_id: keyId }),
+  });
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}));
+    throw new Error(body.detail || `Signing the new room's key failed (${resp.status})`);
+  }
+}
+
 // ============================
 // Room Key Rotation (Step 6)
 // ============================
@@ -1470,10 +1643,12 @@ async function loadRoomKeyArchiveFromServer(roomId) {
       if (kidHint && existing.has(kidHint)) continue;
       // An archived key opens old messages, so a forged one is worth as much to
       // an attacker as a current one.
-      if (!await checkWrapSignature(encrypted, { scope: "room", scopeId: rid, keyId: kidHint })) continue;
+      const keyBase64 = await acceptWrappedKey(encrypted, {
+        scope: "room", scopeId: rid, keyId: kidHint, rid, signers: () => _roomSigners(rid),
+      });
+      if (!keyBase64) continue;
       try {
-        const keyBase64 = await cu.decryptRoomKeyForUser(cm.userPrivateKey, encrypted);
-        const kid = kidHint || await cu.fingerprintRoomKeyBase64(keyBase64);
+        const kid = await cu.fingerprintRoomKeyBase64(keyBase64);
         if (existing.has(kid)) continue;
         const ok = await cm.loadArchivedKey(rid, kid, keyBase64);
         if (ok) loaded++;
@@ -1559,16 +1734,11 @@ async function loadRoomKey(roomId) {
       return { ok: false, error: true };
     }
 
-    if (!await checkWrapSignature(data.encrypted_room_key, {
-      scope: "room", scopeId: rid, keyId: String(data.key_id || ""),
-    })) {
-      return { ok: false, refused: true };
-    }
-
-    const roomKeyBase64 = await CU().decryptRoomKeyForUser(
-      CM().userPrivateKey,
-      data.encrypted_room_key
-    );
+    const roomKeyBase64 = await acceptWrappedKey(data.encrypted_room_key, {
+      scope: "room", scopeId: rid, keyId: String(data.key_id || ""), rid,
+      signers: () => _roomSigners(rid),
+    });
+    if (!roomKeyBase64) return { ok: false, refused: true };
 
     await CM().loadRoomKey(rid, roomKeyBase64);
 
@@ -1672,7 +1842,7 @@ async function assertPeerKeyTrustedForSharing(
   }
 }
 
-async function loadDmKeyArchiveFromServer(threadId) {
+async function loadDmKeyArchiveFromServer(threadId, peerUsername = null) {
   const token = await requestToken();
   if (!token) return;
 
@@ -1698,10 +1868,13 @@ async function loadDmKeyArchiveFromServer(threadId) {
       if (!encrypted) continue;
       const kidHint = String(entry?.key_id || "").trim().toLowerCase();
       if (kidHint && existing.has(kidHint)) continue;
-      if (!await checkWrapSignature(encrypted, { scope: "dm", scopeId: threadId, keyId: kidHint })) continue;
+      const keyBase64 = await acceptWrappedKey(encrypted, {
+        scope: "dm", scopeId: threadId, keyId: kidHint, rid,
+        signers: () => _dmSigners(threadId, peerUsername),
+      });
+      if (!keyBase64) continue;
       try {
-        const keyBase64 = await cu.decryptRoomKeyForUser(cm.userPrivateKey, encrypted);
-        const kid = kidHint || await cu.fingerprintRoomKeyBase64(keyBase64);
+        const kid = await cu.fingerprintRoomKeyBase64(keyBase64);
         if (existing.has(kid)) continue;
         const ok = await cm.loadArchivedKey(rid, kid, keyBase64);
         if (ok) loaded++;
@@ -1755,7 +1928,7 @@ async function migrateLegacyDmArchive(threadId) {
   }
 }
 
-async function loadDmKey(threadId, { interactive = false } = {}) {
+async function loadDmKey(threadId, { interactive = false, peerUsername = null } = {}) {
   const okCrypto = await ensureCryptoReady({ interactive, reason: "DM key" });
   if (!okCrypto) return { ok: false, locked: true };
 
@@ -1784,19 +1957,14 @@ async function loadDmKey(threadId, { interactive = false } = {}) {
   if (!cm?.userPrivateKey) return { ok: false, locked: true };
   if (!cu?.decryptRoomKeyForUser) throw new Error("Crypto utils not available");
 
-  if (!await checkWrapSignature(body.encrypted_thread_key, {
-    scope: "dm", scopeId: threadId, keyId: String(body.key_id || ""),
-  })) {
-    return { ok: false, refused: true };
-  }
-
-  const keyBase64 = await cu.decryptRoomKeyForUser(
-    cm.userPrivateKey,
-    body.encrypted_thread_key
-  );
+  const keyBase64 = await acceptWrappedKey(body.encrypted_thread_key, {
+    scope: "dm", scopeId: threadId, keyId: String(body.key_id || ""), rid: dmRid(threadId),
+    signers: () => _dmSigners(threadId, peerUsername),
+  });
+  if (!keyBase64) return { ok: false, refused: true };
 
   await cm.loadRoomKey(dmRid(threadId), keyBase64);
-  await loadDmKeyArchiveFromServer(threadId);
+  await loadDmKeyArchiveFromServer(threadId, peerUsername);
   return { ok: true };
 }
 
@@ -1895,7 +2063,7 @@ async function ensureDmKeyReady(threadId, peerUsername, { interactive = false } 
   const p = (async () => {
     let got;
     try {
-      got = await loadDmKey(threadId, { interactive });
+      got = await loadDmKey(threadId, { interactive, peerUsername });
     } catch (e) {
       throw new Error("DM key load failed: " + (e?.message || e));
     }
@@ -1928,7 +2096,7 @@ async function ensureDmKeyReady(threadId, peerUsername, { interactive = false } 
 
       let got2;
       try {
-        got2 = await loadDmKey(threadId, { interactive });
+        got2 = await loadDmKey(threadId, { interactive, peerUsername });
       } catch (e) {
         throw new Error("DM key reload failed: " + (e?.message || e));
       }
@@ -2959,6 +3127,17 @@ async function markKeyVerified(peerUsername) {
       storageKey + ":changed",
       storageKey + ":pending",
     ]);
+    // The signing key moves with the identity key it is derived from, and
+    // this is the step that lets it: a key the island started serving since
+    // the pin was set (parked by _pinnedEd25519) becomes the pinned one.
+    const edPendingKey = storageKey + ":ed:pending";
+    const edPending = (await chrome.storage.local.get([edPendingKey]))[edPendingKey];
+    if (edPending) {
+      await chrome.storage.local.set({ [storageKey + ":ed"]: edPending });
+      await chrome.storage.local.remove([edPendingKey]);
+    }
+    _ed25519PubKeyCache.delete(peerUsername);
+    _ed25519PubKeyCache.delete(peer);
     // The sweep refuses to share to a peer it flagged; verifying is exactly the
     // human step it was waiting for, so let the next sweep serve them.
     clearKeyShareTrustBlock(peer);
@@ -3437,7 +3616,8 @@ async function addForeignContact(blobText) {
       peer_kid: c.kid,
       peer_x25519_pub: c.x25519PubB64,
       peer_ed25519_pub: c.ed25519PubB64,
-      label: c.displayName,
+      // No label: the name from their card stays on this device. Sent here it
+      // sat on the island in the clear, next to the mailbox it names.
       encrypted_thread_key: await cu.encryptRoomKeyForUser(CM().userPublicKeyPem, keyB64),
       key_id: keyId,
     }),

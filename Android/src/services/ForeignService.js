@@ -288,7 +288,8 @@ async function addContact(cardText) {
     peerKid: c.kid,
     peerX25519Pub: c.x25519PubB64,
     peerEd25519Pub: c.ed25519PubB64,
-    label: c.displayName,
+    // No label: the name from their card stays on this device. Sent here it
+    // sat on the island in the clear, next to the mailbox it names.
     encryptedThreadKey: await CryptoUtils.encryptRoomKeyForUser(myPub, keyB64),
     keyId,
   });

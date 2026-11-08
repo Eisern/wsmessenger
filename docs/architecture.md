@@ -522,12 +522,12 @@ will carry is queued, never silently sent direct. See
 ### What each island learns about a cross-island conversation
 
 Both islands hold a mailbox, so both learn the same shape of thing about
-the conversation: **which local user** it involves, the other person's
-**public keys**, and the **name from their contact card** — the clients
-store it, in the clear, as the mailbox label. The recipient's island
-also sees the timing and size of every message and, unless it was
-relayed, the sender's IP address. Neither learns the content, and
-neither island is told which server the other person is on.
+the conversation: **which local user** it involves and the other person's
+**public keys**. The name from the contact card stays on the device
+(earlier clients sent it as the mailbox label; the server now drops it).
+The recipient's island also sees the timing and size of every message and,
+unless it was relayed, the sender's IP address. Neither learns the content,
+and neither island is told which server the other person is on.
 
 ---
 
@@ -598,8 +598,8 @@ Sees:
 - IP and user-agent on connect, for rate limiting and ban checks.
 - Which JWT sent which room message. **For DMs, with sealed sender
   enabled, only the thread id and timestamp — not the sender.**
-- For each cross-island mailbox: its local owner, the other person's
-  public keys and the name from their contact card (see
+- For each cross-island mailbox: its local owner and the other person's
+  public keys (see
   [What each island learns](#what-each-island-learns-about-a-cross-island-conversation)).
 
 Does not see:

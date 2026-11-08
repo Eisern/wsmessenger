@@ -2853,14 +2853,19 @@ if (__pendingCtxSelection?.url || __pendingCtxSelection?.text) {
 }
 
 if (pendingCreatedRoomKeyBase64) {
-  const ok = await CM().loadRoomKey(
-    Number(r.id),
-    pendingCreatedRoomKeyBase64
-  );
+  const createdKey = pendingCreatedRoomKeyBase64;
+  pendingCreatedRoomKeyBase64 = null;
+  const ok = await CM().loadRoomKey(Number(r.id), createdKey);
   if (!ok) {
     console.warn("Failed to cache newly created room key (loadRoomKey returned false)");
   }
-  pendingCreatedRoomKeyBase64 = null;
+  // The key went up unsigned (the room had no id to bind it to yet); swap that
+  // copy for a signed one, or the creator's other devices cannot open it.
+  try {
+    await signCreatedRoomKey(Number(r.id), createdKey);
+  } catch (e) {
+    console.warn("Could not sign the new room's key:", e?.message || e);
+  }
 }
 
   if (createRoomResultEl) {

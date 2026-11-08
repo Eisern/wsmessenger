@@ -513,12 +513,12 @@ Three rules, and the reason for each:
   what a contact card carries, and what lets contacts elsewhere reach you when
   one domain is blocked. Clients read up to 8.
 
-What your server learns from this: for each mailbox, which local user owns it,
-the **public keys** of the person writing in, and the **name from their contact
-card** (the clients store it as the mailbox label; it is their username on
-their own server unless they changed it) — but not which server they are on.
-People writing in connect to your server directly, so you also see their IP
-address unless they send through a relay. Relays are optional and need setting
+What your server learns from this: for each mailbox, which local user owns it
+and the **public keys** of the person writing in — not their name (it stays on
+the user's device) and not which server they are on. People writing in connect
+to your server directly, so you also see their IP address unless they send
+through a relay. (Earlier clients sent the name from the contact card as the
+mailbox label; the server now drops it and erases what was stored.) Relays are optional and need setting
 up with each relay operator; see [`relay/README.md`](../relay/README.md).
 
 ---

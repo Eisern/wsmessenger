@@ -1741,14 +1741,13 @@ class NetworkService {
   // there and the delivery secret, not a token, is what opens the box.
 
   /** Open (or re-open) a mailbox on this island for one foreign key. */
-  async createForeignBox({ peerKid, peerX25519Pub, peerEd25519Pub, label, encryptedThreadKey, keyId }) {
+  async createForeignBox({ peerKid, peerX25519Pub, peerEd25519Pub, encryptedThreadKey, keyId }) {
     return this._fetch('/foreign/box', {
       method: 'POST',
       body: {
         peer_kid: peerKid,
         peer_x25519_pub: peerX25519Pub,
         peer_ed25519_pub: peerEd25519Pub,
-        label: label || null,
         encrypted_thread_key: encryptedThreadKey || null,
         key_id: keyId || null,
       },

@@ -484,6 +484,43 @@ const StorageService = {
     await _secureRemove(fpKey);
     await _secureRemove(fpKey + '_verified');
     await _secureRemove(fpKey + '_changed');
+    await _secureRemove(fpKey + '_ed');
+    await _secureRemove(fpKey + '_ed_pending');
+  },
+
+  // --- Pinned Ed25519 signing keys (Keychain), same address as the X25519 pin ---
+  //
+  // Every signature this client checks used to be checked against whatever
+  // key the island served for that name - and the island is the party those
+  // signatures exist to keep honest. The pinned key is what they must match;
+  // a different key the island starts serving is parked as pending until the
+  // user verifies the peer (CryptoService.verifyPeerKey promotes it).
+
+  async getKnownEd25519(island, me, peer) {
+    return _secureGet(_fpBase(island, me, peer) + '_ed');
+    // base64 of the 32-byte key, or null
+  },
+
+  async setKnownEd25519(island, me, peer, keyB64) {
+    const base = _fpBase(island, me, peer);
+    await _secureSet(base + '_ed', keyB64);
+    // Indexed by its base so clearAll() finds it even for a peer whose X25519
+    // key was never pinned (a room member we only ever read).
+    await _addToFpIndex(base);
+  },
+
+  async getPendingEd25519(island, me, peer) {
+    return _secureGet(_fpBase(island, me, peer) + '_ed_pending');
+  },
+
+  async setPendingEd25519(island, me, peer, keyB64) {
+    const base = _fpBase(island, me, peer);
+    await _secureSet(base + '_ed_pending', keyB64);
+    await _addToFpIndex(base);
+  },
+
+  async removePendingEd25519(island, me, peer) {
+    await _secureRemove(_fpBase(island, me, peer) + '_ed_pending');
   },
 
   /** Remove ONLY the _verified flag, preserving fingerprint and _changed. */
@@ -639,6 +676,8 @@ const StorageService = {
           await _secureRemove(fpKey).catch(() => {});
           await _secureRemove(fpKey + '_verified').catch(() => {});
           await _secureRemove(fpKey + '_changed').catch(() => {});
+          await _secureRemove(fpKey + '_ed').catch(() => {});
+          await _secureRemove(fpKey + '_ed_pending').catch(() => {});
         }
         await _secureRemove('_fp_index');
       }

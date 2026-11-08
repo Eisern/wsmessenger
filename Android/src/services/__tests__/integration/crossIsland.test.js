@@ -141,7 +141,6 @@ async function openMailbox(base, token, me, peer) {
       peer_kid: peer.kid,
       peer_x25519_pub: peer.pubB64,
       peer_ed25519_pub: peer.edPubB64,
-      label: peer.displayName,
       encrypted_thread_key: await CU.encryptRoomKeyForUser(me.pubB64, keyB64),
       key_id: keyId,
     },

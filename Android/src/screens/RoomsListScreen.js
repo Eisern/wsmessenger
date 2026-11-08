@@ -377,6 +377,14 @@ function CreateRoomModal({ visible, onClose, onCreated }) {
       const roomId = room?.id || room?.room_id;
       if (roomId && keyData.rawB64) {
         await CryptoService.loadRoomKey(roomId, keyData.rawB64);
+        // The key went up unsigned (the room had no id to bind it to yet); swap
+        // that copy for a signed one, or this account's other devices cannot
+        // open the room it just made.
+        try {
+          await CryptoService.signCreatedRoomKey(roomId, keyData.rawB64);
+        } catch (e) {
+          console.warn('[RoomsList] could not sign the new room key:', e?.message);
+        }
       }
 
       setName(''); setAlias(''); setDescription(''); setPassword(''); setIsPrivate(true); setIsReadonly(false);

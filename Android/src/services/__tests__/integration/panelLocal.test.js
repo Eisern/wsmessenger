@@ -175,6 +175,11 @@ describe('room keys and the history they have to keep readable', () => {
     // minted, so the first message can be sent without another round trip.
     expect(await alice.manager.loadRoomKey(roomId, roomKeyB64)).toBe(true);
     expect(alice.manager.roomKeys.has(roomId)).toBe(true);
+
+    // ...and swap the unsigned copy the create request had to carry (the room
+    // had no id to sign against) for a signed one. Without it no other device
+    // of hers could open the room: an unsigned wrap never brings a new key.
+    await alice.sandbox.signCreatedRoomKey(roomId, roomKeyB64);
   });
 
   it('reads back a message it encrypted', async () => {
