@@ -521,6 +521,20 @@ through a relay. (Earlier clients sent the name from the contact card as the
 mailbox label; the server now drops it and erases what was stored.) Relays are optional and need setting
 up with each relay operator; see [`relay/README.md`](../relay/README.md).
 
+**Guests in rooms.** With the island identity on, a room's owner or admin can
+also invite somebody from another server *into a room*, by their contact card.
+They become a **guest** of your island: an account bound to the key on that
+card, with no password, which signs in by signing a one-time challenge and can
+reach only the rooms it was invited to — no DMs, no room creation, no
+moderation, whatever role it is given. Your server learns about a guest what it
+learns about any member of the room; their own server learns nothing about it.
+The server side is in place; **the clients do not offer it yet**. To refuse
+guests altogether, set `ISLAND_ACCEPT_GUESTS=0`. The startup line says which:
+
+```
+[island] messenger.example.com: guests from other islands in rooms here: on
+```
+
 ---
 
 ## 9. Create the first admin

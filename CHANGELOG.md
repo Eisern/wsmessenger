@@ -6,6 +6,46 @@ Versions are shared by the whole project from 0.4.0 on: the tag, the extension's
 `manifest.json` and the Android `versionName` say the same thing. Before that
 they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
+## Unreleased
+
+### Added — rooms across islands, server side
+
+Somebody from another island can now take part in a room here as a **guest**:
+a principal bound to their key, not an account they registered. The clients do
+not offer it yet; this is the half they will talk to.
+
+- `POST /rooms/{id}/guests` — a room moderator invites a person by their
+  signed contact card. The island checks the card on its own (the kid is the
+  hash of the X25519 key, the payload is signed by the Ed25519 key it carries —
+  verified against a card built by the real `foreign-dm.js`, non-ASCII name and
+  all), then finds or creates the guest by key and invites them exactly as a
+  local member, without the friends-only check a guest could never pass.
+- `POST /foreign/guest/session` — a guest signs in by signing a nonce from
+  `/foreign/challenge` under its own domain (`ws-guest-session-v1`), bound to
+  this island. Same 403 for every refusal; no password ever works.
+- A guest reaches the rooms it was invited to and nothing else. Enforced by an
+  allow-list on every HTTP request and an explicit refusal on `/ws-dm`, and
+  decided by the database, not by the token — `/auth/refresh` issues a plain
+  token, and a claim it dropped would have turned a guest into a full account.
+- Guests are on wherever `ISLAND_ID` is set; `ISLAND_ACCEPT_GUESTS=0` turns
+  them off, and the server says which at startup.
+
+### Fixed — security
+
+- **`/foreign/claim` did not spend its nonce on a refusal**, contrary to its
+  own comment: the nonce was deleted inside the transaction every refusal
+  rolled back. It is now spent in a transaction of its own, before anything is
+  decided.
+
+### Added — tests
+
+- `server/tests` — the first tests of the server: the real `uvicorn main:app`
+  against a real PostgreSQL (`TEST_DATABASE_URL`, or `pgserver` locally), 35 of
+  them for guests, the claim nonce and the invitation flow they share with
+  local members. CI runs them against a `postgres:17` service. Each protection
+  was checked by removing it: the allow-list, the `/ws-dm` refusal, the nonce
+  spend and both signature checks each fail their own tests.
+
 ## 0.5.0 — 2026-11-08
 
 ### Read this first: what stops working

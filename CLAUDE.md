@@ -26,6 +26,8 @@ Configuration is via environment variables — copy `server/config.example.env` 
 
 Run with: `cd server && uvicorn main:app --reload`.
 
+Tests: `pip install -r server/requirements-dev.txt`, then `pytest server/tests`. They start the real server as a subprocess on a fresh database — set `TEST_DATABASE_URL` to an admin URL (CI uses a `postgres:17` service), or install `pgserver` for a throwaway local PostgreSQL. Without either they skip.
+
 ## Architecture
 
 ### Process Boundary
@@ -118,6 +120,17 @@ there is no way to address a stranger.
   key, so changing either breaks every existing contact's address refresh. The
   server logs `[island] …` at startup saying what is on or missing.
   Operator docs: `docs/self-hosting.md` §8.3.
+
+**Guests in rooms** (server side only so far; design and threat model in
+`docs/internal/cross-island-rooms-assessment.md`): a person from another island
+takes part in a room as a guest — a `users` row with the `!guest` password
+marker, created from their signed contact card by `POST /rooms/{id}/guests`
+(moderators), recorded in `chat_foreign_guests`, signing in via
+`POST /foreign/guest/session` (domain `ws-guest-session-v1`). Guest-ness is
+read from the database (`_is_guest_user`), never from a token claim, and
+`guest_scope_middleware` holds a guest's token to `_GUEST_ALLOWED` — an
+allow-list, so a new endpoint is closed to guests until added there.
+`/ws-dm` refuses guests explicitly. `ISLAND_ACCEPT_GUESTS=0` turns it off.
 
 A foreign thread must never enter the local DM key path: `ensureDmKeyReady`
 reads this island's 404 as "create a key and share it with the peer", for a peer

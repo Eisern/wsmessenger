@@ -32,6 +32,8 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 # Self-host bind on 0.0.0.0 is intentional.
 "server/main.py" = ["S104"]
+# The server tests start uvicorn and node as subprocesses on purpose.
+"server/tests/*" = ["S603"]
 
 [tool.ruff.format]
 quote-style = "double"

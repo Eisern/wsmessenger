@@ -4123,116 +4123,96 @@ async def rooms_invite(room_id: int, payload: RoomInviteIn, request: Request, au
             if not await are_friends(session, int(u["user_id"]), int(target_user_id)):
                 raise HTTPException(status_code=403, detail="User doesn't accept group invites from non-friends")
 
-        # 3) invitee state: accepted/pending/none/declined
-        cur = await session.execute(sql_i("""
-            SELECT status
-            FROM chat_room_members
-            WHERE room_id = :rid AND user_id = :uid
-            LIMIT 1
-        """, "rid", "uid"), {"rid": room_id, "uid": target_user_id})
-        st = cur.scalar_one_or_none()  # 'accepted' | 'pending' | 'declined' | None | ...
+        status = await _invite_to_room(session, room_id, int(target_user_id), int(u["user_id"]))
+        await session.commit()
+        return {
+            "ok": True,
+            "room_id": room_id,
+            "invited_username": target_username,
+            "status": status,
+        }
 
-        # already accepted -> no-op
-        if st == "accepted":
-            return {
-                "ok": True,
-                "room_id": room_id,
-                "invited_username": target_username,
-                "status": "already_member",
-            }
-        
-        if st == "pending":
-            await session.execute(sql_i("""
-                UPDATE chat_room_members
-                SET invited_by = :by
-                WHERE room_id = :rid AND user_id = :uid AND status = 'pending'
-            """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": u["user_id"]})
 
-            await session.commit()
+async def _invite_to_room(session, room_id: int, target_user_id: int, by_user_id: int) -> str:
+    """
+    Move one person's membership of a room to "invited", whatever it was.
 
-            return {
-                "ok": True,
-                "room_id": room_id,
-                "invited_username": target_username,
-                "status": "already_invited",
-            }
-        
-        if st == "requested":
-            # User already requested to join — convert to pending invite
-            await session.execute(sql_i("""
-                UPDATE chat_room_members
-                SET role = 'member',
-                    invited_by = :by,
-                    status = 'pending'
-                WHERE room_id = :rid
-                  AND user_id = :uid
-                  AND status = 'requested'
-            """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": u["user_id"]})
+    The state machine every invitation goes through - a local member by name,
+    or a guest from another island by card (rooms_invite_guest). The caller has
+    already checked that `by_user_id` may invite; this only decides what the
+    invitation does to the row, and returns what happened. The caller commits.
+    """
+    cur = await session.execute(sql_i("""
+        SELECT status
+        FROM chat_room_members
+        WHERE room_id = :rid AND user_id = :uid
+        LIMIT 1
+    """, "rid", "uid"), {"rid": room_id, "uid": target_user_id})
+    st = cur.scalar_one_or_none()  # 'accepted' | 'pending' | 'declined' | None | ...
 
-            await session.commit()
+    if st == "accepted":
+        return "already_member"
 
-            return {
-                "ok": True,
-                "room_id": room_id,
-                "invited_username": target_username,
-                "status": "invited",
-            }
+    if st == "pending":
+        await session.execute(sql_i("""
+            UPDATE chat_room_members
+            SET invited_by = :by
+            WHERE room_id = :rid AND user_id = :uid AND status = 'pending'
+        """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": by_user_id})
+        return "already_invited"
 
-        if st in ("declined", "rejected", "kicked"):
-            # Only room owner can re-invite kicked users
-            if st == "kicked":
-                res_owner = await session.execute(sql_i("""
-                    SELECT 1 FROM chat_rooms
-                    WHERE id = :rid AND owner_user_id = :uid
-                    LIMIT 1
-                """, "rid", "uid"), {"rid": room_id, "uid": u["user_id"]})
-                if not res_owner.scalar_one_or_none():
-                    raise HTTPException(status_code=403, detail="Only room owner can re-invite kicked users")
+    if st == "requested":
+        # They already asked to join - the invitation answers it.
+        await session.execute(sql_i("""
+            UPDATE chat_room_members
+            SET role = 'member',
+                invited_by = :by,
+                status = 'pending'
+            WHERE room_id = :rid
+              AND user_id = :uid
+              AND status = 'requested'
+        """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": by_user_id})
+        return "invited"
 
-            await session.execute(sql_i("""
-                UPDATE chat_room_members
-                SET role = 'member',
-                    invited_by = :by,
-                    status = 'pending'
-                WHERE room_id = :rid
-                  AND user_id = :uid
-                  AND status IN ('declined', 'rejected', 'kicked')
-            """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": u["user_id"]})
+    if st in ("declined", "rejected", "kicked"):
+        # Only the room owner can bring back somebody who was kicked.
+        if st == "kicked":
+            res_owner = await session.execute(sql_i("""
+                SELECT 1 FROM chat_rooms
+                WHERE id = :rid AND owner_user_id = :uid
+                LIMIT 1
+            """, "rid", "uid"), {"rid": room_id, "uid": by_user_id})
+            if not res_owner.scalar_one_or_none():
+                raise HTTPException(status_code=403, detail="Only room owner can re-invite kicked users")
 
-            await session.commit()
+        await session.execute(sql_i("""
+            UPDATE chat_room_members
+            SET role = 'member',
+                invited_by = :by,
+                status = 'pending'
+            WHERE room_id = :rid
+              AND user_id = :uid
+              AND status IN ('declined', 'rejected', 'kicked')
+        """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": by_user_id})
+        return "reinvited"
 
-            return {
-                "ok": True,
-                "room_id": room_id,
-                "invited_username": target_username,
-                "status": "reinvited",
-            }
-       
-        if st is None:
-            await session.execute(sql_i("""
-                INSERT INTO chat_room_members (room_id, user_id, role, invited_by, status)
-                VALUES (:rid, :uid, 'member', :by, 'pending')
-                ON CONFLICT (room_id, user_id)
-                DO UPDATE SET
-                    role = 'member',
-                    invited_by = EXCLUDED.invited_by,
-                    status = CASE
-                        WHEN chat_room_members.status = 'accepted' THEN 'accepted'
-                        ELSE 'pending'
-                    END
-            """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": u["user_id"]})
+    if st is None:
+        await session.execute(sql_i("""
+            INSERT INTO chat_room_members (room_id, user_id, role, invited_by, status)
+            VALUES (:rid, :uid, 'member', :by, 'pending')
+            ON CONFLICT (room_id, user_id)
+            DO UPDATE SET
+                role = 'member',
+                invited_by = EXCLUDED.invited_by,
+                status = CASE
+                    WHEN chat_room_members.status = 'accepted' THEN 'accepted'
+                    ELSE 'pending'
+                END
+        """, "by", "rid", "uid"), {"rid": room_id, "uid": target_user_id, "by": by_user_id})
+        return "invited"
 
-            await session.commit()
-
-            return {
-                "ok": True,
-                "room_id": room_id,
-                "invited_username": target_username,
-                "status": "invited",
-            }
-
-        # unknown state -> stop
-        raise HTTPException(status_code=400, detail="Invalid member state")
+    # unknown state -> stop
+    raise HTTPException(status_code=400, detail="Invalid member state")
 
 @app.post("/rooms/{room_id}/kick", status_code=200)
 async def rooms_kick(room_id: int, payload: RoomKickIn, request: Request, authorization: str | None = Header(default=None)):
@@ -5918,6 +5898,11 @@ async def websocket_dm(ws: WebSocket, thread_id: int = Query(...)):
         username = (u.get("username") or "").strip() or f"user_{user_id}"
         token_payload = decode_token(token)
     except Exception:
+        await ws_forbid()
+        return
+
+    # Guests reach rooms only (see guest_scope_middleware); DMs are not theirs.
+    if await _is_guest_user(user_id):
         await ws_forbid()
         return
 
@@ -7829,6 +7814,25 @@ async def foreign_challenge(request: Request):
     }
 
 
+async def _spend_foreign_nonce(nonce: bytes) -> bool:
+    """
+    Spend a challenge nonce, committed before the caller decides anything.
+
+    True if it was one this island handed out within the TTL and had not been
+    spent. Committing here, on its own, is the point: a caller that refuses
+    raises out of its own transaction, and that must not bring the nonce back.
+    """
+    async with SessionLocal() as session, session.begin():
+        await _ensure_foreign_box_tables(session)
+        res = await session.execute(text("""
+            DELETE FROM chat_foreign_challenges
+            WHERE nonce = :n
+              AND created_at >= NOW() - (:ttl * INTERVAL '1 second')
+            RETURNING nonce
+        """), {"n": nonce, "ttl": FOREIGN_CHALLENGE_TTL_S})
+        return res.scalar_one_or_none() is not None
+
+
 @app.post("/foreign/claim")
 async def foreign_claim(payload: ForeignClaimIn, request: Request):
     """
@@ -7870,21 +7874,16 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
     if len(nonce) != 32 or len(sig) != 64:
         raise _denied(f"wrong sizes: nonce={len(nonce)} sig={len(sig)}")
 
+    # The nonce is spent on sight, whatever the outcome - in a transaction of
+    # its own. It used to be deleted inside the one below, and every refusal
+    # raised out of that transaction rolled the deletion back: a failed attempt
+    # left the nonce alive for the next one.
+    if not await _spend_foreign_nonce(nonce):
+        raise _denied("nonce unknown, already spent, or older than the TTL")
+
     async with SessionLocal() as session:
         async with session.begin():
             await _ensure_foreign_box_tables(session)
-
-            # The nonce is spent on sight, whatever the outcome. A nonce that
-            # survived a failed attempt would let an attacker grind signatures
-            # against one challenge.
-            res = await session.execute(text("""
-                DELETE FROM chat_foreign_challenges
-                WHERE nonce = :n
-                  AND created_at >= NOW() - (:ttl * INTERVAL '1 second')
-                RETURNING nonce
-            """), {"n": nonce, "ttl": FOREIGN_CHALLENGE_TTL_S})
-            if not res.scalar_one_or_none():
-                raise _denied("nonce unknown, already spent, or older than the TTL")
 
             res = await session.execute(text("""
                 SELECT b.thread_id, b.peer_ed25519_pub, b.peer_wrapped_key, b.peer_wrapped_kid
@@ -7936,6 +7935,361 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
         "encrypted_thread_key": box["peer_wrapped_key"],
         "key_id": box["peer_wrapped_kid"],
     }
+
+
+# =========================================================================
+# Guests: people from other islands in rooms here
+# =========================================================================
+# A room lives on one island. Somebody from another island takes part as a
+# GUEST of this one: a principal bound to their key, created from their signed
+# contact card when a moderator invites them, signing in with that key instead
+# of a password. A guest is an ordinary `users` row - that is what lets rooms,
+# room keys, history, sockets, key backfill and /keys/{name} work for them
+# unchanged - and the database, never a token claim, says it is a guest.
+#
+# See docs/internal/cross-island-rooms-assessment.md for the design and the
+# threat model.
+
+GUEST_SESSION_DOMAIN = b"ws-guest-session-v1"
+CONTACT_SIG_DOMAIN = b"ws-contact-v1"
+# Never verifies: passlib refuses a hash it cannot parse, and the password
+# check fails closed on that. A guest has no password to log in with.
+GUEST_PASSWORD_MARKER = "!guest"  # noqa: S105 - a marker that is never a password
+
+_GUEST_READY = False
+_GUEST_LOCK = asyncio.Lock()
+# user_id -> is a guest. Fixed for the life of an id: a guest is created as a
+# new row and a local account never becomes one, so both answers are cached.
+_GUEST_IDS: dict[int, bool] = {}
+
+
+def _guests_enabled() -> bool:
+    """On wherever cross-island messages are on, unless ISLAND_ACCEPT_GUESTS=0."""
+    return bool(_island_id()) and (os.getenv("ISLAND_ACCEPT_GUESTS") or "1").strip() != "0"
+
+
+async def _ensure_guest_tables(session: AsyncSession) -> None:
+    global _GUEST_READY
+    if _GUEST_READY:
+        return
+    async with _GUEST_LOCK:
+        if _GUEST_READY:
+            return
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS chat_foreign_guests (
+                user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                kid VARCHAR(32) NOT NULL UNIQUE,
+                x25519_pub TEXT NOT NULL,
+                ed25519_pub TEXT NOT NULL,
+                home_island TEXT NOT NULL DEFAULT '',
+                card JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.commit()
+        _GUEST_READY = True
+
+
+async def _is_guest_user(user_id: int) -> bool:
+    uid = int(user_id)
+    cached = _GUEST_IDS.get(uid)
+    if cached is not None:
+        return cached
+    async with SessionLocal() as session:
+        await _ensure_guest_tables(session)
+        res = await session.execute(
+            text("SELECT 1 FROM chat_foreign_guests WHERE user_id = :u"), {"u": uid}
+        )
+        is_guest = res.scalar_one_or_none() is not None
+    _GUEST_IDS[uid] = is_guest
+    return is_guest
+
+
+# What a guest's token may reach: the rooms they were invited to, and nothing
+# else. Allow-list, not deny-list - an endpoint added tomorrow is closed to
+# guests until somebody decides otherwise.
+_GUEST_ALLOWED: list[tuple[str, re.Pattern]] = [
+    ("GET", re.compile(r"^/(health|api/notice)$")),
+    ("POST", re.compile(r"^/auth/(logout|logout-all|refresh)$")),
+    ("GET", re.compile(r"^/rooms/(invites|mine|list)$")),
+    ("GET", re.compile(r"^/rooms/\d+/(history|members|meta|pin|logo)$")),
+    ("POST", re.compile(r"^/rooms/\d+/(invites/accept|invites/decline|leave|mark_seen|files)$")),
+    ("GET", re.compile(r"^/crypto/room-key/\d+(/archive)?$")),
+    ("GET", re.compile(r"^/crypto/room/\d+/key$")),
+    ("POST", re.compile(r"^/crypto/room-key$")),
+    ("GET", re.compile(r"^/keys/[^/]+(/[^/]+)?$")),
+    ("GET", re.compile(r"^/files/[^/]+$")),
+    ("POST", re.compile(r"^/reports$")),
+]
+
+
+def _guest_may(method: str, path: str) -> bool:
+    m = (method or "").upper()
+    if m == "HEAD":
+        m = "GET"
+    return any(m == am and rx.match(path or "") for am, rx in _GUEST_ALLOWED)
+
+
+@app.middleware("http")
+async def guest_scope_middleware(request: Request, call_next):
+    """Hold a guest's token to the allow-list above, on every HTTP request."""
+    auth = request.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+        try:
+            u = get_user_from_token(token) if token else None
+        except Exception:
+            u = None   # an invalid token is the endpoint's business, not ours
+        if (u and await _is_guest_user(int(u["user_id"]))
+                and not _guest_may(request.method, request.url.path)):
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Not available to guests", "reason": "guest"},
+            )
+    return await call_next(request)
+
+
+def _b64_32(value: str, what: str) -> bytes:
+    s = (value or "").strip()
+    try:
+        raw = base64.b64decode(s.replace("-", "+").replace("_", "/") + "=" * (-len(s) % 4))
+    except Exception:
+        raise HTTPException(status_code=400, detail=f"{what} is not base64") from None
+    if len(raw) != 32:
+        raise HTTPException(status_code=400, detail=f"{what} must be 32 bytes")
+    return raw
+
+
+def _verify_contact_card(card: Any) -> dict:
+    """
+    Check a contact card against itself, the way the clients do.
+
+    It is its own root of trust: the kid must be the hash of the X25519 key
+    beside it, and the whole payload must be signed by the Ed25519 key it
+    carries - which is what binds the two keys to one person. Canonical form
+    and domain are the clients' (foreign-dm.js `contactSigBytes`).
+    """
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from island_list import canonical_json
+
+    if not isinstance(card, dict) or not isinstance(card.get("payload"), dict):
+        raise HTTPException(status_code=400, detail="malformed card")
+    p = card["payload"]
+    if p.get("v") != 1:
+        raise HTTPException(status_code=400, detail="unsupported card version")
+    kid = _norm_kid(str(p.get("kid") or ""))
+    x_b64 = str(p.get("x25519_pub_b64") or "").strip()
+    ed_b64 = str(p.get("ed25519_pub_b64") or "").strip()
+    _b64_32(x_b64, "x25519 key")
+    ed_raw = _b64_32(ed_b64, "ed25519 key")
+    if _kid_of_pub(x_b64) != kid:
+        raise HTTPException(status_code=400, detail="kid does not match key")
+    island = str(p.get("island_id") or "").strip()
+    if not island:
+        raise HTTPException(status_code=400, detail="card names no island")
+
+    sig_s = str(card.get("sig_b64") or "").strip()
+    try:
+        sig = base64.b64decode(sig_s.replace("-", "+").replace("_", "/") + "=" * (-len(sig_s) % 4))
+        message = CONTACT_SIG_DOMAIN + canonical_json(p).encode("utf-8")
+        Ed25519PublicKey.from_public_bytes(ed_raw).verify(sig, message)
+    except Exception:
+        raise HTTPException(status_code=400, detail="card signature does not verify") from None
+
+    return {
+        "kid": kid,
+        "x25519": x_b64,
+        "ed25519": ed_b64,
+        "island_id": island,
+        "display_name": str(p.get("display_name") or "").strip()[:64],
+        "card": card,
+    }
+
+
+def _guest_username_base(display: str, island: str) -> str:
+    # Letters and digits in any script, so a Cyrillic name stays a name; the
+    # "@island~kid" tail keeps it from ever looking exactly like a local one.
+    name = "".join(c for c in display if c.isalnum() or c in "_.-")[:16] or "guest"
+    isl = "".join(c for c in island.lower() if c.isalnum() or c in ".-")[:40] or "island"
+    return f"{name}@{isl}"
+
+
+async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]:
+    """Find or create the guest bound to this card's key. Returns (user_id, username)."""
+    await _ensure_guest_tables(session)
+    await _ensure_ed25519_support(session)
+
+    res = await session.execute(text("""
+        SELECT g.user_id, g.ed25519_pub, u.username
+        FROM chat_foreign_guests g JOIN users u ON u.id = g.user_id
+        WHERE g.kid = :kid
+    """), {"kid": card["kid"]})
+    row = res.mappings().first()
+    if row:
+        # One key, one signing key: they are derived from the same identity, so
+        # a card pairing this kid with another Ed25519 key is not that person.
+        if row["ed25519_pub"] != card["ed25519"]:
+            raise HTTPException(status_code=409, detail="this key is already a guest here, with another signing key")
+        return int(row["user_id"]), row["username"]
+
+    base_name = _guest_username_base(card["display_name"], card["island_id"])
+    username = None
+    for n in (6, 10, 32):
+        candidate = f"{base_name}~{card['kid'][:n]}"
+        taken = await session.execute(
+            text("SELECT 1 FROM users WHERE lower(username) = lower(:u)"), {"u": candidate}
+        )
+        if not taken.scalar_one_or_none():
+            username = candidate
+            break
+    if not username:
+        raise HTTPException(status_code=409, detail="cannot name this guest")
+
+    res = await session.execute(text("""
+        INSERT INTO users (username, password_hash, public_key)
+        VALUES (:u, :ph, :pk)
+        RETURNING id
+    """), {"u": username, "ph": GUEST_PASSWORD_MARKER, "pk": card["x25519"]})
+    uid = int(res.scalar_one())
+
+    x_kid = hashlib.sha256(_b64_32(card["x25519"], "x25519 key")).hexdigest()[:32]
+    ed_kid = hashlib.sha256(_b64_32(card["ed25519"], "ed25519 key")).hexdigest()[:32]
+    await session.execute(text("""
+        INSERT INTO chat_user_keys(user_id, alg, kid, public_key, is_active)
+        VALUES (:uid, 'x25519', :xk, :xp, true), (:uid, 'ed25519', :ek, :ep, true)
+    """), {"uid": uid, "xk": x_kid, "xp": card["x25519"], "ek": ed_kid, "ep": card["ed25519"]})
+    await session.execute(sql_i("""
+        INSERT INTO chat_user_profiles(user_id, about, privacy)
+        VALUES (:uid, '', CAST(:privacy AS jsonb))
+        ON CONFLICT (user_id) DO NOTHING
+    """, "uid"), {"uid": uid, "privacy": json.dumps(DEFAULT_PRIVACY)})
+    await session.execute(text("""
+        INSERT INTO chat_foreign_guests(user_id, kid, x25519_pub, ed25519_pub, home_island, card)
+        VALUES (:uid, :kid, :x, :ed, :isl, CAST(:card AS jsonb))
+    """), {
+        "uid": uid, "kid": card["kid"], "x": card["x25519"], "ed": card["ed25519"],
+        "isl": card["island_id"], "card": json.dumps(card["card"]),
+    })
+    _GUEST_IDS[uid] = True
+    return uid, username
+
+
+class GuestInviteIn(BaseModel):
+    card: dict[str, Any]
+
+
+@app.post("/rooms/{room_id}/guests", status_code=201)
+async def rooms_invite_guest(
+    room_id: int,
+    payload: GuestInviteIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Invite somebody from another island into this room, by their contact card.
+
+    A room moderator only. The card must hold up on its own; the guest it
+    names is found or created by key, and invited exactly as a local member
+    would be - minus the "friends only" privacy check, which a guest, having no
+    friends here, could never pass.
+    """
+    u = require_user_from_bearer(authorization)
+    ip = get_client_ip_request(request)
+    await enforce_http_rate_limit(f"rooms:invite:ip:{ip}", RL_ROOMS_INVITE_IP_PER_10MIN, 600)
+    await enforce_http_rate_limit(f"rooms:invite:user:{int(u['user_id'])}", RL_ROOMS_INVITE_USER_PER_10MIN, 600)
+
+    if not _guests_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    card = _verify_contact_card(payload.card)
+    if card["island_id"].lower() == _island_id().lower():
+        raise HTTPException(status_code=400, detail="that card is from this island - invite them by name")
+
+    async with SessionLocal() as session:
+        res = await session.execute(sql_i("SELECT 1 FROM chat_rooms WHERE id = :rid", "rid"), {"rid": room_id})
+        if not res.scalar_one_or_none():
+            raise HTTPException(status_code=404, detail="Room not found")
+        await require_room_moderator(session, room_id, u["user_id"])
+
+        guest_id, guest_name = await _guest_principal(session, card)
+        status = await _invite_to_room(session, room_id, guest_id, int(u["user_id"]))
+        await session.commit()
+
+    return {
+        "ok": True,
+        "room_id": room_id,
+        "guest_username": guest_name,
+        "status": status,
+        "island_id": _island_id(),
+    }
+
+
+class GuestSessionIn(BaseModel):
+    kid: str
+    nonce_b64: str
+    sig_b64: str
+
+
+@app.post("/foreign/guest/session")
+async def foreign_guest_session(payload: GuestSessionIn, request: Request):
+    """
+    Sign a guest in with their key: a nonce from /foreign/challenge, signed.
+
+    The signature covers "ws-guest-session-v1" || island id || kid || nonce -
+    another domain than the mailbox claim, so neither can be replayed as the
+    other, and bound to this island, so one collected elsewhere is useless here.
+    Every refusal is the same 403, and the nonce is spent either way.
+    """
+    ip = get_client_ip_request(request)
+    await enforce_http_rate_limit(f"foreign:guest:ip:{ip}", RL_LOGIN_IP_PER_MIN, 60)
+
+    island = _island_id()
+    if not _guests_enabled():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    def _denied(reason: str):
+        print(f"[foreign/guest] denied: {reason}", flush=True)
+        return HTTPException(status_code=403, detail="forbidden")
+
+    kid = (payload.kid or "").strip().lower()
+    try:
+        nonce = base64.b64decode((payload.nonce_b64 or "").strip(), validate=False)
+        s = (payload.sig_b64 or "").strip()
+        sig = base64.b64decode(s.replace("-", "+").replace("_", "/") + "=" * (-len(s) % 4))
+    except Exception:
+        raise _denied("nonce or signature is not base64") from None
+    if len(nonce) != 32 or len(sig) != 64:
+        raise _denied(f"wrong sizes: nonce={len(nonce)} sig={len(sig)}")
+    if not await _spend_foreign_nonce(nonce):
+        raise _denied("nonce unknown, already spent, or older than the TTL")
+    if len(kid) != 32 or any(c not in "0123456789abcdef" for c in kid):
+        raise _denied("bad kid")
+
+    async with SessionLocal() as session:
+        await _ensure_guest_tables(session)
+        res = await session.execute(text("""
+            SELECT g.user_id, g.ed25519_pub, u.username, COALESCE(u.is_banned, false) AS is_banned
+            FROM chat_foreign_guests g JOIN users u ON u.id = g.user_id
+            WHERE g.kid = :kid
+        """), {"kid": kid})
+        row = res.mappings().first()
+    if not row:
+        raise _denied(f"no guest for kid {kid}")
+    if row["is_banned"]:
+        raise _denied(f"guest {row['username']} is banned")
+
+    message = GUEST_SESSION_DOMAIN + island.encode("utf-8") + kid.encode("ascii") + nonce
+    try:
+        Ed25519PublicKey.from_public_bytes(_b64_32(row["ed25519_pub"], "ed25519 key")).verify(sig, message)
+    except Exception as e:
+        raise _denied(f"signature does not verify for kid {kid} on island {island}: {e}") from None
+
+    out = await _issue_token_pair(int(row["user_id"]), row["username"])
+    out["guest"] = True
+    out["island_id"] = island
+    return out
 
 
 # --- Config via env ---
@@ -8188,6 +8542,10 @@ def _log_island_status() -> None:
             "[island] %s: cross-island messages on, signed list v%d with %d entry point(s)",
             _island_id(), cfg.version, len(cfg.entry_points),
         )
+    log.info(
+        "[island] %s: guests from other islands in rooms here: %s",
+        _island_id(), "on" if _guests_enabled() else "off (ISLAND_ACCEPT_GUESTS=0)",
+    )
 
 
 _log_island_status()

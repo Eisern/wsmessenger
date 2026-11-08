@@ -1,0 +1,12 @@
+# WS Messenger — backend test dependencies (on top of requirements.txt).
+# Install with:  pip install -r server/requirements.txt -r server/requirements-dev.txt
+#
+# The tests in server/tests run the real server against a real PostgreSQL.
+# Point TEST_DATABASE_URL at one (an admin URL; a database is created per run),
+# or install `pgserver` below for a throwaway PostgreSQL with nothing else set up.
+
+pytest>=8.0,<10.0
+httpx>=0.27,<1.0
+
+# Optional, local runs only: a pip-installable PostgreSQL (needs Python <= 3.13).
+# pgserver>=0.1.4
