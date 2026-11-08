@@ -6,63 +6,17 @@ Versions are shared by the whole project from 0.4.0 on: the tag, the extension's
 `manifest.json` and the Android `versionName` say the same thing. Before that
 they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
-## Unreleased
-
-### Fixed — security: what the island could still do after 0.5.0
-
-0.5.0 switched the signature writers on. Looking at what the readers checked
-them against showed that, against a dishonest island, the signatures proved
-much less than they said.
-
-- **Every signature was checked against a key the island served.** DM
-  signatures, room-message signatures and key-wrap signatures were all
-  verified with whatever Ed25519 key `/keys/{name}` returned, unpinned — so the
-  island could serve a key of its own and sign anything as anyone. Peers'
-  signing keys are now pinned on first sight, next to the X25519 pin; a
-  different key later is parked, not used, and only the user verifying the
-  peer moves the pin. Safety numbers still cover only the X25519 key, so first
-  contact remains trust-on-first-use.
-- **An unsigned key wrap could bring any key.** An unsigned wrap now only hands
-  back a key the device already held; it can never introduce a new one. Writers
-  refuse to produce an unsigned wrap instead of quietly skipping the signature,
-  and a new room's key — which has to go up unsigned, before the room has an id
-  to sign against — is re-signed as soon as the island answers with the id.
-- **Any account could sign a key.** A signed wrap now has to come from the DM
-  peer, or from someone the island lists as a member of the room. The island
-  can still mint an account, but it then has to show it in the member list.
-- **Android loaded an archived key with no key id as the room's current key**,
-  which let the island roll a room back to a key a departed member still held.
-  Archived keys now always go to the archive, under the id of the key itself.
-- **Cross-island contact names sat on the island in the clear.** The clients
-  sent the name from a contact card as the mailbox label. They no longer do;
-  the server drops the field and erases what it had stored.
-
-### Breaking — keys handed out before 0.5.0
-
-They are all unsigned, so they now open only on a device that already held
-them. In the extension that is any device that had opened the room or DM before
-(its key archive is persisted). On Android it covers rooms but **not DMs**:
-Android does not keep DM keys between sessions, so a DM whose key predates
-0.5.0 no longer opens there. A room recovers when its owner rotates the key; a
-DM does not — there is no DM re-key. The project has no users yet, so this
-costs test data only.
-
-### Added — tests
-
-- `extensionKeyTrust.test.js` runs the extension's real `panel-crypto.js`
-  headless against a stubbed island — the first offline tests of the
-  extension's key handling — and holds it to the same rules as Android.
-- Each rule was checked by breaking it: accepting unsigned keys, skipping the
-  signer check, and trusting the served signing key each fail exactly the tests
-  written for them, in both clients.
-
 ## 0.5.0 — 2026-11-08
 
-### Read this first: clients older than 0.4.0 stop working properly
+### Read this first: what stops working
 
 0.4.0 shipped the **readers** for three things; this release switches on the
-**writers**, in both clients. Anybody still on a client older than 0.4.0 —
-extension or APK — should update before the people they talk to do:
+**writers**, in both clients, and starts refusing keys it cannot vouch for.
+Nothing changes for the server, and nothing has to be migrated, but two kinds of
+old things stop working.
+
+**Clients older than 0.4.0.** Anybody still on one — extension or APK — should
+update before the people they talk to do:
 
 | What is now written | What a client older than 0.4.0 does with it |
 |---|---|
@@ -70,31 +24,73 @@ extension or APK — should update before the people they talk to do:
 | Signed key wraps, format v3 (`KEY_WRAP_SIG_WRITE_ENABLED`) | **cannot open the room or DM key at all** |
 | Chained DM signatures, v2 (`CHAIN_WRITE_ENABLED`) | rejects the signature: an honest message reads as forged |
 
-Nothing changes for the server, and nothing has to be migrated.
+**Keys handed out before 0.5.0.** They are all unsigned, so they now open only
+on a device that already held them. In the extension that is any device that had
+opened the room or DM before (its key archive is persisted). On Android it covers
+rooms but **not DMs**: Android does not keep DM keys between sessions, so a DM
+whose key predates 0.5.0 no longer opens there. A room recovers when its owner
+rotates the key; a DM does not — there is no DM re-key. The project has no
+users yet, so this costs test data only.
 
-### Changed — what a message and a key prove, now that they are written
+### Changed — what a message and a key prove
+
+The writers being on is half of it. Following what the readers checked the new
+signatures against showed that, against a dishonest island — the one adversary
+they exist for — they proved far less than they claimed. This release closes
+that too.
 
 - **A room message says who wrote it, checkably.** The room key proves only
   membership; the signature is what stops a server from moving one member's
   words under another member's name.
-- **A key says who handed it to you.** Every room and DM key this client wraps
-  for somebody carries the wrapper's name and signature, bound to the room, the
-  recipient and the key version, and a signed key that does not verify is
-  refused. Cross-island keys stay unsigned (v2): there is no local name to bind
-  them to.
-  - **What this does not do yet.** Unsigned keys are still accepted everywhere,
-    because every key handed out before this release is unsigned. So a server
-    that wants to slip a member a key of its own making can still serve it
-    *unsigned*, and it will open. Closing that needs clients to refuse unsigned
-    keys where they no longer have an excuse to exist — that is the next step,
-    and this release is what makes it possible.
+- **Signatures are checked against a key the island cannot swap.** Every
+  signature — DM, room message, key wrap — used to be verified with whatever
+  Ed25519 key `/keys/{name}` returned, unpinned, so the island could serve a key
+  of its own and sign anything as anyone. Peers' signing keys are now pinned on
+  first sight, next to the X25519 pin; a different key later is parked, not
+  used, and only the user verifying the peer moves the pin.
+- **A key says who handed it to you, and only an entitled person may.** Every
+  room and DM key this client wraps carries the wrapper's name and signature,
+  bound to the room, the recipient and the key version. A signed key must verify
+  under the signer's pinned key and come from the DM peer or a member of the
+  room — the island can still mint an account, but it then has to show it in the
+  member list. Anything that fails is refused, not flagged.
+- **An unsigned key can no longer bring anything new.** It only hands back a key
+  the device already held. Writers refuse to produce an unsigned wrap instead of
+  quietly skipping the signature, and a new room's key — which must go up
+  unsigned, before the room has an id to sign against — is re-signed as soon as
+  the island answers with the id. Cross-island keys stay unsigned (v2): there is
+  no local name to bind them to, and they never enter this path.
 - **Deleting or reordering stored DMs is detectable.** Each message signs its
   position in the sender's run, so a gap or a re-filed message shows up on the
   reader's side. Cross-island threads are not chained yet.
-- New offline tests close the loop the flags open: what each writer produces is
-  fed back to the matching reader — a room message must verify, and a key this
-  client wraps and uploads must open the room again when the server hands it
-  back.
+- **What this still does not do.** First contact is trust-on-first-use, as it
+  was for X25519 keys: safety numbers cover the X25519 key only, so comparing
+  them does not yet catch a signing key swapped at first contact. Room
+  membership is the island's word. And the island can still serve an *older*
+  key the device already holds as the current one.
+
+### Fixed — security
+
+- **Android loaded an archived key with no key id as the room's current key**,
+  which let the island roll a room back to a key a departed member still held.
+  Archived keys now always go to the archive, under the id of the key itself.
+- **Cross-island contact names sat on the island in the clear.** The clients
+  sent the name from a contact card as the mailbox label. They no longer do;
+  the server drops the field and erases what it had stored.
+
+### Added — tests
+
+- The flags' tests used to pin "nothing signed goes out yet" on purpose; they
+  now pin the new state, and close the loop the flags open: what each writer
+  produces is fed back to the matching reader — a room message must verify, and
+  a key this client wraps and uploads must open the room again when the server
+  hands it back.
+- `extensionKeyTrust.test.js` runs the extension's real `panel-crypto.js`
+  headless against a stubbed island — the first offline tests of the
+  extension's key handling — and holds it to the same rules as Android.
+- Each rule was checked by breaking it: accepting unsigned keys, skipping the
+  signer check, and trusting the served signing key each fail exactly the tests
+  written for them, in both clients.
 
 ### Added — self-hosting
 
