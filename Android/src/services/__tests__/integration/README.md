@@ -173,8 +173,9 @@ in the entry-point work - was previously exercised against a proxy that returned
 401 on command, which proves the client copes with a 401, not that it copes with
 a different server.
 
-Cross-island direct messaging is designed but not implemented, so nothing here
-sends a message between users of the two islands.
+This suite does not send messages between users of the two islands; that is
+`crossIsland.test.js` and `panelCrossIsland.test.js`, below, against the same
+two islands.
 
 ## Bringing up the second island
 

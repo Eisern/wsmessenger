@@ -79,7 +79,7 @@ On login (`login.js`) and on panel re-unlock (`panel-crypto.js` `interactiveUnlo
 
 The **panel** holds the identity private key, not the service worker. `crypto-utils.js` and `crypto-manager.js` are loaded only by `panel.html` and `login.html`; `background.js` has no `importScripts` and never sees an X25519 key. What background keeps is the password-derived `_masterKey` (for `storage_encrypt`/`storage_decrypt`), the one-shot `_unlockKekKey` session key, and the ephemeral P-256 key pair used for the handoff in step 3 — each on the 10-minute idle TTL. Room-key wrapping and message decryption therefore happen in the panel; the worker is a transport, not a crypto oracle.
 
-EPK is **never** on the server. `GET /crypto/keys` returns HTTP 410 Gone ([server/main.py:3120](server/main.py#L3120)); any Android/extension code path that still calls it is deprecated and will fail.
+EPK is **never** on the server. `GET /crypto/keys` returns HTTP 410 Gone (`get_user_crypto_keys` in [server/main.py](server/main.py)); any Android/extension code path that still calls it is deprecated and will fail.
 
 ### Room Key Delivery
 

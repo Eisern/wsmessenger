@@ -14,7 +14,7 @@
 
 Или вы можете взять файл бэкенда ([`server/main.py`](server/main.py)), схему базы данных ([`server/schema.sql`](server/schema.sql)) почитать файл [`docs/self-hosting.md`](docs/self-hosting.md) и запустить свой такой же сервер и, указав его в клиенте, общаться в вашем небольшом (или большом!) кругу.
 
-А я пойду пилить его дальше-из ближайших целей-максимально возможно упростить self-hosting проекта и попробовать внедрить федеративный протокол для общения между такими самостоятельными серверами.
+А я пойду пилить его дальше. Две цели, которые я ставил здесь раньше, — упростить self-hosting и научить самостоятельные серверы общаться между собой — сделаны в первом приближении: сервер поднимается одной командой ([`scripts/bootstrap.sh`](scripts/bootstrap.sh)), а пользователи разных серверов могут переписываться в личке, обменявшись карточками контактов. Сами серверы при этом друг с другом не общаются и друг другу не доверяют. Групповых комнат между серверами пока нет.
 
 
 
@@ -79,6 +79,18 @@ security policy allows `https:` and `wss:` only, and its optional host
 permissions cover `https://*/*`, so a plain-HTTP backend cannot be used
 even on localhost.
 
+### Talking to people on other servers
+
+Users of different servers can exchange **direct messages**. Each side
+adds the other's contact card, handed over out of band, and each client
+delivers into a mailbox on the other's server — the servers never
+connect to each other and do not have to trust each other. A server
+needs an *island identity* for this; `scripts/bootstrap.sh` sets it up,
+and [`docs/self-hosting.md` §8.3](docs/self-hosting.md#83-talking-to-other-servers-islands)
+covers doing it by hand. Rooms and attachments do not cross servers yet.
+The design, and what each server learns, is in
+[`docs/architecture.md`](docs/architecture.md#islands-several-addresses-several-servers).
+
 ## Running the backend
 
 Requires Python 3.11+ and PostgreSQL 13+ (tested on 17). Quick start for
@@ -109,7 +121,9 @@ all base tables must exist before the first request.
 
 For a full production deployment — VPS setup, systemd unit, nginx + TLS,
 creating the first admin, updates, and troubleshooting — see
-[`docs/self-hosting.md`](docs/self-hosting.md).
+[`docs/self-hosting.md`](docs/self-hosting.md). On a fresh Debian 12 or
+Ubuntu 22.04/24.04 host, [`scripts/bootstrap.sh`](scripts/bootstrap.sh)
+does all of it in one command.
 
 ## Building the Android APK
 

@@ -49,6 +49,16 @@ they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
   messages. It does: thread membership and message timing are stored in plain.
   Sealed sender hides which of the two wrote a given message, and nothing more;
   `docs/architecture.md` now says so next to the mechanism.
+- `docs/architecture.md` describes islands — several addresses for one server,
+  the signed island list, direct messages between servers, relays — and what
+  each server learns about a cross-island conversation. It had not mentioned
+  any of it.
+- `relay/README.md` no longer says no client speaks the relay protocol; both
+  do. It now walks through connecting a relay to an island end to end,
+  including the two steps that were missing: publishing the relay in the
+  island's signed list (clients learn relays from nowhere else), and keying the
+  relay's config by the island's exact `ISLAND_ID`.
+- The README says what the two goals it announced have become.
 
 ## 0.4.0 — 2026-09-14
 

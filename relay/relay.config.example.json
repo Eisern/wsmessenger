@@ -1,7 +1,7 @@
 {
   "relay_id": "relay-yourname",
   "islands": {
-    "island-example": {
+    "messenger.example.com": {
       "url": "https://messenger.example.com",
       "key_b64": "REPLACE_WITH_THE_SHARED_KEY_THE_ISLAND_OPERATOR_GIVES_YOU"
     }
