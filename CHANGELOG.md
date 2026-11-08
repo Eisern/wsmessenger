@@ -6,7 +6,45 @@ Versions are shared by the whole project from 0.4.0 on: the tag, the extension's
 `manifest.json` and the Android `versionName` say the same thing. Before that
 they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
-## Unreleased
+## 0.5.0 — 2026-11-08
+
+### Read this first: clients older than 0.4.0 stop working properly
+
+0.4.0 shipped the **readers** for three things; this release switches on the
+**writers**, in both clients. Anybody still on a client older than 0.4.0 —
+extension or APK — should update before the people they talk to do:
+
+| What is now written | What a client older than 0.4.0 does with it |
+|---|---|
+| Signed room messages (`ROOM_SIG_WRITE_ENABLED`) | shows the envelope's JSON as the message text |
+| Signed key wraps, format v3 (`KEY_WRAP_SIG_WRITE_ENABLED`) | **cannot open the room or DM key at all** |
+| Chained DM signatures, v2 (`CHAIN_WRITE_ENABLED`) | rejects the signature: an honest message reads as forged |
+
+Nothing changes for the server, and nothing has to be migrated.
+
+### Changed — what a message and a key prove, now that they are written
+
+- **A room message says who wrote it, checkably.** The room key proves only
+  membership; the signature is what stops a server from moving one member's
+  words under another member's name.
+- **A key says who handed it to you.** Every room and DM key this client wraps
+  for somebody carries the wrapper's name and signature, bound to the room, the
+  recipient and the key version, and a signed key that does not verify is
+  refused. Cross-island keys stay unsigned (v2): there is no local name to bind
+  them to.
+  - **What this does not do yet.** Unsigned keys are still accepted everywhere,
+    because every key handed out before this release is unsigned. So a server
+    that wants to slip a member a key of its own making can still serve it
+    *unsigned*, and it will open. Closing that needs clients to refuse unsigned
+    keys where they no longer have an excuse to exist — that is the next step,
+    and this release is what makes it possible.
+- **Deleting or reordering stored DMs is detectable.** Each message signs its
+  position in the sender's run, so a gap or a re-filed message shows up on the
+  reader's side. Cross-island threads are not chained yet.
+- New offline tests close the loop the flags open: what each writer produces is
+  fed back to the matching reader — a room message must verify, and a key this
+  client wraps and uploads must open the room again when the server hands it
+  back.
 
 ### Added — self-hosting
 

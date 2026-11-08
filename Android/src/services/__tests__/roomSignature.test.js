@@ -10,12 +10,11 @@
  * row. A server that wanted to could move one member's words under another
  * member's name, and no amount of encryption would contradict it.
  *
- * The signature is what makes the claim checkable. This covers the reading
- * side, which ships first - a client has to understand the envelope before
- * anybody starts writing one, or it would show the JSON as the message text.
- * The writer stays behind ROOM_SIG_WRITE_ENABLED until then, and the last test
- * here is what makes flipping that flag a deliberate act rather than an
- * accident.
+ * The signature is what makes the claim checkable. The reading side shipped
+ * first (0.4.0) - a client has to understand the envelope before anybody
+ * starts writing one, or it would show the JSON as the message text. The
+ * writer (ROOM_SIG_WRITE_ENABLED) is on from 0.5.0; the last tests pin that it
+ * signs, and that what it signs is what the reader accepts.
  */
 const { x25519, ed25519 } = require('@noble/curves/ed25519');
 
@@ -148,16 +147,32 @@ describe('what came before signing existed', () => {
   });
 });
 
-describe('the writer stays off until both clients can read', () => {
-  test('nothing signed goes out yet', async () => {
-    const wire = await CryptoService.encryptMessage(ROOM, 'plain for now', 'alice');
+describe('the writer is on (0.5.0): readers shipped in 0.4.0', () => {
+  test('what goes out is a signed envelope, and it verifies under our key', async () => {
+    const wire = await CryptoService.encryptMessage(ROOM, 'signed now', 'alice');
+    const parsed = JSON.parse(wire);
     const plain = await CryptoUtils.decryptMessage(
       await CryptoUtils.importRoomKey(roomKeyB64),
-      JSON.parse(wire),
-      JSON.parse(wire).kid ? new TextEncoder().encode(String(JSON.parse(wire).kid)) : undefined,
+      parsed,
+      parsed.kid ? new TextEncoder().encode(String(parsed.kid)) : undefined,
     );
-    // Flipping ROOM_SIG_WRITE_ENABLED changes this line, and should be done
-    // only once readers are out - a client without them shows the JSON.
-    expect(plain).toBe('plain for now');
+    // A client older than 0.4.0 shows exactly this JSON as the message text -
+    // the cost CHANGELOG.md names for 0.5.0.
+    const envelope = JSON.parse(plain);
+    expect(envelope).toMatchObject({ rs: 1, from: 'alice', body: 'signed now' });
+    expect(CryptoUtils.ed25519Verify(
+      CryptoService.ed25519PublicKey(),
+      new Uint8Array(CryptoUtils.base64ToArrayBuffer(envelope.sig)),
+      CryptoUtils._roomSigMessage(ROOM, 'alice', 'signed now'),
+    )).toBe(true);
+  });
+
+  test('and the reader accepts what the writer wrote', async () => {
+    const wire = await CryptoService.encryptMessage(ROOM, 'round trip', 'alice');
+    const out = await CryptoService.decryptMessage(ROOM, wire, 'alice');
+    expect(out.text).toBe('round trip');
+    expect(out.from).toBe('alice');
+    expect(out.sigValid).toBe(true);
+    expect(out.mismatch).toBe(false);
   });
 });

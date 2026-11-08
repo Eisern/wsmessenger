@@ -70,30 +70,31 @@ function CU() { return globalThis.__wsCrypto?.utils || null; }
 
 // ── Ed25519 helpers ────────────────────────────────────────────────────────────
 // username -> Uint8Array (pubkey) | null (no key on server) | undefined (not fetched)
-// Emitting chained signatures is OFF until readers are deployed on both
-// clients. A reader that only knows v1 rejects a v2 signature outright, which
-// would show a forgery warning for an honest message. Flip this only after
-// both clients ship the reader that landed in a3f7d33.
-const CHAIN_WRITE_ENABLED = false;
+// The three writers below were staged: readers shipped in 0.4.0 on both
+// clients, writers were switched on in 0.5.0. A client OLDER than 0.4.0 cannot
+// read what these produce - that is the accepted cost, named in CHANGELOG.md.
+// Do not switch one off again without a reason: a client that has received
+// signed history keeps expecting it, and its absence can then read as tampering.
 
-// Signing ROOM messages is OFF until readers are deployed on both clients, for
-// the same reason: a client that has not learned the envelope would show its
-// JSON as the message text. Readers first (this build), then this flag.
-//
-// What it buys: a room message is encrypted under a key every member holds, so
-// the key proves membership and nothing more - the author is whatever the
-// server wrote in the row. The signature makes that claim checkable.
-const ROOM_SIG_WRITE_ENABLED = false;
+// Chained DM signatures (v2): each message signs its position in the thread,
+// so deleting or reordering stored messages is detectable. A v1-only reader
+// rejects v2 outright, which is why this waited for the reader from a3f7d33.
+// Local DMs only: a cross-island thread still signs v1 (sendForeignMessage).
+const CHAIN_WRITE_ENABLED = true;
 
-// Signing the key WRAP is staged the same way, and for a harder reason: a
-// signed wrap is a new blob format (v3), and a client that only knows v2 cannot
-// open it at all - it would see a room it can no longer read. Readers first
-// (this build understands both), then this flag.
-//
-// What it is for: the wrap derives from an ephemeral key, so it says only that
-// somebody who knew your public key made it, and the row is written by the
-// server. A signature inside the blob makes "who gave me this key" answerable.
-const KEY_WRAP_SIG_WRITE_ENABLED = false;
+// Signed ROOM messages. A room message is encrypted under a key every member
+// holds, so the key proves membership and nothing more - the author is
+// whatever the server wrote in the row. The signature makes that claim
+// checkable. A client without the reader shows the envelope's JSON as text.
+const ROOM_SIG_WRITE_ENABLED = true;
+
+// Signed key WRAPS (format v3). The wrap derives from an ephemeral key, so it
+// says only that somebody who knew your public key made it, and the row is
+// written by the server. A signature inside the blob makes "who gave me this
+// key" answerable. A client that only knows v2 cannot open a v3 wrap at all:
+// it sees a room it can no longer read. Cross-island wraps stay v2 - there is
+// no local name to bind them to.
+const KEY_WRAP_SIG_WRITE_ENABLED = true;
 
 /**
  * Signing options for a key wrap, or null when that is switched off.

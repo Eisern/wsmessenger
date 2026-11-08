@@ -506,9 +506,10 @@ async function sendMessage(contact, plaintext) {
   const me = await _me();
   if (!me) throw new Error('Not signed in');
   const envelope = { ss: 1, from: me, body: plaintext };
-  // v1 signature deliberately: the chain is not written yet on either client
-  // (CHAIN_WRITE_ENABLED), and a v2 signature would be rejected outright by a
-  // reader that only knows v1 - a forgery warning on an honest message.
+  // v1 signature deliberately, even with CHAIN_WRITE_ENABLED on for local DMs
+  // (0.5.0): cross-island threads are not chained. Moving them to v2 is its own
+  // change - it needs the receiving path checked against chained signatures
+  // first, or an honest message reads as a forgery.
   envelope.sig = CryptoService.signEd25519B64(
     CryptoUtils._dmSigMessage(c.outbox.threadId, me, plaintext),
   );

@@ -153,6 +153,53 @@ describe('what came before signing existed', () => {
   });
 });
 
+describe('what this client writes (0.5.0: the writer is on)', () => {
+  // The tests above feed the reader blobs built by hand. This one closes the
+  // loop the flag opens: the writer's own output, served back by the island,
+  // must open the room. If it did not, switching KEY_WRAP_SIG_WRITE_ENABLED on
+  // would lock every room creator out of the room they just made.
+  test('a key it hands out is signed by it, and opens again on the way back', async () => {
+    const ROOM2 = ROOM + 1;
+    let uploaded = null;
+    const prev = global.fetch;
+    global.fetch = jest.fn(async (url, opts = {}) => {
+      const u = String(url);
+      if (u.endsWith('/crypto/room-key') && String(opts.method).toUpperCase() === 'POST') {
+        uploaded = JSON.parse(opts.body);
+      }
+      let body = {};
+      if (u.includes(`/crypto/room-key/${ROOM2}`) && uploaded) {
+        body = { encrypted_room_key: uploaded.encrypted_room_key, key_id: uploaded.key_id };
+      } else if (u.includes('/crypto/room-key-archive')) {
+        body = [];
+      }
+      return {
+        ok: true, status: 200, headers: { get: () => 'application/json' },
+        async json() { return body; }, async text() { return JSON.stringify(body); },
+      };
+    });
+    try {
+      expect(await CryptoService.createAndShareRoomKey(ROOM2, me.pubB64)).toBeTruthy();
+      expect(uploaded?.room_id).toBe(ROOM2);
+
+      const info = CryptoUtils.inspectWrappedKey(uploaded.encrypted_room_key, {
+        scope: 'room', scopeId: ROOM2, recipient: 'alice', keyId: uploaded.key_id,
+      });
+      expect(info.version).toBe(3);
+      expect(info.signer).toBe('alice');
+
+      cryptoManager.roomKeys.delete(ROOM2);
+      cryptoManager.roomKeyArchive.delete(ROOM2);
+      await CryptoService.ensureRoomKeyReady(ROOM2);
+      expect(cryptoManager.roomKeys.has(ROOM2)).toBe(true);
+    } finally {
+      global.fetch = prev;
+      cryptoManager.roomKeys.delete(ROOM2);
+      cryptoManager.roomKeyArchive.delete(ROOM2);
+    }
+  });
+});
+
 describe('the blob itself', () => {
   test('a signed wrap opens to the same key as an unsigned one', async () => {
     const signed = await wrapFromOwner();

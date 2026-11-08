@@ -91,9 +91,13 @@ test('a DM is signed, not quietly sent bare', async () => {
   const envelope = JSON.parse(plain);
   expect(envelope.from).toBe('seeduser');
   expect(typeof envelope.sig).toBe('string');
+  // Chained (v2) since 0.5.0: the signature also covers the message's place in
+  // this sender's run, so it verifies over those bytes and not over v1's.
+  expect(Number.isInteger(envelope.sq) && envelope.sq > 0).toBe(true);
+  expect(envelope.pv).toMatch(/^[0-9a-f]{64}$/);
   expect(CryptoUtils.ed25519Verify(
     new Uint8Array(CryptoUtils.base64ToArrayBuffer(expectedEdPubB64)),
     new Uint8Array(CryptoUtils.base64ToArrayBuffer(envelope.sig)),
-    CryptoUtils._dmSigMessage(7, 'seeduser', 'hello'),
+    CryptoUtils._dmSigMessageV2(7, envelope.sq, envelope.pv, 'seeduser', 'hello'),
   )).toBe(true);
 });
