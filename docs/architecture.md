@@ -403,6 +403,18 @@ endpoint (`/ws-dm`) rejects every non-ping client message and tells
 the client to use `POST /ud/dm/send` instead
 ([`server/main.py#L5893`](../server/main.py#L5893)).
 
+### What sealed sender does not hide
+
+It hides **which member of a thread** wrote a message, not who is
+talking to whom. Thread membership is stored in plain
+(`chat_dm_members`, and `chat_dm_pairs (user_low, user_high,
+thread_id)` for every one-to-one thread), together with the time of
+every message. In a two-person thread the sender is one of two people
+the server already knows; sealed sender removes the record of which
+one. An operator who correlates connection IPs and timing can often
+recover even that — the property is "the database does not say",
+not "the server cannot find out".
+
 ### Scope: DM only, not rooms
 
 Sealed sender is intentionally a property of DMs, not rooms. The
@@ -488,5 +500,7 @@ Does not see:
 - Identity private keys (`GET /crypto/keys` returns 410 Gone).
 - Room / DM key plaintext.
 - Message plaintext.
-- DM senders, at either the application or transport layer.
+- Which member of a DM thread sent a given message, at either the
+  application or transport layer — but it does see who is in the
+  thread (see [What sealed sender does not hide](#what-sealed-sender-does-not-hide)).
 - Recovery phrases (only an HKDF-derived hash).

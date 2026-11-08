@@ -125,7 +125,7 @@ island about such a peer. Design and threat model:
 
 ### Sealed Sender (DM)
 
-DM messages use a two-layer sealed sender scheme so the server never learns who sent a message:
+DM messages use a two-layer sealed sender scheme so the server never records which member of a thread sent a message. It does **not** hide who talks to whom: thread membership (`chat_dm_members`, `chat_dm_pairs`) and message timing are stored in plain, so in a 1:1 thread it hides one bit. Do not describe it as more than that in user-facing text.
 
 - **Application layer** (`panel-crypto.js` `encryptDm`): sender identity is embedded inside the encrypted payload as `{ss:1, from: username, body: plaintext}`. Only the recipient can decrypt and learn the sender.
 - **Transport layer** (`background.js` `ensureDmDeliverySecret`): a per-thread `delivery_secret_b64` token is fetched once from `GET /dm/{threadId}/delivery-secret` and cached in memory. Messages are sent using this token instead of the user's JWT, so the server cannot associate delivery with a specific account even at the WebSocket level.

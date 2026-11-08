@@ -223,7 +223,7 @@ Group=wsapp
 WorkingDirectory=/home/wsapp/wsmessenger/server
 EnvironmentFile=/home/wsapp/wsmessenger/server/.env
 ExecStart=/home/wsapp/wsmessenger/.venv/bin/uvicorn main:app \
-    --host 127.0.0.1 --port 8000 --workers 2 --proxy-headers \
+    --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers \
     --forwarded-allow-ips="127.0.0.1"
 Restart=on-failure
 RestartSec=5s
@@ -247,9 +247,22 @@ sudo systemctl enable --now wsapp
 sudo journalctl -u wsapp -f
 ```
 
-Worker count: 1–2 workers is plenty for most self-hosted loads. Each
-worker holds its own in-memory WebSocket state, so do **not** scale to
-many workers unless you understand that rooms can be split across them.
+**Run exactly one worker.** Room sockets, DM sockets, notifications and rate
+limits all live in the process's memory. With a second worker, two people in
+one room (or one DM) who happen to land on different workers stop seeing each
+other's messages live — they appear only after a reload — and a room owner may
+never get the wake-up that tells them a new member is waiting for the room key.
+Nothing logs an error. One worker is plenty for a self-hosted circle: password
+hashing runs off the event loop, so a login does not stall everyone's sockets.
+
+If you installed with `--workers 2` (the default in this guide and in
+`scripts/bootstrap.sh` up to and including 0.4.0), change it to `1` in the unit, then
+`sudo systemctl daemon-reload && sudo systemctl restart wsapp` — or simply
+re-run the bootstrap script, which rewrites the unit.
+
+`ARGON2_MAX_CONCURRENCY` (default `2`) caps how many password hashes run at
+once. Each holds `ARGON2_MEMORY_COST` of RAM (64 MiB by default) for its whole
+duration, so on a 1 GB VPS do not raise it.
 
 ---
 

@@ -6,6 +6,32 @@ Versions are shared by the whole project from 0.4.0 on: the tag, the extension's
 `manifest.json` and the Android `versionName` say the same thing. Before that
 they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
+## Unreleased
+
+### Fixed — self-hosting
+
+- **The shipped systemd unit ran two workers, and two workers split the
+  server.** Room sockets, DM sockets, notifications and rate limits live in the
+  process's memory, so two people in one room or one DM who landed on different
+  workers stopped seeing each other's messages live (they appeared only after a
+  reload), a room owner could miss the wake-up that a new member needs the key,
+  and every rate limit was effectively doubled. Nothing logged an error. Both
+  `scripts/bootstrap.sh` and `docs/self-hosting.md` now use `--workers 1`;
+  re-running the bootstrap script fixes an existing install.
+- **A login froze every socket on the server for a few hundred milliseconds.**
+  Argon2id ran inline in async handlers — login, registration, password change,
+  recovery, account deletion, room passwords — and blocked the event loop for
+  the whole hash. It now runs in a thread, at most `ARGON2_MAX_CONCURRENCY`
+  (default 2) at once, so a burst of logins cannot hold dozens of 64 MiB
+  buffers on a small VPS.
+
+### Changed — documentation
+
+- The README no longer says the server does not know who you talk to in direct
+  messages. It does: thread membership and message timing are stored in plain.
+  Sealed sender hides which of the two wrote a given message, and nothing more;
+  `docs/architecture.md` now says so next to the mechanism.
+
 ## 0.4.0 — 2026-09-14
 
 Six months of work that had never been released. Two of the fixes below are the

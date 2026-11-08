@@ -488,6 +488,9 @@ ARGON2_TIME_COST = _env_int("ARGON2_TIME_COST", 3)
 ARGON2_PARALLELISM = _env_int("ARGON2_PARALLELISM", 2)
 ARGON2_SALT_SIZE = _env_int("ARGON2_SALT_SIZE", 16)
 ARGON2_HASH_LEN = _env_int("ARGON2_HASH_LEN", 32)
+# How many password hashes may be computed at once. Each one holds
+# ARGON2_MEMORY_COST of RAM for its whole duration; see _argon2_off_loop.
+ARGON2_MAX_CONCURRENCY = _env_int("ARGON2_MAX_CONCURRENCY", 2)
 
 for _name, _value in (
     ("ARGON2_MEMORY_COST", ARGON2_MEMORY_COST),
@@ -495,6 +498,7 @@ for _name, _value in (
     ("ARGON2_PARALLELISM", ARGON2_PARALLELISM),
     ("ARGON2_SALT_SIZE", ARGON2_SALT_SIZE),
     ("ARGON2_HASH_LEN", ARGON2_HASH_LEN),
+    ("ARGON2_MAX_CONCURRENCY", ARGON2_MAX_CONCURRENCY),
 ):
     if _value < 1:
         raise RuntimeError(f"{_name} must be >= 1")
@@ -560,12 +564,46 @@ def verify_password_and_rehash(password: str, password_hash: str) -> tuple[bool,
         # Fail closed for malformed/legacy markers (e.g. system "deleted account").
         return False, None
 
-def verify_password(password: str, password_hash: str) -> bool:
-    ok, _ = verify_password_and_rehash(password, password_hash)
-    return ok
-    
+# Argon2id is memory-hard on purpose and takes a few hundred milliseconds of
+# CPU. Called inline from an async handler it stops the event loop for that
+# long, and with it every WebSocket this process holds - and the server runs as
+# ONE process, because rooms, DM sockets, notifications and rate limits all
+# live in its memory. So hashing goes to a thread.
+#
+# But only a few at a time: the default executor would run dozens at once, and
+# dozens of ARGON2_MEMORY_COST buffers is how a burst of logins takes down a
+# 1 GB VPS. The slot is held until the THREAD finishes, not until the awaiting
+# coroutine stops waiting - a cancelled request must not free a slot while its
+# hash is still running, or cancelling requests would be a way around the cap.
+_ARGON2_SLOTS = asyncio.Semaphore(ARGON2_MAX_CONCURRENCY)
+
+
+def _argon2_slot_done(fut: "asyncio.Future") -> None:
+    _ARGON2_SLOTS.release()
+    # Retrieve the outcome so an abandoned failure is not logged as
+    # "exception was never retrieved" long after its request is gone.
+    if not fut.cancelled():
+        fut.exception()
+
+
+async def _argon2_off_loop(fn, *args):
+    await _ARGON2_SLOTS.acquire()
+    fut = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    fut.add_done_callback(_argon2_slot_done)
+    return await asyncio.shield(fut)
+
+
+async def hash_password_async(password: str) -> str:
+    return await _argon2_off_loop(hash_password, password)
+
+
+async def verify_password_and_rehash_async(password: str, password_hash: str) -> tuple[bool, str | None]:
+    return await _argon2_off_loop(verify_password_and_rehash, password, password_hash)
+
+
 async def verify_password_async(password: str, password_hash: str) -> bool:
-    return verify_password(password, password_hash)
+    ok, _ = await verify_password_and_rehash_async(password, password_hash)
+    return ok
 
 app.state.verify_password = verify_password_async
 app.state.admin_dummy_hash = hash_password(secrets.token_urlsafe(32))
@@ -861,7 +899,7 @@ async def create_room(
     if not name:
         raise HTTPException(status_code=400, detail="Room name required")
 
-    ph = hash_password(room_password) if (room_password and room_password.strip()) else None
+    ph = (await hash_password_async(room_password)) if (room_password and room_password.strip()) else None
     
     join_policy = "approval" if bool(is_public) else "invite_only"
 
@@ -2207,13 +2245,13 @@ async def login(payload: LoginRequest, request: Request):
 
         if not row:
             # Constant-time dummy check: prevent username enumeration via timing side-channel.
-            verify_password_and_rehash(password, app.state.admin_dummy_hash)
+            await verify_password_and_rehash_async(password, app.state.admin_dummy_hash)
             raise HTTPException(status_code=401, detail="Invalid credentials")
 
         if bool(row.get("is_banned")):
             raise UserBannedError(row.get("banned_reason"))
 
-        password_ok, replacement_hash = verify_password_and_rehash(password, row["password_hash"])
+        password_ok, replacement_hash = await verify_password_and_rehash_async(password, row["password_hash"])
         if not password_ok:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         if replacement_hash:
@@ -2426,7 +2464,7 @@ async def totp_disable(payload: TotpDisableIn, authorization: str | None = Heade
         # Verify by TOTP code
         if code and verify_totp_code(row["totp_secret"], code):
             pass  # OK
-        elif password and verify_password(password, row["password_hash"]):
+        elif password and await verify_password_async(password, row["password_hash"]):
             pass  # OK
         else:
             raise HTTPException(status_code=401, detail="Invalid code or password")
@@ -2547,7 +2585,7 @@ async def register(payload: RegisterRequest, request: Request):
         if exists:
             raise HTTPException(status_code=409, detail="User already exists")
 
-        ph = hash_password(password)
+        ph = await hash_password_async(password)
 
         public_key = (payload.public_key or "").strip()
         if not public_key:
@@ -2813,11 +2851,11 @@ async def change_password(
     if not row:
         raise HTTPException(status_code=404, detail="User not found")
 
-    ok, _ = verify_password_and_rehash(payload.old_password, row["password_hash"])
+    ok, _ = await verify_password_and_rehash_async(payload.old_password, row["password_hash"])
     if not ok:
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
-    new_hash = hash_password(payload.new_password)
+    new_hash = await hash_password_async(payload.new_password)
     async with SessionLocal() as db:
         await db.execute(
             text("UPDATE users SET password_hash = :h WHERE id = :uid"),
@@ -2913,7 +2951,7 @@ async def recover(payload: RecoverIn, request: Request):
         raise HTTPException(status_code=401, detail="Recovery phrase is incorrect")
 
     # 4. Update password (recovery_key_hash stays — it's derived from the key, not the password)
-    new_password_hash = hash_password(payload.new_password)
+    new_password_hash = await hash_password_async(payload.new_password)
     async with SessionLocal() as db:
         await db.execute(
             sql_i("""
@@ -4557,7 +4595,7 @@ async def rooms_join_request(room_id: int, payload: RoomJoinRequestIn, request: 
         
         if room.get("password_hash"):
             p = (payload.password or "").strip()
-            if not p or not verify_password(p, room["password_hash"]):
+            if not p or not await verify_password_async(p, room["password_hash"]):
                 raise HTTPException(status_code=403, detail="Bad room password")
 
         # Block kicked/rejected users from re-requesting — only owner can re-invite them
@@ -6596,7 +6634,7 @@ async def room_password_put(
         await require_room_owner(session, int(room_id), int(u["user_id"]))
 
         new_pass = (payload.password or "").strip()
-        ph = hash_password(new_pass) if new_pass else None
+        ph = (await hash_password_async(new_pass)) if new_pass else None
 
         await session.execute(sql_i("""
             UPDATE chat_rooms
@@ -6907,7 +6945,7 @@ async def delete_account(
         if not row:
             raise HTTPException(status_code=404, detail="User not found")
         
-        if not verify_password(payload.password, row["password_hash"]):
+        if not await verify_password_async(payload.password, row["password_hash"]):
             raise HTTPException(status_code=403, detail="Invalid password")              
         
         deleted_user = await session.execute(

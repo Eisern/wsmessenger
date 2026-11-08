@@ -248,6 +248,11 @@ chown -R "${WSAPP_USER}:${WSAPP_USER}" "${WSAPP_UPLOAD_DIR}"
 # 6. systemd unit
 # ---------------------------------------------------------------------------
 log "Installing systemd unit /etc/systemd/system/wsapp.service"
+# Exactly ONE worker. Room sockets, DM sockets, notifications and rate limits
+# all live in the process's memory, so a second worker splits them: two people
+# in one room who land on different workers stop seeing each other's messages
+# live. Earlier versions of this script set --workers 2; re-running it fixes
+# such an install.
 cat > /etc/systemd/system/wsapp.service <<EOF
 [Unit]
 Description=WS Messenger backend
@@ -261,7 +266,7 @@ Group=${WSAPP_USER}
 WorkingDirectory=${WSAPP_INSTALL_DIR}/server
 EnvironmentFile=${ENV_FILE}
 ExecStart=${VENV_DIR}/bin/uvicorn main:app \\
-    --host 127.0.0.1 --port 8000 --workers 2 --proxy-headers \\
+    --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers \\
     --forwarded-allow-ips=127.0.0.1
 Restart=on-failure
 RestartSec=5s
