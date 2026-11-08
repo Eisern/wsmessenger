@@ -146,10 +146,23 @@ describe('a key that says who wrapped it', () => {
     expect(cryptoManager.roomKeys.has(ROOM)).toBe(false);
   });
 
-  test('is refused when the key version it claims is not the one it carries', async () => {
+  test('is filed under the id of the key inside, whatever version the island claims', async () => {
+    // The key_id beside a wrap is the island's word. Re-filing a genuine key
+    // as another version cannot work, because the claim is never used: the
+    // signature is checked, and the key filed, under the id of what is inside.
     served = { encrypted_room_key: await wrapFromOwner(), key_id: 'deadbeefdeadbeef' };
     await CryptoService.ensureRoomKeyReady(ROOM);
-    expect(cryptoManager.roomKeys.has(ROOM)).toBe(false);
+    expect(cryptoManager.roomKeys.has(ROOM)).toBe(true);
+    expect(cryptoManager.roomKeyIds.get(ROOM)).toBe(keyId);
+  });
+
+  test('opens when the island sends no key_id at all - which is what it does for a current key', async () => {
+    // GET /crypto/room-key/{id} answers with the blob alone. Checking the
+    // signature against that missing claim refused every signed current key;
+    // the offline suite never noticed because this stub always sent one.
+    served = { encrypted_room_key: await wrapFromOwner() };
+    await CryptoService.ensureRoomKeyReady(ROOM);
+    expect(cryptoManager.roomKeys.has(ROOM)).toBe(true);
   });
 
   test('is refused when the signer has no key we can check against', async () => {

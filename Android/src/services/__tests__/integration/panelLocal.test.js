@@ -146,6 +146,21 @@ describe('a direct message between two people on one island', () => {
   });
 });
 
+/**
+ * Read a room message the way the panel shows it: decryptMessageFromRoom opens
+ * the signed envelope (0.5.0 writes {rs, from, body, sig}) and checks the
+ * author's signature against their pinned key. Asserting the signature here is
+ * what makes this suite cover room signatures against a real island too.
+ */
+async function readRoom(reader, roomId, wire, author) {
+  const out = await reader.sandbox.decryptMessageFromRoom(roomId, wire, author.username);
+  expect(out && typeof out).toBe('object');
+  expect(out.from).toBe(author.username);
+  expect(out.sigValid).toBe(true);
+  expect(out.mismatch).toBe(false);
+  return out.text;
+}
+
 describe('room keys and the history they have to keep readable', () => {
   let roomId;
 
@@ -186,7 +201,7 @@ describe('room keys and the history they have to keep readable', () => {
     const text = 'сообщение под первым ключом';
     const enc = await alice.sandbox.encryptMessageForRoom(roomId, text);
     expect(JSON.parse(enc).encrypted).toBe(true);
-    expect(await alice.manager.decryptMessage(roomId, JSON.parse(enc))).toBe(text);
+    expect(await readRoom(alice, roomId, enc, alice)).toBe(text);
   });
 
   it('still reads yesterday after the key is rotated', async () => {
@@ -203,8 +218,8 @@ describe('room keys and the history they have to keep readable', () => {
     const newKid = JSON.parse(after).kid;
     expect(newKid).not.toBe(oldKid);
 
-    expect(await alice.manager.decryptMessage(roomId, JSON.parse(after))).toBe('после ротации');
-    expect(await alice.manager.decryptMessage(roomId, JSON.parse(before))).toBe('до ротации');
+    expect(await readRoom(alice, roomId, after, alice)).toBe('после ротации');
+    expect(await readRoom(alice, roomId, before, alice)).toBe('до ротации');
   });
 
   it('recovers both keys from the server after everything local is gone', async () => {
@@ -229,8 +244,7 @@ describe('room keys and the history they have to keep readable', () => {
 
     const beforeRotation = await alice.sandbox.encryptMessageForRoom(roomId, 'проверка архива');
     // Encrypted with the CURRENT key by Alice; the fresh client must read it.
-    expect(await fresh.manager.decryptMessage(roomId, JSON.parse(beforeRotation)))
-      .toBe('проверка архива');
+    expect(await readRoom(fresh, roomId, beforeRotation, alice)).toBe('проверка архива');
     expect(fresh.manager.roomKeyArchive.get(roomId)?.size ?? 0).toBeGreaterThan(0);
   });
 });
@@ -294,8 +308,7 @@ describe('a second person joining a room', () => {
 
     const loaded = await bob.sandbox.loadRoomKey(roomId);
     expect(loaded.ok).toBe(true);
-    expect(await bob.manager.decryptMessage(roomId, JSON.parse(earlier)))
-      .toBe('сказано до прихода');
+    expect(await readRoom(bob, roomId, earlier, alice)).toBe('сказано до прихода');
   });
 
   it('a second sweep finds nothing left to do', async () => {
@@ -328,6 +341,6 @@ describe('a second person joining a room', () => {
     expect(theirKey.ok).toBe(false);
 
     // And the owner still reads both sides of the rotation.
-    expect(await alice.manager.decryptMessage(roomId, JSON.parse(afterKick))).toBe('уже без них');
+    expect(await readRoom(alice, roomId, afterKick, alice)).toBe('уже без них');
   });
 });

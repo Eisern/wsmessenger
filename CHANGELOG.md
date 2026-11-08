@@ -71,6 +71,14 @@ that too.
 
 ### Fixed — security
 
+- **No signed current key could be opened.** The island sends no `key_id` with
+  a current room or DM key, and the readers checked a wrap's signature against
+  that missing id — so with the writer on, every room and every DM refused its
+  own key. Readers now open the wrap first and check the signature against the
+  id of the key inside; whatever `key_id` the island attaches is never trusted,
+  which also means a genuine key cannot be re-filed as another version. Found by
+  running the integration suites against a real island; the offline tests had
+  served a `key_id` the server never sends, and now pin that it does not.
 - **Android loaded an archived key with no key id as the room's current key**,
   which let the island roll a room back to a key a departed member still held.
   Archived keys now always go to the archive, under the id of the key itself.
@@ -91,6 +99,10 @@ that too.
 - Each rule was checked by breaking it: accepting unsigned keys, skipping the
   signer check, and trusting the served signing key each fail exactly the tests
   written for them, in both clients.
+- The integration suites ran against two real islands: `panelLocal`,
+  `recovery`, `crossIsland` and `panelCrossIsland` pass, apart from the one
+  case that needs a running relay. `panelLocal` now reads room messages the way
+  the panel shows them, so it checks room signatures end to end as well.
 
 ### Added — self-hosting
 

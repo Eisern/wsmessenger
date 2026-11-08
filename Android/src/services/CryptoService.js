@@ -1752,9 +1752,26 @@ async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, sig
   const me = await _resolveUsername();
   if (!me || !cryptoManager.userPrivateKey) return null;
 
+  // Open it first (AES-GCM: a forged blob just fails here) so the signature is
+  // checked against the id of the key actually inside, not the key_id the
+  // island attached. The island does not send one at all for a current key -
+  // checking against its claim refused every signed current key - and when it
+  // does send one, it is the island's word, which is what is being checked.
+  let keyB64;
+  try {
+    keyB64 = await CryptoUtils.decryptRoomKeyForUser(cryptoManager.userPrivateKey, encryptedB64);
+  } catch (e) {
+    console.warn(`[keywrap] could not open a ${scope} key:`, e?.message);
+    return null;
+  }
+  const kid = await CryptoUtils.fingerprintRoomKeyBase64(keyB64);
+  if (keyId && String(keyId).toLowerCase() !== kid) {
+    console.warn(`[keywrap] the island filed a ${scope} key under ${keyId}; it is ${kid}`);
+  }
+
   let info;
   try {
-    info = CryptoUtils.inspectWrappedKey(encryptedB64, { scope, scopeId, keyId, recipient: me });
+    info = CryptoUtils.inspectWrappedKey(encryptedB64, { scope, scopeId, keyId: kid, recipient: me });
   } catch (e) {
     console.warn('[keywrap] unreadable wrapped key:', e?.message);
     return null;
@@ -1789,16 +1806,7 @@ async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, sig
     }
   }
 
-  let keyB64;
-  try {
-    keyB64 = await CryptoUtils.decryptRoomKeyForUser(cryptoManager.userPrivateKey, encryptedB64);
-  } catch (e) {
-    console.warn(`[keywrap] could not open a ${scope} key:`, e?.message);
-    return null;
-  }
-
   if (!info.signed) {
-    const kid = await CryptoUtils.fingerprintRoomKeyBase64(keyB64);
     if (!cryptoManager.roomKeyArchive.get(rid)?.has(kid)) {
       console.warn(`[keywrap] an unsigned wrap carries a ${scope} key this device never held - refusing it`);
       return null;

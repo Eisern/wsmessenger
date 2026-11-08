@@ -152,6 +152,20 @@ describe('a signed wrap', () => {
     expect(await P.sandbox.loadRoomKey(ROOM)).toEqual({ ok: true });
   });
 
+  test('opens when the island sends no key_id - which is what it does for a current key', async () => {
+    // GET /crypto/room-key/{id} and /crypto/dm-key/{id} answer with the blob
+    // alone; checking the signature against that missing claim refused every
+    // signed current key until a run against a real island showed it.
+    const k = await freshKey();
+    const w = await wrap(k.keyB64, { by: owner, signer: 'owner' });
+    island.roomKey[ROOM] = { encrypted_room_key: w.blob };
+    expect(await P.sandbox.loadRoomKey(ROOM)).toEqual({ ok: true });
+
+    const d = await wrap(k.keyB64, { by: owner, signer: 'owner', scope: 'dm', scopeId: DM });
+    island.dmKey[DM] = { encrypted_thread_key: d.blob };
+    expect(await P.sandbox.loadDmKey(DM, { peerUsername: 'owner' })).toEqual({ ok: true });
+  });
+
   test('from somebody the room does not list is refused, however valid', async () => {
     const k = await freshKey();
     const w = await wrap(k.keyB64, { by: mallory, signer: 'mallory' });

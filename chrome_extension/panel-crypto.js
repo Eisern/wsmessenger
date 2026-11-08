@@ -138,7 +138,7 @@ function wrapSignOpts(scopeId, recipient, keyId, scope = "room") {
  * @param {object} o
  * @param {string} o.scope        "room" | "dm"
  * @param {number|string} o.scopeId  room id / thread id, as signed
- * @param {string} o.keyId        key id the island claims, as signed
+ * @param {string} o.keyId        key id the island claims (logged if wrong, never trusted)
  * @param {number|string} o.rid   this client's key slot (room id / dmRid)
  * @param {function} o.signers    async () => Set<lowercase username> | null
  * @returns {Promise<string|null>} the key (base64), or null when refused
@@ -150,9 +150,26 @@ async function acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, sign
   const me = String(meName || "").toLowerCase();
   if (!me || !cm?.userPrivateKey) return null;
 
+  // Open it first (AES-GCM: a forged blob just fails here) so the signature is
+  // checked against the id of the key actually inside, not the key_id the
+  // island attached. The island does not send one at all for a current key -
+  // checking against its claim refused every signed current key - and when it
+  // does send one, it is the island's word, which is what is being checked.
+  let keyBase64;
+  try {
+    keyBase64 = await cu.decryptRoomKeyForUser(cm.userPrivateKey, encryptedB64);
+  } catch (e) {
+    console.warn(`[keywrap] could not open a ${scope} key:`, e?.message || e);
+    return null;
+  }
+  const kid = await cu.fingerprintRoomKeyBase64(keyBase64);
+  if (keyId && String(keyId).toLowerCase() !== kid) {
+    console.warn(`[keywrap] the island filed a ${scope} key under ${keyId}; it is ${kid}`);
+  }
+
   let info;
   try {
-    info = cu.inspectWrappedKey(encryptedB64, { scope, scopeId, keyId, recipient: meName });
+    info = cu.inspectWrappedKey(encryptedB64, { scope, scopeId, keyId: kid, recipient: meName });
   } catch (e) {
     console.warn("[keywrap] unreadable wrapped key:", e?.message || e);
     return null;
@@ -186,16 +203,7 @@ async function acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, sign
     }
   }
 
-  let keyBase64;
-  try {
-    keyBase64 = await cu.decryptRoomKeyForUser(cm.userPrivateKey, encryptedB64);
-  } catch (e) {
-    console.warn(`[keywrap] could not open a ${scope} key:`, e?.message || e);
-    return null;
-  }
-
   if (!info.signed) {
-    const kid = await cu.fingerprintRoomKeyBase64(keyBase64);
     if (!cm.roomKeyArchive?.get(rid)?.has(kid)) {
       console.warn(`[keywrap] an unsigned wrap carries a ${scope} key this device never held - refusing it`);
       return null;
