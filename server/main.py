@@ -8145,3 +8145,45 @@ try:
     app.include_router(_build_island_list_router(transport_keys=_transport_keys_for_list()))
 except Exception as _e:  # pragma: no cover - the signed list is optional
     logger.warning("island list not mounted: %s", _e)
+
+
+def _log_island_status() -> None:
+    """
+    Say once, at startup, whether this server can talk to other islands.
+
+    Without it a missing ISLAND_ID shows up only as a 404 on /foreign/* in some
+    user's client - the server itself had nothing to say about it.
+    """
+    log = logging.getLogger("uvicorn.error")
+    if not _island_id():
+        log.warning(
+            "[island] ISLAND_ID is not set: direct messages with users of other "
+            "servers are off (/foreign/* answers 404). See docs/self-hosting.md §8.3."
+        )
+        return
+    try:
+        from island_list import IslandListConfig
+
+        cfg = IslandListConfig()
+    except Exception as e:
+        log.warning("[island] %s: ISLAND_* settings do not parse (%s); the signed list is off", _island_id(), e)
+        return
+    if not cfg.enabled:
+        log.warning(
+            "[island] %s: cross-island messages on, but ISLAND_SIGNING_KEY_B64 is not set - "
+            "contacts on other servers cannot follow this island to a new address",
+            _island_id(),
+        )
+    elif not cfg.entry_points:
+        log.warning(
+            "[island] %s: ISLAND_ENTRY_POINTS is empty - clients refuse a list with no entry points",
+            _island_id(),
+        )
+    else:
+        log.info(
+            "[island] %s: cross-island messages on, signed list v%d with %d entry point(s)",
+            _island_id(), cfg.version, len(cfg.entry_points),
+        )
+
+
+_log_island_status()

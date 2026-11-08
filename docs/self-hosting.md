@@ -8,7 +8,8 @@ certificate.
 > **Prefer a one-shot install?** There is a bootstrap script at
 > [`scripts/bootstrap.sh`](../scripts/bootstrap.sh) that performs the
 > sections below (install packages, create DB, render `.env`, install
-> the systemd unit, configure nginx, obtain a TLS cert) in one go on a
+> the systemd unit, configure nginx, obtain a TLS cert, set up the
+> island identity from §8.3) in one go on a
 > fresh Debian 12 or Ubuntu 22.04/24.04 host. Read the rest of this
 > file to understand what it does and to deploy manually if you prefer.
 
@@ -126,7 +127,10 @@ pg_dump -h 127.0.0.1 -U wsapp wsapp | gzip > ~/backups/wsapp-$(date +%F).sql.gz
 ```
 
 Put the uploads directory (see `UPLOAD_DIR` below) in the same backup
-set — media blobs live on disk, not in Postgres.
+set — media blobs live on disk, not in Postgres. So does `server/.env`:
+besides the secrets it holds `ISLAND_SIGNING_KEY_B64` (§8.3), the one
+value that cannot be regenerated without breaking contacts on other
+servers.
 
 ---
 
@@ -185,6 +189,9 @@ Key notes:
     bucket in this mode — rely on the per-user limits instead.
 - **SMTP_*** / `FEEDBACK_TO` — only needed if you want the in-app
   feedback form to email you. Skip for a personal deployment.
+- **`ISLAND_*`** — the island identity that lets your users exchange
+  direct messages with users of other servers. Without `ISLAND_ID` that
+  feature is off. See [§8.3](#83-talking-to-other-servers-islands).
 
 The remaining rate-limit and Argon2id knobs have safe defaults — leave
 them alone unless you have a reason.
@@ -434,6 +441,86 @@ client IP (the bridge is not an anonymizer), and in exchange rate limits and
 bans keep working per user. Without it the bridge hides client IPs from you and
 becomes a lever for denial of service against its own users.
 
+### 8.3. Talking to other servers ("islands")
+
+Your server and its database are an **island**. With an island identity set,
+people on your island can exchange **direct messages** with people on any other
+WS Messenger server. Rooms do not cross islands, and neither do files yet.
+
+How it works, in one paragraph: the servers never connect to each other. Each
+person opens a *mailbox* on their own island for the other's key, and each
+client delivers its messages into the other side's mailbox itself. Nobody can
+address a stranger: a mailbox exists only because its owner added a **contact
+card** they received out of band (in the extension: **My card** / **Add card**
+in the DM list; on Android: **My contact card**). Identity is a key, not a
+username, so neither island has to be trusted for who is who.
+
+**`scripts/bootstrap.sh` sets this up for you**, on a fresh install and on an
+existing one that does not have it yet. It writes four values into `.env`:
+
+| Variable | What bootstrap puts there |
+|---|---|
+| `ISLAND_ID` | your primary domain, lowercased |
+| `ISLAND_SIGNING_KEY_B64` | a fresh Ed25519 key |
+| `ISLAND_ENTRY_POINTS` | every domain from `WSAPP_DOMAIN` + `WSAPP_EXTRA_DOMAINS` |
+| `ISLAND_LIST_VERSION` | `1` |
+
+Pass `WSAPP_SKIP_ISLAND=1` to leave it off.
+
+**By hand**, generate the key with the backend's virtualenv and add the rest to
+`server/.env` (the commented block in `config.example.env` has the same, with
+notes):
+
+```sh
+~/wsmessenger/.venv/bin/python -c "import base64; from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as K; from cryptography.hazmat.primitives import serialization as s; print(base64.b64encode(K.generate().private_bytes(s.Encoding.Raw, s.PrivateFormat.Raw, s.NoEncryption())).decode())"
+```
+
+```env
+ISLAND_ID=messenger.example.com
+ISLAND_SIGNING_KEY_B64=<output of the command above>
+ISLAND_ENTRY_POINTS='[{"apiBase":"https://messenger.example.com","wsBase":"wss://messenger.example.com","label":""}]'
+ISLAND_LIST_VERSION=1
+```
+
+The **single quotes** around the JSON matter: systemd and the shell both strip
+double quotes, which leaves invalid JSON, and the list then silently stays off.
+
+**Check it** after `sudo systemctl restart wsapp`:
+
+```sh
+curl -s https://messenger.example.com/.well-known/wsapp-island
+sudo journalctl -u wsapp -b | grep '\[island\]'
+#   [island] messenger.example.com: cross-island messages on, signed list v1 with 1 entry point(s)
+```
+
+The startup line says exactly what is missing if anything is.
+
+Three rules, and the reason for each:
+
+- **Never change `ISLAND_ID` or `ISLAND_SIGNING_KEY_B64`** once people have
+  contacts on other islands. Their clients pin both. A changed value makes them
+  reject every later address list from your island as forged, so they can no
+  longer follow you to a new domain. `ISLAND_ID` looks like a domain, but it is
+  an identifier: keep it even if that domain is lost. Back up `.env`.
+- **Raise `ISLAND_LIST_VERSION` by one whenever you change
+  `ISLAND_ENTRY_POINTS` or `ISLAND_RELAYS`.** Clients refuse a list older than
+  the newest one they have seen; that is what stops an old list from being
+  replayed at them. Re-running bootstrap with a different set of domains does
+  *not* rewrite a list it finds in `.env` (it cannot tell a typo from an entry
+  you added on purpose) — it prints the exact lines to change instead, together
+  with `CORS_ORIGINS`.
+- **List every address in `ISLAND_ENTRY_POINTS`**, most preferred first. It is
+  what a contact card carries, and what lets contacts elsewhere reach you when
+  one domain is blocked. Clients read up to 8.
+
+What your server learns from this: for each mailbox, which local user owns it,
+the **public keys** of the person writing in, and the **name from their contact
+card** (the clients store it as the mailbox label; it is their username on
+their own server unless they changed it) — but not which server they are on.
+People writing in connect to your server directly, so you also see their IP
+address unless they send through a relay. Relays are optional and need setting
+up with each relay operator; see [`relay/README.md`](../relay/README.md).
+
 ---
 
 ## 9. Create the first admin
@@ -561,6 +648,11 @@ sudo systemctl restart wsapp
 ```
 
 Watch `journalctl -u wsapp -f` on first start after an update.
+
+If you installed with `scripts/bootstrap.sh`, re-running it is also an update:
+it pulls the code, refreshes dependencies, the systemd unit and nginx, and adds
+whatever a newer version needs in `.env` (today: the island identity of §8.3)
+without touching the values already there.
 
 ---
 

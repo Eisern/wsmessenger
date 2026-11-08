@@ -8,6 +8,24 @@ they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
 ## Unreleased
 
+### Added — self-hosting
+
+- **A server installed by the guide can now talk to other servers.** Direct
+  messages between islands shipped in 0.4.0, but they need `ISLAND_ID`, and
+  nothing on the install path set it: no line in `config.example.env`, no step
+  in the guide, nothing in `bootstrap.sh`. Every `/foreign/*` endpoint answered
+  404 and the server said nothing. Now `bootstrap.sh` generates the island
+  identity — id, Ed25519 signing key, signed list of entry points built from
+  the domains it certifies — on a fresh install and on an existing one that
+  lacks it (safe: without `ISLAND_ID` nobody could have pinned anything).
+  Values already in `.env` are never replaced. `WSAPP_SKIP_ISLAND=1` opts out.
+- The server logs at startup whether cross-island messages are on, and if not,
+  which setting is missing.
+- `docs/self-hosting.md` §8.3 explains the feature, the manual setup, and the
+  three rules that keep contacts on other servers working: never change the id
+  or the key, raise `ISLAND_LIST_VERSION` with every list change, list every
+  address.
+
 ### Fixed — self-hosting
 
 - **The shipped systemd unit ran two workers, and two workers split the

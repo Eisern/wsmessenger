@@ -29,10 +29,14 @@
 #     WSAPP_REPO_URL          git remote                 (default: canonical upstream)
 #     WSAPP_REPO_REF          branch/tag to check out    (default: main)
 #     WSAPP_SKIP_CERTBOT=1    skip TLS issuance (prototype/no domain)
+#     WSAPP_SKIP_ISLAND=1     do not set up an island identity, so users here
+#                             cannot exchange direct messages with users of
+#                             other servers (see docs/self-hosting.md §8.3)
 #
 # Re-running: safe. If server/.env already exists, credentials and the
 # database are left untouched; only code, dependencies, systemd unit, and
-# nginx config are refreshed.
+# nginx config are refreshed. The one thing added to an existing .env is a
+# missing island identity — generated once, never replaced afterwards.
 #
 # CAVEAT: HTTPS is effectively mandatory. The Chrome extension only talks
 # to https:// hosts, and sealed-sender DMs rely on a WSS upgrade. Plain
@@ -65,6 +69,7 @@ WSAPP_DB_USER="${WSAPP_DB_USER:-wsapp}"
 WSAPP_REPO_URL="${WSAPP_REPO_URL:-https://github.com/Eisern/wsmessenger.git}"
 WSAPP_REPO_REF="${WSAPP_REPO_REF:-main}"
 WSAPP_SKIP_CERTBOT="${WSAPP_SKIP_CERTBOT:-0}"
+WSAPP_SKIP_ISLAND="${WSAPP_SKIP_ISLAND:-0}"
 
 if [[ -z "${WSAPP_DOMAIN:-}" ]]; then
     read -rp "Public domain for this server (e.g. messenger.example.com): " WSAPP_DOMAIN
@@ -83,11 +88,13 @@ WSAPP_ALL_DOMAINS="${WSAPP_DOMAIN}"
 if [[ -n "${WSAPP_EXTRA_DOMAINS}" ]]; then
     WSAPP_ALL_DOMAINS="${WSAPP_DOMAIN},${WSAPP_EXTRA_DOMAINS}"
 fi
-# Three forms of the same list: nginx server_name (space-separated),
-# CORS_ORIGINS (comma-separated origins) and certbot flags.
+# Four forms of the same list: nginx server_name (space-separated),
+# CORS_ORIGINS (comma-separated origins), certbot flags, and bare lowercase
+# host names for the island's signed list of entry points.
 WSAPP_SERVER_NAMES=""
 WSAPP_CORS_ORIGINS=""
 WSAPP_CERTBOT_DOMAINS=()
+WSAPP_HOSTS=()
 IFS=',' read -ra _wsapp_domain_list <<< "${WSAPP_ALL_DOMAINS}"
 for _d in "${_wsapp_domain_list[@]}"; do
     _d="$(echo -n "${_d}" | tr -d '[:space:]')"
@@ -95,6 +102,7 @@ for _d in "${_wsapp_domain_list[@]}"; do
     WSAPP_SERVER_NAMES+="${WSAPP_SERVER_NAMES:+ }${_d}"
     WSAPP_CORS_ORIGINS+="${WSAPP_CORS_ORIGINS:+,}https://${_d}"
     WSAPP_CERTBOT_DOMAINS+=(-d "${_d}")
+    WSAPP_HOSTS+=("${_d,,}")
 done
 unset _d _wsapp_domain_list
 
@@ -112,6 +120,24 @@ SCHEMA_MARKER="${WSAPP_INSTALL_DIR}/.schema-applied"
 
 log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!! %s\033[0m\n' "$*" >&2; }
+
+# Replace (or append) a KEY=VALUE line in .env. Value may contain any character
+# except NUL; we escape sed metacharacters for the replacement side.
+set_env_var() {
+    local key="$1" value="$2"
+    local esc
+    esc=$(printf '%s' "$value" | sed -e 's/[\\|&]/\\&/g')
+    if grep -qE "^${key}=" "${ENV_FILE}"; then
+        sed -i -E "s|^${key}=.*|${key}=${esc}|" "${ENV_FILE}"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "${ENV_FILE}"
+    fi
+}
+
+# The raw value of KEY in .env (quotes included), or "" if it is not set.
+get_env_var() {
+    sed -n -E "s/^$1=//p" "${ENV_FILE}" | tail -n 1
+}
 
 # ---------------------------------------------------------------------------
 # 1. System packages
@@ -204,19 +230,6 @@ else
     log "Rendering ${ENV_FILE} from config.example.env"
     cp "${WSAPP_INSTALL_DIR}/server/config.example.env" "${ENV_FILE}"
 
-    # Replace (or append) a KEY=VALUE line. Value may contain any character
-    # except NUL; we escape sed metacharacters for the replacement side.
-    set_env_var() {
-        local key="$1" value="$2"
-        local esc
-        esc=$(printf '%s' "$value" | sed -e 's/[\\|&]/\\&/g')
-        if grep -qE "^${key}=" "${ENV_FILE}"; then
-            sed -i -E "s|^${key}=.*|${key}=${esc}|" "${ENV_FILE}"
-        else
-            printf '%s=%s\n' "$key" "$value" >> "${ENV_FILE}"
-        fi
-    }
-
     set_env_var DATABASE_URL \
         "postgresql+asyncpg://${WSAPP_DB_USER}:${DB_PASS}@127.0.0.1:5432/${WSAPP_DB_NAME}"
     set_env_var JWT_SECRET          "${JWT_SECRET}"
@@ -240,6 +253,99 @@ else
     sudo -u "${WSAPP_USER}" touch "${SCHEMA_MARKER}"
 
     unset DB_PASS JWT_SECRET
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. Island identity
+#
+# One backend with one database is an island. Its id and its signing key let
+# users here exchange direct messages with users of other islands, and let a
+# contact on another island find this one again after an address changes.
+# Without ISLAND_ID every /foreign/* endpoint answers 404.
+#
+# Both are pinned by every client that has ever added a contact from here.
+# Replace either and those clients reject every later address list from this
+# island as forged ("bad signature" / "different island"), so a contact can no
+# longer follow it to a new address. They are therefore generated ONCE, only
+# when missing, and never touched again. That is also why enabling this on an
+# existing install is safe: with no ISLAND_ID nobody could have added a contact
+# from here, so there is no pin to break.
+# ---------------------------------------------------------------------------
+WSAPP_ISLAND_ID=""
+if [[ "${WSAPP_SKIP_ISLAND}" == "1" ]]; then
+    warn "WSAPP_SKIP_ISLAND=1 — no island identity; cross-server direct messages stay off."
+else
+    _island_scheme=https
+    [[ "${WSAPP_SKIP_CERTBOT}" == "1" ]] && _island_scheme=http
+
+    if [[ ${#WSAPP_HOSTS[@]} -gt 8 ]]; then
+        warn "clients read at most 8 entry points from the island list; only the first 8 domains will be used by them"
+    fi
+
+    if [[ -z "$(get_env_var ISLAND_SIGNING_KEY_B64)" ]]; then
+        log "Generating the island signing key (Ed25519)"
+        set_env_var ISLAND_SIGNING_KEY_B64 "$("${VENV_DIR}/bin/python" - <<'PY'
+import base64
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+k = Ed25519PrivateKey.generate()
+print(base64.b64encode(k.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())).decode())
+PY
+)"
+    fi
+
+    if [[ -z "$(get_env_var ISLAND_ID)" ]]; then
+        # The primary domain, as the clients themselves name an island by the
+        # host of its first entry point. It is an identifier from here on, not
+        # an address: if the domain is ever lost, the id stays.
+        set_env_var ISLAND_ID "${WSAPP_HOSTS[0]}"
+    fi
+
+    # Entry points: every domain this script puts on the certificate, in order.
+    # Single quotes, because the value is JSON and both systemd and a shell
+    # `source` would otherwise strip its double quotes.
+    _island_eps="$("${VENV_DIR}/bin/python" - "${_island_scheme}" "${WSAPP_HOSTS[@]}" <<'PY'
+import json, sys
+scheme, hosts = sys.argv[1], sys.argv[2:]
+ws = "wss" if scheme == "https" else "ws"
+print(json.dumps(
+    [{"apiBase": f"{scheme}://{h}", "wsBase": f"{ws}://{h}", "label": ""} for h in hosts],
+    separators=(",", ":"),
+))
+PY
+)"
+    _current_eps="$(get_env_var ISLAND_ENTRY_POINTS)"
+    if [[ -z "${_current_eps}" ]]; then
+        set_env_var ISLAND_ENTRY_POINTS "'${_island_eps}'"
+        if [[ -z "$(get_env_var ISLAND_LIST_VERSION)" ]]; then
+            set_env_var ISLAND_LIST_VERSION 1
+        fi
+    elif ! "${VENV_DIR}/bin/python" - "${_current_eps}" "${WSAPP_HOSTS[@]}" <<'PY'
+import json, sys
+from urllib.parse import urlsplit
+raw = sys.argv[1].strip()
+if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+    raw = raw[1:-1]
+try:
+    have = {urlsplit(e["apiBase"]).hostname for e in json.loads(raw)}
+except Exception:
+    sys.exit(1)
+sys.exit(0 if have == set(sys.argv[2:]) else 1)
+PY
+    then
+        # Hand-edited lists are left alone: an entry point is something clients
+        # will dial, and this script cannot tell a typo from a bridge somebody
+        # added on purpose.
+        warn "ISLAND_ENTRY_POINTS in ${ENV_FILE} does not name the same domains as this run (${WSAPP_SERVER_NAMES}). Left as is. If the domains changed, set:"
+        warn "  ISLAND_ENTRY_POINTS='${_island_eps}'"
+        warn "  CORS_ORIGINS=${WSAPP_CORS_ORIGINS}"
+        warn "and raise ISLAND_LIST_VERSION by one, then: systemctl restart wsapp"
+    fi
+
+    WSAPP_ISLAND_ID="$(get_env_var ISLAND_ID)"
+    chown "${WSAPP_USER}:${WSAPP_USER}" "${ENV_FILE}"
+    chmod 600 "${ENV_FILE}"
+    unset _island_scheme _island_eps _current_eps
 fi
 
 chown -R "${WSAPP_USER}:${WSAPP_USER}" "${WSAPP_UPLOAD_DIR}"
@@ -362,6 +468,16 @@ if curl -fsS --max-time 5 http://127.0.0.1:8000/health >/dev/null; then
 else
     warn "backend did not respond on /health — check: journalctl -u wsapp -e"
 fi
+if [[ -n "${WSAPP_ISLAND_ID}" ]]; then
+    # The list is the one thing that proves the island identity is live: the
+    # server mounts it only when the key parses and ISLAND_ENTRY_POINTS is
+    # valid JSON, and says why in the journal when it does not.
+    if curl -fsS --max-time 5 http://127.0.0.1:8000/.well-known/wsapp-island >/dev/null; then
+        echo "   island list /.well-known/wsapp-island responded OK"
+    else
+        warn "island list did not respond — check ISLAND_* in ${ENV_FILE} and: journalctl -u wsapp -e"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # 10. Summary
@@ -377,6 +493,7 @@ cat <<EOF
    Public URL:  ${PROTO}://${WSAPP_DOMAIN}
    Entry points: ${WSAPP_SERVER_NAMES}
    Admin panel: ${PROTO}://${WSAPP_DOMAIN}/admin/
+   Island id:   ${WSAPP_ISLAND_ID:-(none — cross-server messages off)}
    Config:      ${ENV_FILE}     (mode 600, owner ${WSAPP_USER})
    Uploads:     ${WSAPP_UPLOAD_DIR}
    Service:     systemctl status wsapp
@@ -399,5 +516,11 @@ cat <<EOF
  BACK UP ${ENV_FILE} — it holds the database password and the
  JWT signing secret. Losing JWT_SECRET invalidates all issued
  tokens (users must re-login; no data is destroyed).
+
+ It also holds ISLAND_SIGNING_KEY_B64. That one cannot be
+ replaced: users on other servers pin it. With a new key their
+ clients reject every later address list from here as forged,
+ so their contacts work only at the addresses they already know
+ — until those change.
 ============================================================
 EOF

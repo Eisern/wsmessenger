@@ -112,6 +112,12 @@ there is no way to address a stranger.
 - Server: `POST /foreign/box` (+ `/peer-key`), `GET /foreign/boxes`,
   `DELETE /foreign/box/{tid}`, `GET /foreign/challenge`, `POST /foreign/claim` —
   one 403 for every refusal, nonce spent either way.
+- Configuration: all of it is off (404) without `ISLAND_ID`. `scripts/bootstrap.sh`
+  generates `ISLAND_ID` / `ISLAND_SIGNING_KEY_B64` / `ISLAND_ENTRY_POINTS` /
+  `ISLAND_LIST_VERSION` once and never replaces them — clients pin the id and the
+  key, so changing either breaks every existing contact's address refresh. The
+  server logs `[island] …` at startup saying what is on or missing.
+  Operator docs: `docs/self-hosting.md` §8.3.
 
 A foreign thread must never enter the local DM key path: `ensureDmKeyReady`
 reads this island's 404 as "create a key and share it with the peer", for a peer
