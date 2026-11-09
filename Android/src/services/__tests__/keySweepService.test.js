@@ -50,6 +50,17 @@ let roomKid;
 const GUEST = 'Alice@island-g.test~ca2a4f';
 
 const flush = async (n = 40) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+// Wait for a condition, not for a number of ticks: the chains under test run
+// real WebCrypto, which completes on its own schedule - a fixed count of
+// turns is enough on a quiet machine and not under a full parallel run.
+// setImmediate is not faked by jest's timers, so this works under them too.
+const until = async (cond, what, maxTicks = 200000) => {
+  for (let i = 0; i < maxTicks; i++) {
+    if (cond()) return;
+    await new Promise((r) => setImmediate(r));
+  }
+  throw new Error(`gave up waiting for ${what}`);
+};
 
 beforeAll(async () => {
   global.fetch = jest.fn(async (url, opts = {}) => {
@@ -173,19 +184,19 @@ test('the start, the notify socket\'s key-gap wake-up and a membership change ea
     island.gaps = [];
     KeySweepService.start();
     jest.advanceTimersByTime(2500);   // the start-up run, unlocked already
-    await flush();
+    await until(() => island.gapCalls.length >= 1, 'the start-up run');
     expect(island.gapCalls).toEqual([null]);
 
     jest.advanceTimersByTime(60_000);  // past its interval
     NetworkService._post({ type: 'notify_key_gap', room_id: ROOM });
     jest.advanceTimersByTime(0);
-    await flush();
+    await until(() => island.gapCalls.length >= 2, 'the run the wake-up asked for');
     expect(island.gapCalls).toEqual([null, String(ROOM)]);
 
     jest.advanceTimersByTime(60_000);
     NetworkService._post({ type: 'members_changed', room_id: 9, action: 'invite_accepted', username: 'x' });
     jest.advanceTimersByTime(0);
-    await flush();
+    await until(() => island.gapCalls.length >= 3, 'the run the acceptance asked for');
     expect(island.gapCalls).toEqual([null, String(ROOM), '9']);
 
     // Somebody leaving is not a gap.
@@ -219,14 +230,14 @@ test('a verified peer is served again at once', async () => {
     island.gaps = [{ room_id: ROOM, room_name: 'r', username: name }];
     KeySweepService.start();
     jest.advanceTimersByTime(2500);
-    await flush();
+    await until(() => KeySweepService.trustBlocked().length > 0, 'the run that holds them back');
     expect(KeySweepService.trustBlocked().map((x) => x.username)).toEqual([name]);
     expect(island.shares).toHaveLength(0);
 
     // The user compares safety numbers and accepts the new key.
     await CryptoService.verifyPeerKey('mod', name, await CryptoUtils.fingerprintPublicKey(swapped.pubB64));
     jest.advanceTimersByTime(60_000);
-    await flush();
+    await until(() => island.shares.length > 0, 'the share after verification');
     expect(KeySweepService.trustBlocked()).toEqual([]);
     expect(island.shares.map((x) => x.target)).toEqual([name]);
   } finally {

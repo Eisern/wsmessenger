@@ -123,7 +123,8 @@ describe('the panel opens mailboxes in the order two people actually do it', () 
     // card carries more than one - and an unreachable one used to abort it.
     const bases = (bobSide.island.entryPoints || []).map((e) => e.apiBase);
     expect(bases.length).toBeGreaterThan(1);
-    expect(bases).toContain('http://127.0.0.1:18101');
+    // The failover port, unreachable here: see failover.test.js.
+    expect(bases).toContain(`http://127.0.0.1:${Number(process.env.WSAPP_IT_FAILOVER_PORT_A) || 18101}`);
   });
 });
 

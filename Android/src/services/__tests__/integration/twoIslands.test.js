@@ -29,8 +29,9 @@ const ISLAND_A = process.env.TWO_ISLANDS_A || 'http://127.0.0.1:8000';
 const ISLAND_B = process.env.TWO_ISLANDS_B || 'http://127.0.0.1:8001';
 const RELAY = process.env.RELAY_TEST_RELAY || 'http://127.0.0.1:18800';
 
-const PORT_A = 18201;
-const PORT_B = 18202;
+// Overridable for the same reason as failover.test.js's.
+const PORT_A = Number(process.env.WSAPP_IT_TWO_ISLANDS_PORT_A) || 18201;
+const PORT_B = Number(process.env.WSAPP_IT_TWO_ISLANDS_PORT_B) || 18202;
 
 const USER = 'twoisl_a_1';
 const PASS = 'Testpass!12345';

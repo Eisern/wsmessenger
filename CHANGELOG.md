@@ -171,6 +171,18 @@ island - waited for somebody's browser extension.
   `extensionKeySweep.test.js` (the extension's wiring) and
   `MembersModal.test.js` (the member list's controls). 37 protections, each
   removed in turn, fail a test.
+- End to end on two real islands: `guestRoomTwoIslands.test.js` (the extension
+  on both sides) and `guestRoomAndroid.test.js` (an Android guest, an extension
+  moderator) - card, invitation, signed sign-in, key sweep, messages both ways
+  over real room sockets, each verified on the other side.
+- `scripts/integration_stand.py` brings up everything the integration suites
+  need - two islands and a relay - from a checkout and one PostgreSQL; all 12
+  suites (116 tests) pass against it. The suites' failover ports can be moved
+  (`WSAPP_IT_*`), because Windows with Hyper-V reserves them; the integration
+  project gained the clipboard stub the first suite to load CryptoService
+  needed. Two waits in the unit suites counted event-loop turns where real
+  WebCrypto had to finish, and failed now and then under a full parallel run;
+  they wait for the condition instead.
 
 ## 0.5.0 — 2026-11-08
 

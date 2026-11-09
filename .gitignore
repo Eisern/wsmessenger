@@ -74,3 +74,5 @@ coverage/
 tmp/
 .gitnexus
 AGENTS.md
+# Local integration stand (scripts/integration_stand.py)
+.integration-stand/

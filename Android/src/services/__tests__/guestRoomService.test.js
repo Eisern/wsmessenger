@@ -354,6 +354,17 @@ describe('the room socket', () => {
     return made;
   }
   const flush = async (n = 30) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
+  // Wait for a condition, not for a number of ticks: the chains under test run
+  // real WebCrypto, which completes on its own schedule - a fixed count of
+  // turns is enough on a quiet machine and not under a full parallel run.
+  // setImmediate is not faked by jest's timers, so this works under them too.
+  const until = async (cond, what, maxTicks = 200000) => {
+    for (let i = 0; i < maxTicks; i++) {
+      if (cond()) return;
+      await new Promise((r) => setImmediate(r));
+    }
+    throw new Error(`gave up waiting for ${what}`);
+  };
 
   test('authenticates as the guest, takes only its room\'s messages, and says when it is up', async () => {
     const made = fakeSockets();
@@ -361,7 +372,7 @@ describe('the room socket', () => {
     const statuses = [];
     const sock = GuestRoomService.openSocket(room, { onMessage: (m) => got.push(m.text), onStatus: (s) => statuses.push(s) });
     try {
-      await flush();
+      await until(() => made.length >= 1, 'the socket');
       expect(made[0].url).toBe(`wss://island-r.test/ws?room_id=${ROOM}`);
       made[0].open();
       const auth = JSON.parse(made[0].sent[0]);
@@ -385,11 +396,11 @@ describe('the room socket', () => {
     const statuses = [];
     const sock = GuestRoomService.openSocket(room, { onStatus: (s) => statuses.push(s) });
     try {
-      await flush();
+      await until(() => made.length >= 1, 'the socket');
       made[0].open();
       made[0].drop(1008);
       jest.advanceTimersByTime(2000);
-      await flush();
+      await until(() => made.length >= 2, 'the retry');
       expect(made).toHaveLength(2);
       made[1].open();
       made[1].drop(1008);
@@ -414,7 +425,7 @@ describe('the room socket', () => {
     });
     try {
       const started = feed.start();
-      await flush();
+      await until(() => made.length >= 1, 'the socket');
       made[0].open();
       made[0].frame({ type: 'presence', room_id: ROOM, online: [] });
       await started;

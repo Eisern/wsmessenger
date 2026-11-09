@@ -18,8 +18,11 @@
 const { createEntryPoint } = require('./helpers/entryPoint');
 
 const UPSTREAM = 'http://127.0.0.1:8000';
-const PORT_A = 18101;
-const PORT_B = 18102;
+// Overridable: Windows with Hyper-V reserves dynamic port ranges that can
+// swallow these (`netsh interface ipv4 show excludedportrange protocol=tcp`).
+// Island A's signed entry-point list must then name the same ports.
+const PORT_A = Number(process.env.WSAPP_IT_FAILOVER_PORT_A) || 18101;
+const PORT_B = Number(process.env.WSAPP_IT_FAILOVER_PORT_B) || 18102;
 
 const SUFFIX = 'fo1';                       // stable, so reruns reuse accounts
 const USER_A = `failover_a_${SUFFIX}`;
