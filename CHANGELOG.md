@@ -30,6 +30,39 @@ not offer it yet; this is the half they will talk to.
 - Guests are on wherever `ISLAND_ID` is set; `ISLAND_ACCEPT_GUESTS=0` turns
   them off, and the server says which at startup.
 
+### Added — rooms across islands, in the extension
+
+The extension uses the server half above, both as the inviting side and as the
+guest. The Android client does not yet.
+
+- **Inviting.** Rooms → Manage → *Invite someone from another server* lists
+  your cross-island contacts. The island creates the guest from their card and
+  names them; the extension pins that name to the keys on the card before
+  anything else uses it, and refuses if the name is already pinned to other
+  keys. The invitation then goes to them inside your conversation. Somebody you
+  cannot write to yet is not created on the island at all.
+- **Being invited.** The invitation shows in the conversation with a *Join*
+  button. It is followed only to the inviter's island as their card names it:
+  the extension signs a challenge from that island with your key (a session per
+  island, held in memory, signed again when it runs out), accepts, and lists the
+  room under *Rooms on other servers*. The inviter's keys are pinned from their
+  card under their name there, so the room key they wrap for you is checked
+  against what they signed, not against what that island serves.
+- **Reading and writing.** The room key is accepted under exactly the rules
+  used at home (signed by a member, under a pinned key; an unsigned wrap cannot
+  introduce a key), with that island's names. Messages are signed as your guest
+  name there; other members' signatures are checked against keys pinned on that
+  island, kept apart from names at home. The panel holds the room's socket
+  itself; nothing goes through your own server, which is not told.
+- **Not yet:** files in guest rooms, older history than the last 100 messages,
+  unread markers for a guest room that is not open, and moderation by guests.
+
+### Changed
+
+- A cross-island contact now keeps the card exactly as they signed it, because
+  inviting them hands it to an island that checks the signature. Contacts added
+  before this have no card; the extension says so and asks for the card again.
+
 ### Fixed — security
 
 - **`/foreign/claim` did not spend its nonce on a refusal**, contrary to its
@@ -45,6 +78,15 @@ not offer it yet; this is the half they will talk to.
   local members. CI runs them against a `postgres:17` service. Each protection
   was checked by removing it: the allow-list, the `/ws-dm` refusal, the nonce
   spend and both signature checks each fail their own tests.
+- Guest rooms in the extension, offline: `guestRooms.test.js` (the protocol,
+  against an island that checks the session signature with its own byte layout
+  and its own Ed25519), `extensionGuestRooms.test.js` (the real
+  `panel-crypto.js`, both the moderator and the guest, against an adversarial
+  island) and `extensionGuestRoomView.test.js` (the real view code from
+  `panel-ui.js`, stepped through by hand: nothing lost between history and
+  socket, nothing drawn twice or out of order, nothing drawn into a closed
+  view). 36 deliberate breakages of the code - each protection removed in turn -
+  are each caught; three that were not at first got the tests they lacked.
 
 ## 0.5.0 — 2026-11-08
 

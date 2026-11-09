@@ -121,7 +121,7 @@ there is no way to address a stranger.
   server logs `[island] …` at startup saying what is on or missing.
   Operator docs: `docs/self-hosting.md` §8.3.
 
-**Guests in rooms** (server side only so far; design and threat model in
+**Guests in rooms** (server and extension; Android not yet; design and threat model in
 `docs/internal/cross-island-rooms-assessment.md`): a person from another island
 takes part in a room as a guest — a `users` row with the `!guest` password
 marker, created from their signed contact card by `POST /rooms/{id}/guests`
@@ -131,6 +131,29 @@ read from the database (`_is_guest_user`), never from a token claim, and
 `guest_scope_middleware` holds a guest's token to `_GUEST_ALLOWED` — an
 allow-list, so a new endpoint is closed to guests until added there.
 `/ws-dm` refuses guests explicitly. `ISLAND_ACCEPT_GUESTS=0` turns it off.
+
+Extension side: the protocol is `chrome_extension/guest-rooms.js` (byte-identical
+to `Android/src/services/guest-rooms.js`, platform-free like `foreign-dm.js`): the
+session signature, `createSessions` (one session per island, signed again on 401,
+never a stored refresh token), the `ROOMINV1::` invitation that travels as the
+plaintext of a cross-island DM, and the key slot `gr:<island>:<roomId>`. The
+wiring is the "Rooms on other islands, as a guest" section of `panel-crypto.js`
+and the matching section at the end of `panel-ui.js`. Rules that must hold:
+
+- An invitation is followed only to the inviter's island **as their card says**;
+  the island id in it is a consistency check, never an address.
+- Key wraps and room-message signatures in a guest room go through the same
+  `acceptWrappedKey` / `openRoomEnvelope` as at home, with a `ctx`
+  (`{me, edKeyOf}`) carrying that island's names; pins live under
+  `_fpBaseOn(<room island>, <our guest name>, <name>)`, never mixed with home.
+- The moderator pins the guest's keys from the card under the name the island
+  returns **before** anything else uses that name (`inviteForeignContactToRoom`),
+  and the guest pins the inviter from their card — only under the name their
+  card carries. So the room's island cannot swap either key even on first contact.
+- The panel holds the guest room's socket itself (`openGuestRoomSocket`) — posting
+  to a room is only possible over `/ws`. The view connects it **before** reading
+  history, de-duplicates by ciphertext, re-reads history after a reconnect, and
+  serializes every draw; `extensionGuestRoomView.test.js` pins that order.
 
 A foreign thread must never enter the local DM key path: `ensureDmKeyReady`
 reads this island's 404 as "create a key and share it with the peer", for a peer
@@ -233,6 +256,7 @@ Full reasoning, threat model and what this deliberately does *not* buy:
 | `chrome_extension/rpc.js` | chrome.runtime port transport with reconnect/backoff; exposes `window.{connectPort,safePost,rpcOnMessage,rpcOffMessage,rpcOnConnect,rpcOnDisconnect,rpcDisconnect,rpcGetPort}` |
 | `chrome_extension/endpoints.js` | Entry-point list, failure classification and rotation state machine — byte-identical to `Android/src/services/endpoints.js` |
 | `chrome_extension/foreign-dm.js` | Cross-island DM protocol (contact cards, mailbox claims, delivery, relay envelopes) — byte-identical to `Android/src/services/foreign-dm.js` |
+| `chrome_extension/guest-rooms.js` | Guest-room protocol (guest sessions per island, room invitations, key slots) — byte-identical to `Android/src/services/guest-rooms.js` |
 | `chrome_extension/notifications.js` | Badge management; exposes `window.Notifications` singleton |
 | `chrome_extension/login.js` | Login, registration, 2FA, BIP39 recovery form, KEK derivation → background handoff |
 | `chrome_extension/argon2-selftest.js` | WASM integrity check (pinned SHA-256) + KDF test vector; blocks unlock on failure |

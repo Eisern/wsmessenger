@@ -21,6 +21,13 @@ let ISLAND_ID = "imagine-1-ws.xyz";
 // differs, because it goes to another island and keeps a copy here.
 let __activeForeignKid = null;
 
+// The room on another island open in the chat view, if any, and the socket the
+// panel holds to it (panel-crypto.js "Rooms on other islands"). While it is
+// set, activeRoomId is null and dmMode is false: nothing addressed to this
+// island's rooms or threads can land in the view.
+let activeGuestRoom = null;
+let __guestSock = null;
+
 // --- Runtime backend resolution -------------------------------------------
 // Must run before anything issues a request. background.js resolves the same
 // `server_config` key for its own calls; the panel needs it too, otherwise the
@@ -184,6 +191,7 @@ async function retryPendingDmAfterUnlock() {
 
 
 async function retryPendingHistoryAfterUnlock() {
+  try { refreshGuestRoomAfterUnlock(); } catch {}
   const rid = __pendingHistoryRoomId;
   if (!rid) return;
 
@@ -1609,6 +1617,9 @@ if (msg.type === "auth_state") {
         setTimeout(() => { try { location.href = "login.html"; } catch {} }, 50);
       }
     } catch {}
+    // A room on another island is held open by the panel itself, with a
+    // token signed by the key that is going away.
+    try { closeGuestRoomView(); } catch {}
     try { leaveRoomUI("Logged out"); } catch {}
     try { clearChat(); } catch {}
 
@@ -1690,6 +1701,10 @@ try {
 }
 
 if (msg.type === "presence") {
+  // A late echo of the room socket the worker was told to close when a room
+  // on another island opened. Taken as it stands it would switch the view
+  // back to that room under the guest room's name.
+  if (activeGuestRoom) return;
   if (msg.room_id != null) {
     if (typeof setActiveRoomFromServer === "function") {
     setActiveRoomFromServer(msg.room_id, msg.room_name);
@@ -1828,6 +1843,13 @@ if (msg.type === "auth_needed") {
 
 if (msg.type === "history_res") {
   const appendOlder = !!msg.append_older;
+  // With a guest room open activeRoomId is null, which the check below reads
+  // as "any room will do".
+  if (activeGuestRoom) {
+    __roomOlderLoading = false;
+    __pendingOlderScrollRestore = null;
+    return;
+  }
   if (!msg.ok) {
     __roomOlderLoading = false;
     __pendingOlderScrollRestore = null;
@@ -3195,6 +3217,20 @@ async function send() {
     return;
   }
 
+  if (activeGuestRoom) {
+    const room = activeGuestRoom;
+    try {
+      const enc = await encryptForGuestRoom(room, payload);
+      if (activeGuestRoom !== room || !__guestSock) throw new Error("The room was closed");
+      __guestSock.send(enc);
+      __clearReplyTo();
+      msgInput.value = "";
+    } catch (e) {
+      await __ui.alert("Could not send to their server: " + (e?.message || e));
+    }
+    return;
+  }
+
   if (!activeRoomId) {
     await __ui.alert("Please select or connect to a room first.");
     return;
@@ -3589,6 +3625,17 @@ function addMsg(user, text, me = false, ts = null, reply = null) {
     h.onclick = () => openProfile(user);
     chat.appendChild(h);
     lastMsgAuthor = user;
+  }
+
+  // An invitation into a room on the sender's island. It can be followed only
+  // from the conversation with that person, whose card says where their island
+  // is - so the contact is captured here, from the conversation it was shown in.
+  const invite = globalThis.WSGuestRooms?.parseInvite?.(text) || null;
+  if (invite && typeof buildGuestInviteCard === "function") {
+    const kid = (dmMode && __activeForeignKid) ? __activeForeignKid : null;
+    chat.appendChild(buildGuestInviteCard(invite, { from: user, me, contactKid: kid, ts }));
+    chat.scrollTop = chat.scrollHeight;
+    return;
   }
 
   const fileInfo = parseFileMarker(text);

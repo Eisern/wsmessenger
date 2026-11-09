@@ -2154,7 +2154,9 @@ function applyComposerPolicyUI() {
   // account there. Greyed out rather than refused on click, so the limit is
   // visible before the file is chosen.
   if (attachBtn) {
-    attachBtn.disabled = blocked || !!(dmMode && typeof __activeForeignKid !== "undefined" && __activeForeignKid);
+    attachBtn.disabled = blocked ||
+      !!(dmMode && typeof __activeForeignKid !== "undefined" && __activeForeignKid) ||
+      !!(typeof activeGuestRoom !== "undefined" && activeGuestRoom);
     attachBtn.title = attachBtn.disabled && !blocked
       ? "Files cannot be sent to someone on another server yet"
       : "Attach a file";
@@ -2171,6 +2173,7 @@ function applyComposerPolicyUI() {
 window.applyComposerPolicyUI = applyComposerPolicyUI;
 
 function setModeRoom() {
+  closeGuestRoomView();
   dmMode = false;
   activeDmThreadId = null;
   activeDmPeer = "";
@@ -2183,6 +2186,7 @@ function setModeRoom() {
 }
 
 function setModeDm(threadId, peerUsername) {
+  closeGuestRoomView();
   dmMode = true;
   activeDmThreadId = Number(threadId);
   activeDmPeer = String(peerUsername || "").trim();
@@ -3420,6 +3424,17 @@ function renderCurrentRoom(opts = {}) {
 
   let title = "Room: -";
 
+  if (typeof activeGuestRoom !== "undefined" && activeGuestRoom) {
+    const g = activeGuestRoom;
+    const live = !!(typeof __guestSock !== "undefined" && __guestSock?.online);
+    currentRoomEl.textContent = `Room: ${g.roomName || "#" + g.roomId} · ${g.islandId}`;
+    currentRoomEl.title = `On ${g.islandId}, where you are ${g.guestName}`;
+    currentRoomEl.style.opacity = live ? "1" : "0.7";
+    applyComposerPolicyUI();
+    return;
+  }
+  currentRoomEl.title = "";
+
   if (dmMode) {
     const who = activeDmPeer ? activeDmPeer : "-";
     currentRoomEl.textContent = `Direct: ${who}`;
@@ -4062,6 +4077,8 @@ if (typeof DEBUG_LOGS !== "undefined" ? DEBUG_LOGS : false) {
         for (const r of member) roomsMemberListEl.appendChild(makeMineCard(r));
       }
     }
+
+    __renderGuestRoomsSection().catch(() => {});
 
     // Public search
     if (publicRoomsSearchListEl) {
@@ -6060,6 +6077,29 @@ function renderRoomManagePane(roomId) {
       membersSection.appendChild(row);
     }
   }
+
+  // Somebody from another server, by the card they gave you. The same people
+  // who can invite by name can do this; the island checks that too.
+  const myRoleHere = String(
+    (typeof roomRoleById !== "undefined" && roomRoleById[String(rid)]) || ""
+  ).toLowerCase();
+  if (isOwner || myRoleHere === "owner" || myRoleHere === "admin") {
+    const guestBtn = document.createElement("button");
+    guestBtn.className = "panel-btn";
+    guestBtn.style.cssText = "width:100%; margin-top:8px;";
+    guestBtn.textContent = "Invite someone from another server";
+    guestBtn.title = "Invite one of your cross-island contacts into this room as a guest";
+    guestBtn.onclick = async (e) => {
+      e.stopPropagation();
+      guestBtn.disabled = true;
+      try {
+        await __inviteForeignContactPrompt(rid, activeRoomName);
+      } finally {
+        guestBtn.disabled = false;
+      }
+    };
+    membersSection.appendChild(guestBtn);
+  }
   el.appendChild(membersSection);
 
   // ---- Keys ----
@@ -6525,3 +6565,415 @@ async function __refreshDmListNow() {
     };
   }
 })();
+
+// =============================
+// Rooms on other servers, as a guest
+// =============================
+//
+// The view of a room on another island reuses the chat area and addMsg, and
+// nothing else of the room path: the worker's room socket, activeRoomId and
+// the history_get round trip all belong to this island. While a guest room is
+// open, activeRoomId is null and dmMode is false, so nothing addressed to this
+// island's rooms or threads can land in it (see the guards in panel.js).
+
+const roomsGuestListEl = document.getElementById("roomsGuestList");
+const roomsGuestColEl = document.getElementById("roomsGuestCol");
+let __guestKeyRetryTimer = null;
+// Bumped by every open and every close. A step of an older view that finishes
+// late finds the number moved and stops - whichever room it was for. Comparing
+// rooms is not enough: the same room opened twice would end up with two
+// sockets, each drawing every message.
+let __guestViewGen = 0;
+// Every change to the chat area for a guest room goes through here, one at a
+// time. Decrypting is async: without this a live message could land in the
+// middle of a history page being redrawn, or overtake the one before it.
+let __guestRenderChain = Promise.resolve();
+// Ciphertexts already drawn in the open guest room.
+let __guestSeen = new Set();
+
+function __guestRender(gen, fn) {
+  const run = __guestRenderChain.then(async () => {
+    if (gen === __guestViewGen) await fn();
+  });
+  __guestRenderChain = run.catch((e) => console.warn("[Guest] render failed:", e?.message || e));
+  return __guestRenderChain;
+}
+
+function __isGuestMe(room, user) {
+  return String(user || "").trim().toLowerCase() === String(room?.guestName || "").trim().toLowerCase();
+}
+
+function closeGuestRoomView() {
+  __guestViewGen++;
+  if (__guestKeyRetryTimer) {
+    clearInterval(__guestKeyRetryTimer);
+    __guestKeyRetryTimer = null;
+  }
+  const wasOpen = !!(activeGuestRoom || __guestSock);
+  try { __guestSock?.close(); } catch { /* already closed */ }
+  __guestSock = null;
+  activeGuestRoom = null;
+  if (wasOpen) __renderGuestRoomsSection().catch(() => {});
+}
+
+async function __renderGuestMessage(room, gen, user, ciphertext, ts) {
+  const dec = await decryptFromGuestRoom(room, ciphertext || "", user);
+  if (gen !== __guestViewGen || dec == null) return;
+  const plain = (dec && typeof dec === "object") ? dec.text : dec;
+  const { text, reply } = parseV2Payload(plain || "");
+  addMsg(user, text, __isGuestMe(room, user), ts, reply);
+  __warnAboutRoomSignature(dec, user);
+}
+
+/**
+ * Redraw the last page of the room. Run through __guestRender only.
+ * `seen` collects the ciphertexts on the page, so the live copy of a message
+ * that is also in it is not drawn twice.
+ */
+async function __renderGuestHistory(room, gen, seen) {
+  let page;
+  try {
+    page = await fetchGuestRoomHistory(room, { limit: 100 });
+  } catch (e) {
+    if (gen === __guestViewGen) {
+      addMsg("System", (e?.status === 401 || e?.status === 403)
+        ? "Their server no longer lets you into this room."
+        : `Could not load this room from their server: ${e?.message || e}`);
+    }
+    return false;
+  }
+  if (gen !== __guestViewGen) return false;
+  const rows = Array.isArray(page?.messages) ? page.messages : [];
+  clearChat();
+  for (const m of rows) {
+    const ct = String(m?.text || "");
+    seen.add(ct);
+    await __renderGuestMessage(room, gen, m?.username || "unknown", ct, m?.ts || null);
+    if (gen !== __guestViewGen) return false;
+  }
+  return true;
+}
+
+function __guestKeyNotice(res) {
+  return res.notFound
+    ? "Waiting for this room's key. A moderator there sends it the next time their client is open; " +
+      "it will show up here by itself."
+    : res.refused
+      ? "Their server offered a key for this room that nobody in it could have given you, so it was not used."
+      : res.denied
+        ? "Their server no longer lets you into this room."
+        : res.unreachable
+          ? "Their server did not answer. Messages will appear once it does."
+          : res.locked
+            ? "Unlock to read this room."
+            : "This room's key could not be loaded yet.";
+}
+
+/**
+ * Open a room on another island in the chat view.
+ *
+ * Whatever was open here is left first - including the worker's room socket,
+ * whose presence messages would otherwise switch the view back to that room.
+ *
+ * Order matters for not losing anything: the socket is connected before the
+ * history is read, so a message is either already in the history or arrives
+ * on the socket afterwards; one that is both is drawn once.
+ */
+async function openGuestRoomView(room) {
+  try {
+    const ok = await ensureCryptoReady({ interactive: true, reason: `Open room: ${room.roomName || room.roomId}` });
+    if (!ok) return;
+  } catch (e) {
+    await __ui.alert("Crypto unlock failed: " + (e?.message || e));
+    return;
+  }
+
+  setModeRoom();   // closes whatever guest room was open, and the DM view
+  try { safePost({ type: "disconnect" }); } catch { /* the worker may be restarting */ }
+  activeRoomId = null;
+  activeRoomName = "";
+  activeRoomKey = "";
+  lastHistoryRoomId = null;
+  renderedHistoryRoomId = null;
+  const gen = ++__guestViewGen;
+  activeGuestRoom = room;
+
+  setInviteVisible(false);
+  clearChat();
+  renderPresence([]);
+  renderCurrentRoom({ online: false });
+  try { highlightActiveRoom(); } catch { /* list not on screen */ }
+  __renderGuestRoomsSection().catch(() => {});
+
+  const seen = new Set();
+  __guestSeen = seen;
+  // Whether the socket is up now, and whether the history on screen was read
+  // while it was not: then something may have been written in between that
+  // only a second read of the history can show.
+  let socketUp = false;
+  let needResync = false;
+  let markConnected;
+  const connected = new Promise((resolve) => { markConnected = resolve; });
+
+  __guestSock = openGuestRoomSocket(room, {
+    onMessage: (m) => {
+      __guestRender(gen, async () => {
+        const ct = String(m?.text || "");
+        if (seen.has(ct)) return;
+        seen.add(ct);
+        await __renderGuestMessage(room, gen, m?.from || "unknown", ct, m?.ts || Date.now());
+      });
+    },
+    onStatus: (s) => {
+      if (gen !== __guestViewGen) return;
+      renderCurrentRoom({ online: !!s?.online });
+      if (s?.online && !socketUp) {
+        socketUp = true;
+        markConnected();
+        if (needResync) {
+          needResync = false;
+          __guestRender(gen, () => __renderGuestHistory(room, gen, seen));
+        }
+      } else if (!s?.online && socketUp) {
+        socketUp = false;
+        needResync = true;
+      }
+      if (s?.error === "refused") {
+        markConnected();
+        __guestRender(gen, async () => addMsg("System", "Their server no longer lets you into this room."));
+      } else if (s?.online && s?.error) {
+        // A refusal of something we sent - a read-only room, a rate limit.
+        // Shown, because the message it refers to is not going to appear.
+        const said = String(s.error).slice(0, 200);
+        __guestRender(gen, async () => addMsg("System", `Their server: ${said}`));
+      }
+    },
+  });
+
+  await __guestRender(gen, async () => {
+    // Up to a few seconds for the socket; a server that does not take it
+    // still gets its history shown.
+    let waited = null;
+    await Promise.race([connected, new Promise((r) => { waited = setTimeout(r, 5000); })]);
+    clearTimeout(waited);
+    if (gen !== __guestViewGen) return;
+    if (!socketUp) needResync = true;
+    const keyRes = await loadGuestRoomKey(room);
+    if (gen !== __guestViewGen) return;
+    await __renderGuestHistory(room, gen, seen);
+    if (gen !== __guestViewGen || keyRes.ok) return;
+
+    addMsg("System", __guestKeyNotice(keyRes));
+    if (keyRes.notFound || keyRes.unreachable) {
+      // Nothing tells a guest that its key has arrived - the island's notify
+      // socket is not ours - so look again now and then while the room is open.
+      __guestKeyRetryTimer = setInterval(async () => {
+        if (gen !== __guestViewGen) return;
+        const again = await loadGuestRoomKey(room);
+        if (!again.ok || gen !== __guestViewGen) return;
+        clearInterval(__guestKeyRetryTimer);
+        __guestKeyRetryTimer = null;
+        __guestRender(gen, () => __renderGuestHistory(room, gen, seen));
+      }, 30000);
+    }
+  });
+}
+
+/** After an unlock: what arrived while locked could not be read, so read the page again. */
+function refreshGuestRoomAfterUnlock() {
+  const room = activeGuestRoom;
+  if (!room) return;
+  const gen = __guestViewGen;
+  __guestRender(gen, () => __renderGuestHistory(room, gen, __guestSeen));
+}
+
+/**
+ * An invitation into a room on another server, as it appears in the
+ * conversation it arrived in.
+ */
+function buildGuestInviteCard(invite, { from, me, contactKid, ts } = {}) {
+  const card = document.createElement("div");
+  card.className = "msg guest-invite" + (me ? " me" : "");
+  card.style.cssText = "display:flex;flex-direction:column;gap:6px;";
+
+  const where = invite.roomName ? `"${invite.roomName}"` : `room #${invite.roomId}`;
+  const line = document.createElement("span");
+  line.className = "msg-text";
+  line.textContent = me
+    ? `You invited them into ${where} on ${invite.islandId}.`
+    : `${from || "They"} invited you into ${where} on ${invite.islandId}.`;
+  card.appendChild(line);
+
+  if (!me) {
+    if (!contactKid) {
+      const note = document.createElement("span");
+      note.className = "panel-hint";
+      note.textContent = "Open it from your conversation with them to join.";
+      card.appendChild(note);
+    } else {
+      const btn = document.createElement("button");
+      btn.className = "panel-btn";
+      btn.type = "button";
+      btn.textContent = "Join";
+      listGuestRooms().then((list) => {
+        if (list.some((r) => GR().sameRoom(r, invite))) btn.textContent = "Open room";
+      }).catch(() => {});
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        btn.disabled = true;
+        try {
+          const known = (await listGuestRooms()).find((r) => GR().sameRoom(r, invite));
+          const room = known || await acceptGuestInvite(contactKid, invite, from);
+          await openGuestRoomView(room);
+        } catch (err) {
+          await __ui.alert("Could not join: " + (err?.message || err));
+        } finally {
+          btn.disabled = false;
+        }
+      };
+      card.appendChild(btn);
+    }
+  }
+
+  const timeStr = formatMsgTime(ts);
+  if (timeStr) {
+    const t = document.createElement("span");
+    t.className = "msg-time";
+    t.textContent = timeStr;
+    t.style.cssText = `font-size:10px;color:#888;opacity:0.7;white-space:nowrap;user-select:none;align-self:${me ? "flex-start" : "flex-end"};`;
+    card.appendChild(t);
+  }
+  return card;
+}
+
+async function __renderGuestRoomsSection() {
+  if (!roomsGuestListEl) return;
+  let rooms = [];
+  try {
+    rooms = await listGuestRooms();
+  } catch {
+    return;
+  }
+  roomsGuestListEl.innerHTML = "";
+  if (roomsGuestColEl) roomsGuestColEl.style.display = rooms.length ? "" : "none";
+
+  for (const room of rooms) {
+    const item = document.createElement("div");
+    item.className = "friend-item room-card";
+    if (activeGuestRoom && GR().sameRoom(activeGuestRoom, room)) item.classList.add("active");
+
+    const left = document.createElement("div");
+    left.className = "roomcard-left";
+    const name = document.createElement("div");
+    name.className = "roomcard-name";
+    name.textContent = room.roomName || `#${room.roomId}`;
+    const meta = document.createElement("div");
+    meta.className = "sidebar-note";
+    meta.textContent = `${room.islandId} · as ${room.guestName}`;
+    left.appendChild(name);
+    left.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "friend-actions";
+
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.textContent = "Open";
+    openBtn.onclick = async (e) => {
+      e.stopPropagation();
+      try { closeRoomsDrawer(); } catch { /* not open */ }
+      await openGuestRoomView(room);
+    };
+
+    const leaveBtn = document.createElement("button");
+    leaveBtn.type = "button";
+    leaveBtn.textContent = "Leave";
+    leaveBtn.onclick = async (e) => {
+      e.stopPropagation();
+      const ok = await __ui.confirm(
+        `Leave "${room.roomName || room.roomId}" on ${room.islandId}? To come back you need a new invitation.`,
+      );
+      if (!ok) return;
+      leaveBtn.disabled = true;
+      try {
+        const wasOpen = !!(activeGuestRoom && GR().sameRoom(activeGuestRoom, room));
+        await leaveGuestRoom(room);
+        if (wasOpen) {
+          closeGuestRoomView();
+          clearChat();
+          renderCurrentRoom({ online: false });
+        }
+      } catch (err) {
+        await __ui.alert("Could not leave: " + (err?.message || err));
+      } finally {
+        leaveBtn.disabled = false;
+      }
+      __renderGuestRoomsSection().catch(() => {});
+    };
+
+    actions.appendChild(openBtn);
+    actions.appendChild(leaveBtn);
+    item.appendChild(left);
+    item.appendChild(actions);
+    roomsGuestListEl.appendChild(item);
+  }
+}
+
+/** Rooms → Manage → "Invite someone from another server". */
+async function __inviteForeignContactPrompt(roomId, roomName) {
+  let contacts = [];
+  try {
+    contacts = await listForeignContacts();
+  } catch { /* treated as none */ }
+  if (!contacts.length) {
+    await __ui.alert(
+      "You have no contacts on other servers yet. Add their card first (Direct messages → Add card).",
+    );
+    return;
+  }
+
+  const lines = contacts.map((c, i) =>
+    `${i + 1} ${c.displayName || __foreignCardText(c.kid)} (${c.island?.islandId || "another server"})`);
+  const pick = String((await __ui.prompt(
+    `Who should join "${roomName || "#" + roomId}" as a guest?\n${lines.join("\n")}\n\n` +
+    "This server learns the key and the name on their card, and nothing else about them.",
+    {
+      title: "Invite from another server",
+      placeholder: `1-${contacts.length}`,
+      inputType: "text",
+      okText: "Invite",
+      cancelText: "Cancel",
+    },
+  )) || "").trim();
+  if (!pick) return;
+  const n = Number(pick);
+  const contact = (Number.isInteger(n) && n >= 1 && n <= contacts.length) ? contacts[n - 1] : null;
+  if (!contact) {
+    await __ui.alert("There is no such number in the list.");
+    return;
+  }
+
+  try {
+    const res = await inviteForeignContactToRoom(roomId, contact.kid, roomName);
+    const who = contact.displayName || __foreignCardText(contact.kid);
+    await __ui.alert(
+      `${who} is invited as ${res.guestName}. ` +
+      (res.queued
+        ? "Their server did not answer, so the invitation is queued in your conversation with them. "
+        : "The invitation is in your conversation with them. ") +
+      "Once they accept, the room key reaches them the way it reaches anyone who joins.",
+    );
+    try { requestRoomMembers(Number(roomId)); } catch { /* the list refreshes on its own */ }
+  } catch (e) {
+    await __ui.alert("Could not invite: " + (e?.message || e));
+  }
+}
+
+// The list is per account and island; show it as soon as both are known, not
+// only after the rooms drawer has rendered once.
+try {
+  Promise.resolve(typeof __apiBaseReady !== "undefined" ? __apiBaseReady : null)
+    .catch(() => {})
+    .then(() => __renderGuestRoomsSection())
+    .catch(() => {});
+} catch { /* rendered with the rooms list instead */ }
