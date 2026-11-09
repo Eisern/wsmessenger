@@ -89,6 +89,10 @@
     let socketUp = false;
     let needResync = false;
     let keyTimer = null;
+    // The last notice shown since the view was last redrawn: the same thing
+    // said twice in a row - the socket and the history both refused - is
+    // said once.
+    let lastNotice = "";
 
     // One step at a time, and none after stop().
     function step(fn) {
@@ -100,7 +104,11 @@
     }
 
     function notice(kind, detail) {
-      if (open) o.onNotice({ kind: kind, text: noticeText(kind, detail) });
+      if (!open) return;
+      const text = noticeText(kind, detail);
+      if (text === lastNotice) return;
+      lastNotice = text;
+      o.onNotice({ kind: kind, text: text });
     }
 
     async function item(user, ciphertext, ts) {
@@ -140,6 +148,7 @@
         if (it) items.push(it);
       }
       o.onReset(items);
+      lastNotice = "";   // the redraw took whatever was said with it
       return true;
     }
 
@@ -208,7 +217,10 @@
         if (!open || keyRes.ok) return;
 
         notice(keyNoticeKind(keyRes));
-        if (keyRes.notFound || keyRes.unreachable) {
+        // Worth asking again unless the answer was final: a key nobody could
+        // have given (refused), a room we are no longer in (denied), or a lock -
+        // the unlock re-reads the page and loads the key on its own.
+        if (!keyRes.refused && !keyRes.denied && !keyRes.locked) {
           // Nothing tells a guest that its key has arrived - the island's
           // notify socket is not ours - so look again while the room is open.
           keyTimer = T.setInterval(async () => {

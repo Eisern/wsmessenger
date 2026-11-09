@@ -119,6 +119,42 @@ describe('the feed', () => {
     expect(F.shown).toEqual(['readable']);
   });
 
+  test('a key that failed for a passing reason is looked for again', async () => {
+    const F = make();
+    F.island.keyRes = { ok: false, error: true, status: 500 };
+    const started = F.feed.start();
+    F.up();
+    await started;
+    expect(F.timers.intervals).toBe(1);
+  });
+
+  test('the same thing is not said twice in a row, but is said again after a redraw', async () => {
+    const F = make();
+    F.island.historyError = Object.assign(new Error('nope'), { status: 403 });
+    const started = F.feed.start();
+    F.sockets[0].h.onStatus({ online: false, error: 'refused' });   // the socket says it first
+    await started;
+    expect(F.notices.map((n) => n.kind)).toEqual(['refused']);
+
+    F.island.historyError = null;
+    F.island.history = ['h1'];
+    await F.feed.refresh();
+    F.sockets[0].h.onStatus({ online: true, error: 'slow down' });
+    F.sockets[0].h.onStatus({ online: true, error: 'slow down' });
+    await F.feed.idle();
+    expect(F.notices.map((n) => n.text)).toEqual([
+      'Their server no longer lets you into this room.',
+      'Their server: slow down',
+    ]);
+
+    // A redraw clears what was shown, so the same thing is said again after it.
+    await F.feed.refresh();
+    F.sockets[0].h.onStatus({ online: true, error: 'slow down' });
+    await F.feed.idle();
+    expect(F.notices.map((n) => n.text).at(-1)).toBe('Their server: slow down');
+    expect(F.notices).toHaveLength(3);
+  });
+
   test('a refused key is not retried - nothing will change by asking again', async () => {
     const F = make();
     F.island.keyRes = { ok: false, refused: true };

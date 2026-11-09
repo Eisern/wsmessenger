@@ -8010,7 +8010,9 @@ async def _is_guest_user(user_id: int) -> bool:
 # guests until somebody decides otherwise.
 _GUEST_ALLOWED: list[tuple[str, re.Pattern]] = [
     ("GET", re.compile(r"^/(health|api/notice)$")),
-    ("POST", re.compile(r"^/auth/(logout|logout-all|refresh)$")),
+    # No /auth/refresh: a guest is never given a refresh token (see
+    # foreign_guest_session); it signs in again with its key.
+    ("POST", re.compile(r"^/auth/(logout|logout-all)$")),
     ("GET", re.compile(r"^/rooms/(invites|mine|list)$")),
     ("GET", re.compile(r"^/rooms/\d+/(history|members|meta|pin|logo)$")),
     ("POST", re.compile(r"^/rooms/\d+/(invites/accept|invites/decline|leave|mark_seen|files)$")),
@@ -8114,23 +8116,30 @@ def _guest_username_base(display: str, island: str) -> str:
     return f"{name}@{isl}"
 
 
-async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]:
-    """Find or create the guest bound to this card's key. Returns (user_id, username)."""
-    await _ensure_guest_tables(session)
-    await _ensure_ed25519_support(session)
-
+async def _existing_guest(session: AsyncSession, card: dict) -> tuple[int, str] | None:
     res = await session.execute(text("""
         SELECT g.user_id, g.ed25519_pub, u.username
         FROM chat_foreign_guests g JOIN users u ON u.id = g.user_id
         WHERE g.kid = :kid
     """), {"kid": card["kid"]})
     row = res.mappings().first()
-    if row:
-        # One key, one signing key: they are derived from the same identity, so
-        # a card pairing this kid with another Ed25519 key is not that person.
-        if row["ed25519_pub"] != card["ed25519"]:
-            raise HTTPException(status_code=409, detail="this key is already a guest here, with another signing key")
-        return int(row["user_id"]), row["username"]
+    if not row:
+        return None
+    # One key, one signing key: they are derived from the same identity, so
+    # a card pairing this kid with another Ed25519 key is not that person.
+    if row["ed25519_pub"] != card["ed25519"]:
+        raise HTTPException(status_code=409, detail="this key is already a guest here, with another signing key")
+    return int(row["user_id"]), row["username"]
+
+
+async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]:
+    """Find or create the guest bound to this card's key. Returns (user_id, username)."""
+    await _ensure_guest_tables(session)
+    await _ensure_ed25519_support(session)
+
+    found = await _existing_guest(session, card)
+    if found:
+        return found
 
     base_name = _guest_username_base(card["display_name"], card["island_id"])
     username = None
@@ -8145,6 +8154,23 @@ async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]
     if not username:
         raise HTTPException(status_code=409, detail="cannot name this guest")
 
+    # Two invitations of the same new key at once both get past the lookup
+    # above and collide on a unique index here (the name, or the kid). The
+    # loser's insert is undone by the savepoint alone, and its answer is the
+    # guest the winner made - not a 500.
+    try:
+        async with session.begin_nested():
+            uid = await _create_guest(session, card, username)
+    except IntegrityError:
+        found = await _existing_guest(session, card)
+        if not found:
+            raise HTTPException(status_code=409, detail="cannot name this guest") from None
+        return found
+    _GUEST_IDS[uid] = True
+    return uid, username
+
+
+async def _create_guest(session: AsyncSession, card: dict, username: str) -> int:
     res = await session.execute(text("""
         INSERT INTO users (username, password_hash, public_key)
         VALUES (:u, :ph, :pk)
@@ -8170,8 +8196,7 @@ async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]
         "uid": uid, "kid": card["kid"], "x": card["x25519"], "ed": card["ed25519"],
         "isl": card["island_id"], "card": json.dumps(card["card"]),
     })
-    _GUEST_IDS[uid] = True
-    return uid, username
+    return uid
 
 
 class GuestInviteIn(BaseModel):
@@ -8286,10 +8311,19 @@ async def foreign_guest_session(payload: GuestSessionIn, request: Request):
     except Exception as e:
         raise _denied(f"signature does not verify for kid {kid} on island {island}: {e}") from None
 
-    out = await _issue_token_pair(int(row["user_id"]), row["username"])
-    out["guest"] = True
-    out["island_id"] = island
-    return out
+    # An access token only. When it runs out the guest signs a new challenge -
+    # that is what its key is for - so a refresh token would be a second way in
+    # that needs no key, valid for a week, and one more row in refresh_tokens
+    # for every sign-in (every ten minutes while a room is open), which nothing
+    # ever deletes.
+    return {
+        "access_token": create_access_token(int(row["user_id"]), row["username"]),
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRES_MIN * 60,
+        "username": row["username"],
+        "guest": True,
+        "island_id": island,
+    }
 
 
 # --- Config via env ---

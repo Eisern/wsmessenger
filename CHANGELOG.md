@@ -101,6 +101,17 @@ island - waited for somebody's browser extension.
 
 ### Fixed
 
+- **A contact card from a second domain named the wrong island.** Without a
+  signed island list the card carried the host the client happened to use,
+  not the island's name - so nobody could join that user's rooms as a guest
+  (the sign-in is checked against the name on the card). Both clients now ask
+  the island what it calls itself.
+- **"Send missing keys" said "everyone already has the key" when it could not
+  get the list.** A run now reports `incomplete`, and both buttons say so.
+- **A guest room's key was not looked for again after a passing server
+  error** - only after "not there yet" or "no answer". Two invitations of the
+  same new guest at once could also end in a 500 for one of them; the second
+  now finds the first's guest.
 - **A room key wrapped for somebody with a capital in their name did not open
   on Android.** A signed wrap (0.5.0) binds the recipient's name, and each side
   wrote that name on its own: the sharer as the member list spells it
@@ -115,6 +126,17 @@ island - waited for somebody's browser extension.
 
 ### Fixed — security
 
+- **A guest's sign-in handed out a refresh token.** Valid for a week, it was a
+  way in as the guest that needed no key - the one thing a guest session is
+  meant to require - and it put a row in `refresh_tokens`, which nothing ever
+  prunes, at every sign-in: every ten minutes while a guest room is open.
+  `/foreign/guest/session` now answers with an access token only; the client
+  signs a new challenge when it runs out, as it already did. `/auth/refresh`
+  is off a guest's allow-list.
+- **A room on another island showed a message its server wrote in the clear
+  as a member's.** At home an unencrypted message is history from before
+  encryption; in a guest room it is something that island wrote under a
+  member's name. Both clients now show it as unverified.
 - **`/foreign/claim` did not spend its nonce on a refusal**, contrary to its
   own comment: the nonce was deleted inside the transaction every refusal
   rolled back. It is now spent in a transaction of its own, before anything is

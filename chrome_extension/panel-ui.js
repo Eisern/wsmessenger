@@ -6163,15 +6163,19 @@ function renderRoomManagePane(roomId) {
       keysStatus.textContent = "";
       try {
         const res = await sweepRoomKeyGaps({ roomId: rid, reason: "manual", interactive: true });
+        const none = !res.shared && !res.alreadyHad && !res.skipped && !res.failed;
         if (!res.ran) {
           keysStatus.textContent = "Already running or rate-limited — try again shortly.";
-        } else if (!res.shared && !res.alreadyHad && !res.skipped && !res.failed) {
+        } else if (none && res.incomplete) {
+          keysStatus.textContent = "Could not get the list of missing keys from the server — try again shortly.";
+        } else if (none) {
           keysStatus.textContent = "Everyone in this room already has the key.";
         } else {
           const bits = [`Delivered to ${res.shared} member(s).`];
           if (res.alreadyHad) bits.push(`${res.alreadyHad} already covered by someone else.`);
           if (res.skipped) bits.push(`${res.skipped} skipped.`);
           if (res.failed) bits.push(`${res.failed} failed.`);
+          if (res.incomplete) bits.push("Not finished — the rest is tried again shortly.");
           keysStatus.textContent = bits.join(" ");
         }
         _renderKeyTrustBlocked(keysSection, keysStatus);

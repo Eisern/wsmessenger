@@ -113,6 +113,21 @@ def test_one_key_cannot_come_back_with_another_signing_key(island):
     assert invite(island, owner, room, impostor.card).status_code == 409
 
 
+def test_one_new_key_invited_twice_at_once_is_one_guest(island):
+    """Both invitations get past the lookup; the second must find the first's guest, not a 500."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    owner = register(island, "own")
+    rooms = [create_room(island, owner, "a"), create_room(island, owner, "b")]
+    for attempt in range(5):
+        who = foreigner(f"twin{attempt}")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            answers = list(pool.map(lambda rid, card=who.card: invite(island, owner, rid, card), rooms))
+        assert [a.status_code for a in answers] == [201, 201], [a.text for a in answers]
+        names = {a.json()["guest_username"] for a in answers}
+        assert len(names) == 1, names
+
+
 def test_a_card_built_by_the_client_itself_is_accepted(island, tmp_path):
     """
     The server re-checks a signature the JavaScript client made, over JSON the
@@ -165,7 +180,8 @@ def test_a_guest_signs_in_with_the_key_on_their_card(island):
     assert session["guest"] is True
     assert session["username"] == name
     assert session["island_id"] == "island-a.test"
-    assert session["access_token"] and session["refresh_token"]
+    assert session["access_token"] and session["expires_in"] > 0
+    assert "refresh_token" not in session
 
 
 def test_anybody_else_signing_is_refused(island):
@@ -292,14 +308,30 @@ def test_moderation_endpoints_are_closed_to_a_guest_in_the_room(island):
         assert r.status_code == 403, (path, r.status_code)
 
 
-def test_a_refreshed_token_is_still_a_guest_token(island):
-    """Guest-ness comes from the database: /auth/refresh issues a plain token."""
+def test_a_guest_is_given_no_refresh_token(island, db_url):
+    """Its key is how it signs in again; a refresh token would be a way in without it."""
+    import asyncio
+
+    import asyncpg
+
     *_, session, _ = _guest_in_room(island)
-    r = httpx.post(island.base + "/auth/refresh", json={"refresh_token": session["refresh_token"]})
-    assert r.status_code == 200, r.text
-    h = {"Authorization": f"Bearer {r.json()['access_token']}"}
-    assert httpx.get(island.base + "/dm/list", headers=h).status_code == 403
-    assert httpx.get(island.base + "/rooms/invites", headers=h).status_code == 200
+    assert "refresh_token" not in session
+
+    async def rows_for(name):
+        conn = await asyncpg.connect(db_url)
+        try:
+            return await conn.fetchval(
+                "SELECT count(*) FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id "
+                "WHERE u.username = $1", name)
+        finally:
+            await conn.close()
+
+    assert asyncio.run(rows_for(session["username"])) == 0
+
+    # And /auth/refresh is not on a guest's list, whatever it carries.
+    h = {"Authorization": f"Bearer {session['access_token']}"}
+    r = httpx.post(island.base + "/auth/refresh", headers=h, json={"refresh_token": "x"})
+    assert r.status_code == 403
 
 
 def test_the_dm_socket_refuses_a_guest(island, db_url):

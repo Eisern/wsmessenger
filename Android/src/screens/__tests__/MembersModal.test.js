@@ -116,6 +116,14 @@ test.each(['owner', 'admin'])('an %s sends missing keys for this room, and is to
   expect(msg).not.toMatch(/dee/);   // blocked in another room
 });
 
+test('a run that could not get the list says so, instead of "everyone has the key"', async () => {
+  KeySweepService.run.mockResolvedValueOnce({ ran: true, shared: 0, alreadyHad: 0, skipped: 0, failed: 0, incomplete: true });
+  const tree = await render('owner');
+  await act(async () => { await press(tree, 'Send missing keys'); });
+  expect(alerts[0][1]).toMatch(/Could not get the list of missing keys/);
+  expect(alerts[0][1]).not.toMatch(/Everyone/);
+});
+
 test('a run that did not start says so instead of reporting zeros', async () => {
   KeySweepService.run.mockResolvedValueOnce({ ran: false, shared: 0, alreadyHad: 0, skipped: 0, failed: 0 });
   const tree = await render('owner');

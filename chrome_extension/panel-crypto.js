@@ -3391,6 +3391,13 @@ async function buildMyContactBlobText() {
     // An island that publishes no list still works: the card then carries the
     // address this client is actually using, which is what the peer needs.
   }
+  if (!signingKey) {
+    // No signed list, so the id above is this client's guess - the host it
+    // happens to use. The island's own name is what a peer's client checks a
+    // room invitation and a guest sign-in against, and a guess from a second
+    // domain would fail both; the challenge answers it to anybody.
+    islandId = (await _islandSaysItIs(API_BASE)) || islandId;
+  }
 
   const blob = await FD().buildContactBlob(
     { kid, x25519PubB64: myPub, ed25519PubB64: edPub, displayName: me },
@@ -3398,6 +3405,18 @@ async function buildMyContactBlobText() {
     _foreignDeps().sign,
   );
   return JSON.stringify(blob);
+}
+
+/** What an island calls itself, from its challenge endpoint; "" when it will not say. */
+async function _islandSaysItIs(apiBase) {
+  try {
+    const r = await fetch(String(apiBase).replace(/\/+$/, "") + "/foreign/challenge");
+    if (!r.ok) return "";
+    const body = await r.json().catch(() => null);
+    return String(body?.island_id || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -4559,14 +4578,18 @@ async function encryptForGuestRoom(room, plaintext) {
 /** decryptMessageFromRoom, for a room on another island. */
 async function decryptFromGuestRoom(room, text, claimedAuthor = null) {
   if (isPingPayloadText(text)) return null;
-  if (typeof text !== "string") return text;
+  // Not encrypted at all. At home that is history from before encryption; in
+  // a room on another island it is something that island wrote under a
+  // member's name, and nobody can be held to it - so it is shown as such.
+  const unattributable = (t) => ({ text: String(t), from: String(claimedAuthor || ""), sigValid: false, mismatch: false });
+  if (typeof text !== "string") return unattributable(text);
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return text;
+    return unattributable(text);
   }
-  if (!parsed?.encrypted || !parsed.iv || !parsed.data) return text;
+  if (!parsed?.encrypted || !parsed.iv || !parsed.data) return unattributable(text);
 
   try {
     if (!await ensureCryptoReady({ interactive: false })) return null;

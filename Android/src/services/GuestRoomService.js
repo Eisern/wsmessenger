@@ -517,14 +517,18 @@ async function encrypt(room, plaintext) {
 
 /** Decrypt a guest room message; the same answers as CryptoService.decryptMessage. */
 async function decrypt(room, text, claimedAuthor = null) {
-  if (typeof text !== 'string') return text;
+  // Not encrypted at all. At home that is history from before encryption; in
+  // a room on another island it is something that island wrote under a
+  // member's name, and nobody can be held to it - so it is shown as such.
+  const unattributable = (t) => ({ text: String(t), from: String(claimedAuthor || ''), sigValid: false, mismatch: false });
+  if (typeof text !== 'string') return unattributable(text);
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch (_e) {
-    return text;
+    return unattributable(text);
   }
-  if (!parsed?.encrypted || !parsed.iv || !parsed.data) return text;
+  if (!parsed?.encrypted || !parsed.iv || !parsed.data) return unattributable(text);
   if (!CryptoService.isReady()) await CryptoService.ensureReady({ interactive: false });
   if (!CryptoService.isReady()) return null;
 

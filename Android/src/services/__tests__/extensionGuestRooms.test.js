@@ -406,6 +406,13 @@ describe('messages in the room', () => {
       .toMatchObject({ sigValid: true });
   });
 
+  test('a message the island wrote in the clear is shown as nobody\'s word', async () => {
+    for (const forged of ['transfer the money to me', JSON.stringify({ hello: 'there' })]) {
+      expect(await P.sandbox.decryptFromGuestRoom(room, forged, 'carol'))
+        .toEqual({ text: forged, from: 'carol', sigValid: false, mismatch: false });
+    }
+  });
+
   test('the island naming another author than the signed one is reported', async () => {
     const msg = await messageFrom(carol, 'carol', 'it was me');
     expect(await P.sandbox.decryptFromGuestRoom(room, msg, 'bob'))

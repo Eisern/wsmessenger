@@ -139,6 +139,7 @@
           page = await d.fetchGaps({ roomId: roomId, limit: C.PAGE });
         } catch (e) {
           anyFailure = true;
+          summary.incomplete = true;
           if (e && e.status === 429) {
             const s = Number(e.retryAfterS) > 0 ? Number(e.retryAfterS) : C.RETRY_AFTER_DEFAULT_S;
             nextAllowed = Math.max(nextAllowed, now() + s * 1000);
@@ -209,22 +210,28 @@
           if (transientRun >= C.MAX_TRANSIENT) break;
         }
 
+        if (transientRun >= C.MAX_TRANSIENT) summary.incomplete = true;
         // Another page is only worth fetching if this one shrank the set.
         more = !!page.truncated && progressed && transientRun < C.MAX_TRANSIENT;
       }
+      // Stopped at the page limit with more to do.
+      if (more) summary.incomplete = true;
       return anyFailure;
     }
 
     /**
      * One run: every gap this account may close, or those of one room.
-     * Resolves {ran, shared, alreadyHad, skipped, failed}; ran=false means it
-     * declined to start - already running, locked, or inside the backoff.
+     * Resolves {ran, shared, alreadyHad, skipped, failed, incomplete}; ran=false
+     * means it declined to start - already running, locked, or inside the
+     * backoff. incomplete=true means it did not get through: the list could not
+     * be fetched, the pass ended on failures in a row, or the page limit left
+     * more - so all zeros do NOT mean "nobody is missing a key".
      */
     async function run(opts) {
       const o = opts || {};
       const roomId = Number(o.roomId) || 0;
       const reason = String(o.reason || "");
-      const summary = { ran: false, shared: 0, alreadyHad: 0, skipped: 0, failed: 0 };
+      const summary = { ran: false, shared: 0, alreadyHad: 0, skipped: 0, failed: 0, incomplete: false };
 
       // Claimed before the first await: two callers arriving together must
       // not both get past this line.

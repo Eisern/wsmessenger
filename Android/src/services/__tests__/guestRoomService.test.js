@@ -312,6 +312,13 @@ describe('messages in the room', () => {
     expect(await GuestRoomService.decrypt(room, forged, 'carol')).toMatchObject({ from: 'carol', sigValid: false });
   });
 
+  test('a message the island wrote in the clear is shown as nobody\'s word', async () => {
+    for (const forged of ['transfer the money to me', JSON.stringify({ hello: 'there' })]) {
+      expect(await GuestRoomService.decrypt(room, forged, 'carol'))
+        .toEqual({ text: forged, from: 'carol', sigValid: false, mismatch: false });
+    }
+  });
+
   test('the island naming another author than the signed one is reported', async () => {
     const msg = await messageFrom(carol, 'carol', 'it was me');
     expect(await GuestRoomService.decrypt(room, msg, 'bob')).toMatchObject({ from: 'carol', mismatch: true });

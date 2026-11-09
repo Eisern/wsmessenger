@@ -90,7 +90,7 @@ test('a gap is filled - signed for the member, if absent only', async () => {
   island.gaps = [{ room_id: ROOM, room_name: 'r', username: 'Alice@island-g~ca2a4f' }];
 
   const res = await P.sandbox.sweepRoomKeyGaps({ reason: 'test' });
-  expect(res).toEqual({ ran: true, shared: 1, alreadyHad: 0, skipped: 0, failed: 0 });
+  expect(res).toEqual({ ran: true, shared: 1, alreadyHad: 0, skipped: 0, failed: 0, incomplete: false });
   expect(island.shares).toHaveLength(1);
   const { target, body } = island.shares[0];
   expect(target).toBe('Alice@island-g~ca2a4f');

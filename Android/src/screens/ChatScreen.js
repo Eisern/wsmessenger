@@ -1558,9 +1558,12 @@ function MembersModal({ visible, onClose, members, onlineUsers, roomId, roomName
     try {
       const res = await KeySweepService.run({ roomId: Number(roomId), reason: 'manual', interactive: true });
       let text;
+      const none = !res.shared && !res.alreadyHad && !res.skipped && !res.failed;
       if (!res.ran) {
         text = 'Already running, locked, or tried a moment ago - try again shortly.';
-      } else if (!res.shared && !res.alreadyHad && !res.skipped && !res.failed) {
+      } else if (none && res.incomplete) {
+        text = 'Could not get the list of missing keys from the server - try again shortly.';
+      } else if (none) {
         text = 'Everyone in this room already has the key.';
       } else {
         const bits = [`Delivered to ${res.shared} member(s).`];
@@ -1571,6 +1574,7 @@ function MembersModal({ visible, onClose, members, onlineUsers, roomId, roomName
         if (blocked.length) {
           bits.push(`Verify the safety number of ${blocked.map((b) => b.username).join(', ')} first.`);
         }
+        if (res.incomplete) bits.push('Not finished - the rest is tried again shortly.');
         text = bits.join(' ');
       }
       Alert.alert('Room keys', text);

@@ -68,7 +68,7 @@ describe('a run', () => {
     H.island.pages = [gaps([7, 'ann'], [7, 'bob'], [8, 'cat'])];
     H.island.shareResult['7:bob'] = 'had';
     const res = await H.sweep.run({ reason: 'test' });
-    expect(res).toEqual({ ran: true, shared: 2, alreadyHad: 1, skipped: 0, failed: 0 });
+    expect(res).toEqual({ ran: true, shared: 2, alreadyHad: 1, skipped: 0, failed: 0, incomplete: false });
     expect(H.calls.refresh).toEqual([7, 8]);
     expect(H.calls.share).toEqual(['7:ann', '7:bob', '8:cat']);
     expect(H.done).toHaveLength(1);
@@ -186,6 +186,26 @@ describe('failures', () => {
     await H.sweep.run();
     expect(H.sweep.trustBlocked()).toEqual([]);
     expect(H.sweep.nextAllowedAt).toBe(1_000_000 + L.ERROR_BACKOFF_MS);
+  });
+
+  test('a run that could not get the list says so - zeros are not "nobody is missing a key"', async () => {
+    const H = harness();
+    H.island.pages = [err('down', { status: 503 })];
+    expect(await H.sweep.run()).toEqual({ ran: true, shared: 0, alreadyHad: 0, skipped: 0, failed: 0, incomplete: true });
+
+    const H2 = harness();
+    H2.island.pages = [gaps([7, 'a'], [7, 'b'], [7, 'c'])];
+    for (const n of 'abc') H2.island.shareResult[`7:${n}`] = err('down', { status: 503 });
+    expect(await H2.sweep.run()).toMatchObject({ failed: 3, incomplete: true });
+
+    const H3 = harness();
+    H3.island.pages = Array.from({ length: 10 }, (_, i) => ({ ...gaps([7, `m${i}`]), truncated: true }));
+    expect(await H3.sweep.run()).toMatchObject({ shared: L.MAX_PASSES, incomplete: true });
+
+    const H4 = harness();
+    H4.island.pages = [gaps([7, 'a'])];
+    H4.island.shareResult['7:a'] = err('not a member', { status: 404 });
+    expect(await H4.sweep.run()).toMatchObject({ failed: 1, incomplete: false });
   });
 
   test('a rate limit is obeyed for as long as the island asks', async () => {
