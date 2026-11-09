@@ -63,6 +63,20 @@ guest. The Android client does not yet.
   inviting them hands it to an island that checks the signature. Contacts added
   before this have no card; the extension says so and asks for the card again.
 
+### Fixed
+
+- **A room key wrapped for somebody with a capital in their name did not open
+  on Android.** A signed wrap (0.5.0) binds the recipient's name, and each side
+  wrote that name on its own: the sharer as the member list spells it
+  ("Alice"), the Android reader lower-cased. The signature never matched, so
+  the key was refused as forged. Signer and recipient are now signed
+  lower-cased by both clients, as the server compares names. A wrap made before
+  this for a name with capitals no longer verifies on the extension either, and
+  the key sweep will not notice - the row exists, it only fills gaps - so the
+  room owner re-shares it (Rooms → Manage → Members → *Re-share key*). Guests
+  from other islands are the common case: their name is built from the display
+  name on their card.
+
 ### Fixed — security
 
 - **`/foreign/claim` did not spend its nonce on a refusal**, contrary to its
