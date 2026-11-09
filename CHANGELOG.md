@@ -33,7 +33,7 @@ not offer it yet; this is the half they will talk to.
 ### Added — rooms across islands, in the extension
 
 The extension uses the server half above, both as the inviting side and as the
-guest. The Android client does not yet.
+guest. Android does the same since the section below.
 
 - **Inviting.** Rooms → Manage → *Invite someone from another server* lists
   your cross-island contacts. The island creates the guest from their card and
@@ -56,6 +56,19 @@ guest. The Android client does not yet.
   itself; nothing goes through your own server, which is not told.
 - **Not yet:** files in guest rooms, older history than the last 100 messages,
   unread markers for a guest room that is not open, and moderation by guests.
+
+### Added — rooms across islands, on Android
+
+- The same, with the same rules: *Invite someone from another server* in a
+  room's member list (owners and admins), a *Join* button on an invitation in a
+  cross-island conversation, *Rooms on other servers* in the room list, and a
+  guest room screen. Signatures and keys are checked by the same code as at
+  home (`CryptoService.acceptWrappedKeyIn` / `openRoomEnvelopeIn`, with that
+  island's names); pins go to the Keychain under that island.
+- What a guest room shows, and in what order, is one module both clients share
+  (`guest-room-feed.js`): the extension moved onto it from its own copy.
+- Not yet on Android either: files in guest rooms, older history than the last
+  100 messages, unread markers for guest rooms.
 
 ### Changed
 
@@ -101,6 +114,12 @@ guest. The Android client does not yet.
   socket, nothing drawn twice or out of order, nothing drawn into a closed
   view). 36 deliberate breakages of the code - each protection removed in turn -
   are each caught; three that were not at first got the tests they lacked.
+- Android: `guestRoomService.test.js` and `guestRoomModerator.test.js` (the
+  real CryptoService, StorageService and ForeignService against an adversarial
+  island), `guestRoomFeed.test.js`, and `GuestRoomScreen.test.js` - a screen
+  rendered with react-test-renderer, run by the new `npm run test:screens`,
+  which CI now runs too. Each of 24 service, 9 feed and 7 screen protections,
+  removed in turn, fails a test.
 
 ## 0.5.0 — 2026-11-08
 

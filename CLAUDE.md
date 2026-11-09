@@ -121,7 +121,7 @@ there is no way to address a stranger.
   server logs `[island] …` at startup saying what is on or missing.
   Operator docs: `docs/self-hosting.md` §8.3.
 
-**Guests in rooms** (server and extension; Android not yet; design and threat model in
+**Guests in rooms** (server and both clients; design and threat model in
 `docs/internal/cross-island-rooms-assessment.md`): a person from another island
 takes part in a room as a guest — a `users` row with the `!guest` password
 marker, created from their signed contact card by `POST /rooms/{id}/guests`
@@ -132,13 +132,17 @@ read from the database (`_is_guest_user`), never from a token claim, and
 allow-list, so a new endpoint is closed to guests until added there.
 `/ws-dm` refuses guests explicitly. `ISLAND_ACCEPT_GUESTS=0` turns it off.
 
-Extension side: the protocol is `chrome_extension/guest-rooms.js` (byte-identical
-to `Android/src/services/guest-rooms.js`, platform-free like `foreign-dm.js`): the
-session signature, `createSessions` (one session per island, signed again on 401,
-never a stored refresh token), the `ROOMINV1::` invitation that travels as the
-plaintext of a cross-island DM, and the key slot `gr:<island>:<roomId>`. The
-wiring is the "Rooms on other islands, as a guest" section of `panel-crypto.js`
-and the matching section at the end of `panel-ui.js`. Rules that must hold:
+Clients: the protocol is `guest-rooms.js` and the feed ordering
+`guest-room-feed.js`, each byte-identical between `chrome_extension/` and
+`Android/src/services/` and platform-free like `foreign-dm.js`: the session
+signature, `createSessions` (one session per island, signed again on 401, never
+a stored refresh token), the `ROOMINV1::` invitation that travels as the
+plaintext of a cross-island DM, the key slot `gr:<island>:<roomId>`, and what a
+guest room shows in what order. The wiring is the "Rooms on other islands, as a
+guest" section of `panel-crypto.js` plus the matching section at the end of
+`panel-ui.js` in the extension, and `GuestRoomService.js` + `GuestRoomScreen.js`
+on Android (`CryptoService.acceptWrappedKeyIn` / `openRoomEnvelopeIn` carry the
+island context there). Rules that must hold:
 
 - An invitation is followed only to the inviter's island **as their card says**;
   the island id in it is a consistency check, never an address.
@@ -150,10 +154,12 @@ and the matching section at the end of `panel-ui.js`. Rules that must hold:
   returns **before** anything else uses that name (`inviteForeignContactToRoom`),
   and the guest pins the inviter from their card — only under the name their
   card carries. So the room's island cannot swap either key even on first contact.
-- The panel holds the guest room's socket itself (`openGuestRoomSocket`) — posting
-  to a room is only possible over `/ws`. The view connects it **before** reading
-  history, de-duplicates by ciphertext, re-reads history after a reconnect, and
-  serializes every draw; `extensionGuestRoomView.test.js` pins that order.
+- The client holds the guest room's socket itself (`openGuestRoomSocket` /
+  `GuestRoomService.openSocket`) — posting to a room is only possible over `/ws`.
+  `guest-room-feed.js` connects it **before** reading history, de-duplicates by
+  ciphertext, re-reads history after a reconnect, and serializes every draw;
+  `guestRoomFeed.test.js` and `extensionGuestRoomView.test.js` pin that order.
+  Views only draw what the feed hands them.
 
 A foreign thread must never enter the local DM key path: `ensureDmKeyReady`
 reads this island's 404 as "create a key and share it with the peer", for a peer
@@ -257,6 +263,7 @@ Full reasoning, threat model and what this deliberately does *not* buy:
 | `chrome_extension/endpoints.js` | Entry-point list, failure classification and rotation state machine — byte-identical to `Android/src/services/endpoints.js` |
 | `chrome_extension/foreign-dm.js` | Cross-island DM protocol (contact cards, mailbox claims, delivery, relay envelopes) — byte-identical to `Android/src/services/foreign-dm.js` |
 | `chrome_extension/guest-rooms.js` | Guest-room protocol (guest sessions per island, room invitations, key slots) — byte-identical to `Android/src/services/guest-rooms.js` |
+| `chrome_extension/guest-room-feed.js` | What a guest room shows and in what order (socket before history, dedupe, resync, serialized draws) — byte-identical to `Android/src/services/guest-room-feed.js` |
 | `chrome_extension/notifications.js` | Badge management; exposes `window.Notifications` singleton |
 | `chrome_extension/login.js` | Login, registration, 2FA, BIP39 recovery form, KEK derivation → background handoff |
 | `chrome_extension/argon2-selftest.js` | WASM integrity check (pinned SHA-256) + KDF test vector; blocks unlock on failure |

@@ -60,6 +60,7 @@ import ImportKeyScreen from './src/screens/ImportKeyScreen';
 import RecoveryScreen from './src/screens/RecoveryScreen';
 import RoomsListScreen from './src/screens/RoomsListScreen';
 import ChatScreen from './src/screens/ChatScreen';
+import GuestRoomScreen from './src/screens/GuestRoomScreen';
 import DMListScreen from './src/screens/DMListScreen';
 import DMChatScreen, { activeScreenThreadIds as activeDmScreens } from './src/screens/DMChatScreen';
 import InvitesScreen from './src/screens/InvitesScreen';
@@ -76,6 +77,7 @@ function RoomsStackNavigator() {
     <RoomsStack.Navigator screenOptions={{ headerShown: false }}>
       <RoomsStack.Screen name="RoomsList" component={RoomsListScreen} />
       <RoomsStack.Screen name="Chat" component={ChatScreen} />
+      <RoomsStack.Screen name="GuestRoom" component={GuestRoomScreen} />
     </RoomsStack.Navigator>
   );
 }

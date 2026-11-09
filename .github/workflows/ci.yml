@@ -72,4 +72,8 @@ jobs:
       # nowhere but the author's machine. The integration project is left out
       # on purpose - it needs two live islands.
       - run: npm run test:unit
+      # Screens rendered with their services stubbed (react-test-renderer).
+      # Only src/screens: App.test.tsx needs native modules a node runner does
+      # not have.
+      - run: npm run test:screens
       - run: npm run lint
