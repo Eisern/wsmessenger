@@ -749,6 +749,30 @@ const CryptoService = {
     return cryptoManager.roomKeys.has(roomId);
   },
 
+  // ---- Rooms on other islands (GuestRoomService) ----
+  //
+  // The same two checks that keep this island honest, run with another
+  // island's names: who we are there, and the PINNED signing key of a name
+  // there. A ctx without both is refused rather than defaulted - defaulting
+  // would quietly check a guest room against this island's key server.
+
+  /** _acceptWrappedKey for a room on another island. */
+  async acceptWrappedKeyIn(ctx, encryptedB64, opts) {
+    if (!ctx || !ctx.me || typeof ctx.edKeyOf !== 'function') throw new Error('A key from another island needs its names');
+    return _acceptWrappedKey(encryptedB64, { ...opts, ctx });
+  },
+
+  /** _openRoomEnvelope for a room on another island; `roomId` is its id there. */
+  async openRoomEnvelopeIn(ctx, roomId, plain, claimedAuthor) {
+    if (!ctx || !ctx.me || typeof ctx.edKeyOf !== 'function') throw new Error('A message from another island needs its names');
+    return _openRoomEnvelope(roomId, plain, claimedAuthor, ctx);
+  },
+
+  /** The island this device files pins under, with old pins migrated first. */
+  pinScope() {
+    return _pinScope();
+  },
+
   /**
    * Fetch and decrypt the room key from the server.
    * Mirrors _loadDmKey but for regular rooms.
@@ -1689,7 +1713,7 @@ function _deriveSigningSeed() {
  * every message written before this existed, and a reader that turned them into
  * "unverified" noise would cry wolf over the whole history.
  */
-async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
+async function _openRoomEnvelope(roomId, plain, claimedAuthor, ctx = null) {
   if (typeof plain !== 'string' || !plain.startsWith('{')) return plain;
   let inner;
   try {
@@ -1709,10 +1733,12 @@ async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
   let sigValid = null;
   if (inner.sig && from) {
     try {
-      const me = await _resolveUsername();
+      // ctx: a room on another island, where our name and everybody's keys
+      // are that island's (GuestRoomService). Without it, this island's.
+      const me = ctx ? String(ctx.me || '').trim().toLowerCase() : await _resolveUsername();
       const pub = (me && from.toLowerCase() === me)
         ? CryptoService.ed25519PublicKey()
-        : await CryptoService._fetchPeerEd25519PubKey(from);
+        : ctx ? await ctx.edKeyOf(from) : await CryptoService._fetchPeerEd25519PubKey(from);
       if (pub) {
         sigValid = CryptoUtils.ed25519Verify(
           pub,
@@ -1746,10 +1772,14 @@ async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
  *
  * Mirrors acceptWrappedKey in the extension's panel-crypto.js.
  *
+ * `ctx` is the island the key comes from when it is not ours - { me, edKeyOf } -
+ * for a room joined as a guest elsewhere: every rule holds unchanged, only the
+ * names are that island's.
+ *
  * @returns {Promise<string|null>} the key (base64), or null when refused
  */
-async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, signers }) {
-  const me = await _resolveUsername();
+async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, signers, ctx = null }) {
+  const me = ctx ? String(ctx.me || '').trim().toLowerCase() : await _resolveUsername();
   if (!me || !cryptoManager.userPrivateKey) return null;
 
   // Open it first (AES-GCM: a forged blob just fails here) so the signature is
@@ -1790,7 +1820,7 @@ async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, sig
           console.warn(`[keywrap] ${info.signer} is not entitled to hand out this ${scope} key - refusing it`);
           return null;
         }
-        pub = await CryptoService._fetchPeerEd25519PubKey(info.signer);
+        pub = ctx ? await ctx.edKeyOf(info.signer) : await CryptoService._fetchPeerEd25519PubKey(info.signer);
       }
       if (!pub) {
         console.warn(`[keywrap] no signing key known for ${info.signer} - refusing the key`);

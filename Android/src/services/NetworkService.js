@@ -1383,6 +1383,18 @@ class NetworkService {
     });
   }
 
+  /**
+   * Invite somebody from another island into a room here, by their signed
+   * contact card. The island checks the card itself and answers with the name
+   * it gave them: { ok, room_id, guest_username, status, island_id }.
+   */
+  async inviteGuestToRoom(roomId, card) {
+    return this._fetch(`/rooms/${encodeURIComponent(roomId)}/guests`, {
+      method: 'POST',
+      body: { card },
+    });
+  }
+
   async kickFromRoom(roomId, username) {
     return this._fetch(`/rooms/${encodeURIComponent(roomId)}/kick`, {
       method: 'POST',

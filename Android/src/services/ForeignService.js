@@ -317,6 +317,10 @@ async function addContact(cardText) {
     island: { islandId: c.islandId, signingKeyB64: c.islandSigningKeyB64, entryPoints: c.entryPoints },
     inbox: { threadId, keyB64, keyId },
     outbox: null,
+    // The card exactly as they signed it. Inviting them into a room hands it
+    // to an island, which checks the signature itself - a copy rebuilt from
+    // the fields above would not verify.
+    card: blob,
     addedAt: Date.now(),
   };
   await saveContact(contact);
