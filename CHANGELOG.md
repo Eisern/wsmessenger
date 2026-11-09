@@ -70,6 +70,29 @@ guest. Android does the same since the section below.
 - Not yet on Android either: files in guest rooms, older history than the last
   100 messages, unread markers for guest rooms.
 
+### Added — Android hands out missing room keys
+
+Until now Android shared a room key only from the room screen of an owner who
+had that room open at the moment somebody accepted. Everybody else - a member
+who accepted while the owner was away, an admin's rooms, a guest from another
+island - waited for somebody's browser extension.
+
+- Android now sweeps like the extension: an owner's or admin's app asks the
+  island who in their rooms holds no key (`/crypto/rooms/key-gaps`) and
+  wraps it for them - signed, filling the gap only - on unlock, on the notify
+  socket's `notify_key_gap`, on a membership change, when they open the room,
+  when a peer is verified, and from **Send missing keys** in the member list.
+  A member whose key changed since it was pinned gets nothing until verified,
+  and the room says so.
+- The rules - when, how often, what each failure costs - are one module both
+  clients share (`key-sweep.js`); the extension's sweep moved onto it. On the
+  way: two runs asked for at the same moment could both start, because the
+  "already running" flag was set only after the first await. It is claimed
+  first now.
+- Android's key-share trust refusals carry the extension's codes
+  (`TRUST_CHANGED` / `TRUST_UNVERIFIED` / `TRUST_UNVERIFIABLE`), and
+  `shareRoomKeyToUser` takes `ifAbsent` and says whether it wrote.
+
 ### Changed
 
 - A cross-island contact now keeps the card exactly as they signed it, because
@@ -120,6 +143,12 @@ guest. Android does the same since the section below.
   rendered with react-test-renderer, run by the new `npm run test:screens`,
   which CI now runs too. Each of 24 service, 9 feed and 7 screen protections,
   removed in turn, fails a test.
+- Key sweep: `keySweep.test.js` (the shared rules, with the clock in the
+  test's hands), `keySweepService.test.js` (Android over the real CryptoService
+  and StorageService: what goes over the wire, the trust stop, the triggers),
+  `extensionKeySweep.test.js` (the extension's wiring) and
+  `MembersModal.test.js` (the member list's controls). 37 protections, each
+  removed in turn, fail a test.
 
 ## 0.5.0 — 2026-11-08
 

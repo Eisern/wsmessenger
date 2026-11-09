@@ -23,6 +23,7 @@ import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
 import ForeignService from '../services/ForeignService';
 import GuestRoomService from '../services/GuestRoomService';
+import KeySweepService from '../services/KeySweepService';
 
 // Auto-clear clipboard 60s after copying a message (plaintext is sensitive).
 let _clipClearTimer = null;
@@ -333,24 +334,43 @@ export default function ChatScreen({ navigation, route }) {
     return () => NetworkService.off('message', stableHandler);
   }, []); // empty deps — register once
 
-  // Auto-share room key when an invitee accepts (owner only)
+  // Somebody accepted: refresh the list. Their room key is KeySweepService's
+  // job - it hears the same event, asks the island who is actually missing a
+  // key, and serves admins and closed rooms too, which a share from this
+  // screen (owner only, only while open) never did.
   _handleMembersChangedRef.current = (msg) => {
     if (!screenReady) return;
     if (msg.type !== 'members_changed') return;
     if (String(msg.room_id) !== String(roomId)) return;
-    if (msg.action !== 'invite_accepted') return;
-    if (myRole !== 'owner') return;
-    const username = msg.username;
-    if (!username) return;
-    CryptoService.shareRoomKeyToUser(roomId, username).catch(err => {
-      if (String(err?.message || '').includes('re-verification')) {
-        Alert.alert('Key Verification Required', err.message);
-      } else if (__DEV__) {
-        console.warn('[ChatScreen] auto key share after accept failed:', err?.message);
-      }
-    });
+    if (msg.action !== 'invite_accepted' && msg.action !== 'join_approved') return;
     refreshMembers();
   };
+
+  // An owner or admin opening the room is a good moment to close its gaps.
+  useEffect(() => {
+    if (screenReady && isOwnerOrAdmin) KeySweepService.schedule('room_open', { roomId: Number(roomId) });
+  }, [screenReady, isOwnerOrAdmin, roomId]);
+
+  // Members the sweep could not serve because their key needs verifying -
+  // said once per member, in the room they are missing a key for.
+  const _blockedShownRef = useRef(new Set());
+  useEffect(() => {
+    if (!screenReady) return undefined;
+    return KeySweepService.onDone((_summary, blocked) => {
+      const here = (blocked || []).filter((b) => (b.rooms || []).includes(Number(roomId))
+        && !_blockedShownRef.current.has(b.username));
+      if (!here.length) return;
+      for (const b of here) _blockedShownRef.current.add(b.username);
+      const names = here.map((b) => b.username).join(', ');
+      const text = (here.length === 1
+        ? '1 member cannot receive the room key until you verify their safety number: '
+        : `${here.length} members cannot receive the room key until you verify their safety numbers: `) + names;
+      dispatch({
+        type: 'APPEND_ROOM_MESSAGE',
+        message: normMsg({ id: `sys_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, author: 'System', text, ts: Date.now(), _decrypted: text }),
+      });
+    });
+  }, [screenReady, roomId, dispatch]);
   useEffect(() => {
     const stableHandler = (msg) => _handleMembersChangedRef.current?.(msg);
     NetworkService.on('message', stableHandler);
@@ -1531,6 +1551,36 @@ function MembersModal({ visible, onClose, members, onlineUsers, roomId, roomName
     }
   }
 
+  const [sweeping, setSweeping] = React.useState(false);
+
+  async function handleSendMissingKeys() {
+    setSweeping(true);
+    try {
+      const res = await KeySweepService.run({ roomId: Number(roomId), reason: 'manual', interactive: true });
+      let text;
+      if (!res.ran) {
+        text = 'Already running, locked, or tried a moment ago - try again shortly.';
+      } else if (!res.shared && !res.alreadyHad && !res.skipped && !res.failed) {
+        text = 'Everyone in this room already has the key.';
+      } else {
+        const bits = [`Delivered to ${res.shared} member(s).`];
+        if (res.alreadyHad) bits.push(`${res.alreadyHad} already covered by someone else.`);
+        if (res.skipped) bits.push(`${res.skipped} skipped.`);
+        if (res.failed) bits.push(`${res.failed} failed.`);
+        const blocked = KeySweepService.trustBlocked().filter((b) => (b.rooms || []).includes(Number(roomId)));
+        if (blocked.length) {
+          bits.push(`Verify the safety number of ${blocked.map((b) => b.username).join(', ')} first.`);
+        }
+        text = bits.join(' ');
+      }
+      Alert.alert('Room keys', text);
+    } catch (e) {
+      Alert.alert('Room keys', e?.message || String(e));
+    } finally {
+      setSweeping(false);
+    }
+  }
+
   async function handleInvite() {
     const target = inviteUsername.trim();
     if (!target) return;
@@ -1678,6 +1728,13 @@ function MembersModal({ visible, onClose, members, onlineUsers, roomId, roomName
           {canModerate && !foreignPick && (
             <TouchableOpacity style={guestStyles.openBtn} onPress={openForeignPick} disabled={inviting}>
               <Text style={guestStyles.openBtnText}>Invite someone from another server</Text>
+            </TouchableOpacity>
+          )}
+          {canModerate && !foreignPick && (
+            <TouchableOpacity style={guestStyles.openBtn} onPress={handleSendMissingKeys} disabled={sweeping}>
+              {sweeping
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Text style={guestStyles.openBtnText}>Send missing keys</Text>}
             </TouchableOpacity>
           )}
           {canModerate && foreignPick && (
@@ -2538,4 +2595,4 @@ const guestStyles = StyleSheet.create({
 
 // A room on another island is drawn with the same bubble and the same chrome
 // (GuestRoomScreen): one look for a room, wherever it lives.
-export { MessageBubble, styles as chatStyles };
+export { MessageBubble, MembersModal, styles as chatStyles };

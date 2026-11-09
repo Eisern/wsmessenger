@@ -601,7 +601,7 @@ const CryptoService = {
    * @param {string} targetUsername
    * @returns {Promise<boolean>}
    */
-  async shareRoomKeyToUser(roomId, targetUsername) {
+  async shareRoomKeyToUser(roomId, targetUsername, { ifAbsent = false } = {}) {
     if (!CryptoService.isReady()) return false;
     try {
       const rawB64 = await cryptoManager.exportRoomKeyForSharing(roomId);
@@ -624,8 +624,10 @@ const CryptoService = {
       const wrapped = await CryptoUtils.encryptRoomKeyForUser(
         peerPubB64, rawB64, await CryptoService._wrapSignOpts(roomId, targetUsername, keyId),
       );
-      await NetworkService.shareRoomKey(roomId, targetUsername, wrapped, keyId);
-      return true;
+      const res = await NetworkService.shareRoomKey(roomId, targetUsername, wrapped, keyId, { ifAbsent });
+      // written:false - with ifAbsent, somebody else closed the gap first.
+      // Older servers answer without the field; that was a write.
+      return { ok: true, written: res?.written !== false };
     } catch (_e) {
       console.warn('[CryptoService] shareRoomKeyToUser error:', _e?.message);
       throw _e;
@@ -1269,6 +1271,9 @@ const CryptoService = {
       await StorageService.removePendingEd25519(island, me, peer);
     }
     _ed25519PubKeyCache.delete(String(peer || '').toLowerCase());
+    // The key sweep held back this peer's room keys until now. (Its trust
+    // check clears the "changed" flag itself, now that the pin is this key.)
+    _emit('peer_verified', { username: peer });
   },
 
   /**
@@ -2267,15 +2272,18 @@ async function _assertPeerKeyTrustedForSharing(peerUsername, actionLabel = 'shar
 
   const keyCheck = await _checkPeerKeyChanged(peer, { force: true, peerPublicKeyB64 });
 
+  // Each refusal carries a code, as the extension's do: the key sweep tells
+  // "a person must verify this peer" (TRUST_CHANGED / TRUST_UNVERIFIED - asking
+  // again changes nothing) from "could not check right now" (TRUST_UNVERIFIABLE).
   if (keyCheck === null) {
-    throw new Error(
+    throw _trustError('TRUST_UNVERIFIABLE',
       `Unable to verify trust state for "${peer}". ` +
       `Open Safety Number and verify before ${actionLabel}.`
     );
   }
 
   if (keyCheck.changed) {
-    throw new Error(
+    throw _trustError('TRUST_CHANGED',
       `Public key for "${peer}" has changed since last known. ` +
       `Verify safety numbers before ${actionLabel}.`
     );
@@ -2287,17 +2295,24 @@ async function _assertPeerKeyTrustedForSharing(peerUsername, actionLabel = 'shar
   try {
     const stillChanged = await StorageService.getKeyChanged(await _pinScope(), me || keyCheck.username, peer);
     if (stillChanged) {
-      throw new Error(
+      throw _trustError('TRUST_UNVERIFIED',
         `Public key for "${peer}" has recently changed and requires re-verification. ` +
         `Open Safety Numbers and verify before ${actionLabel}.`
       );
     }
   } catch (e) {
-    if (String(e?.message || '').includes('re-verification')) throw e;
+    if (e?.code === 'TRUST_UNVERIFIED') throw e;
     // Storage error — fail closed: do NOT allow key sharing without verification
     console.warn('[CryptoService] TOFU storage check failed — blocking key share:', e?.message);
-    throw new Error(`Cannot verify trust state for "${peer}" due to storage error. Retry or re-verify safety numbers.`);
+    throw _trustError('TRUST_UNVERIFIABLE',
+      `Cannot verify trust state for "${peer}" due to storage error. Retry or re-verify safety numbers.`);
   }
+}
+
+function _trustError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
 }
 
 export default CryptoService;

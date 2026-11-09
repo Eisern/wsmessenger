@@ -95,8 +95,15 @@ async function render() {
       <GuestRoomScreen navigation={{ goBack: jest.fn() }} route={{ params: { room: ROOM } }} />,
     );
   });
+  mounted.push(tree);
   return tree;
 }
+
+const mounted = [];
+afterEach(async () => {
+  // Unmounted inside act: a list left mounted keeps rendering after the test.
+  await act(async () => { while (mounted.length) mounted.pop().unmount(); });
+});
 
 beforeEach(() => {
   Object.assign(mockFeed, { handlers: null, started: 0, stopped: 0, sent: [], refreshed: 0 });
@@ -108,7 +115,7 @@ test('opens the feed with the room, and closes it with the screen', async () => 
   const tree = await render();
   expect(mockFeed.room).toBe(ROOM);
   expect(mockFeed.started).toBe(1);
-  await act(async () => { tree.unmount(); });
+  await act(async () => { mounted.splice(mounted.indexOf(tree), 1); tree.unmount(); });
   expect(mockFeed.stopped).toBe(1);
   expect(mockUnlocked.removed).toBe(1);
 });
