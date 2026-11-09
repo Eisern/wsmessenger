@@ -182,6 +182,17 @@ describe('guest-room-feed.js parity between the two clients', () => {
   });
 });
 
+const KS_ANDROID = path.join(__dirname, '..', 'key-sweep.js');
+const KS_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'key-sweep.js');
+
+describe('key-sweep.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(KS_ANDROID)).toBe(true);
+    expect(fs.existsSync(KS_EXTENSION)).toBe(true);
+    expect(normalized(KS_ANDROID)).toBe(normalized(KS_EXTENSION));
+  });
+});
+
 const GR_ANDROID = path.join(__dirname, '..', 'guest-rooms.js');
 const GR_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-rooms.js');
 
