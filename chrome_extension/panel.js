@@ -21,12 +21,12 @@ let ISLAND_ID = "imagine-1-ws.xyz";
 // differs, because it goes to another island and keeps a copy here.
 let __activeForeignKid = null;
 
-// The room on another island open in the chat view, if any, and the socket the
-// panel holds to it (panel-crypto.js "Rooms on other islands"). While it is
+// The room on another island open in the chat view, if any, and its feed
+// (guest-room-feed.js), which holds the panel's own socket to it. While it is
 // set, activeRoomId is null and dmMode is false: nothing addressed to this
 // island's rooms or threads can land in the view.
 let activeGuestRoom = null;
-let __guestSock = null;
+let __guestFeed = null;
 
 // --- Runtime backend resolution -------------------------------------------
 // Must run before anything issues a request. background.js resolves the same
@@ -3221,8 +3221,8 @@ async function send() {
     const room = activeGuestRoom;
     try {
       const enc = await encryptForGuestRoom(room, payload);
-      if (activeGuestRoom !== room || !__guestSock) throw new Error("The room was closed");
-      __guestSock.send(enc);
+      if (activeGuestRoom !== room || !__guestFeed) throw new Error("The room was closed");
+      __guestFeed.send(enc);
       __clearReplyTo();
       msgInput.value = "";
     } catch (e) {

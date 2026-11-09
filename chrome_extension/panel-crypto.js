@@ -4414,7 +4414,9 @@ async function inviteForeignContactToRoom(roomId, peerKid, roomName = "") {
   });
   const body = await r.json().catch(() => ({}));
   if (!r.ok) {
-    throw new Error(r.status === 404 && !body.detail
+    // 404 "Not found" is this island with guests switched off; a missing room
+    // is 404 "Room not found", and says so itself.
+    throw new Error(r.status === 404 && body.detail === "Not found"
       ? "This server does not take guests from other servers"
       : (body.detail || `Could not invite (${r.status})`));
   }

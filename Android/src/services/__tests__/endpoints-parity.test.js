@@ -171,6 +171,17 @@ describe('foreign-dm.js parity between the two clients', () => {
   });
 });
 
+const GRF_ANDROID = path.join(__dirname, '..', 'guest-room-feed.js');
+const GRF_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-room-feed.js');
+
+describe('guest-room-feed.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(GRF_ANDROID)).toBe(true);
+    expect(fs.existsSync(GRF_EXTENSION)).toBe(true);
+    expect(normalized(GRF_ANDROID)).toBe(normalized(GRF_EXTENSION));
+  });
+});
+
 const GR_ANDROID = path.join(__dirname, '..', 'guest-rooms.js');
 const GR_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-rooms.js');
 

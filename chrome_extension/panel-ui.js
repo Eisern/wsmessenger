@@ -3426,7 +3426,7 @@ function renderCurrentRoom(opts = {}) {
 
   if (typeof activeGuestRoom !== "undefined" && activeGuestRoom) {
     const g = activeGuestRoom;
-    const live = !!(typeof __guestSock !== "undefined" && __guestSock?.online);
+    const live = !!(typeof __guestFeed !== "undefined" && __guestFeed?.online);
     currentRoomEl.textContent = `Room: ${g.roomName || "#" + g.roomId} · ${g.islandId}`;
     currentRoomEl.title = `On ${g.islandId}, where you are ${g.guestName}`;
     currentRoomEl.style.opacity = live ? "1" : "0.7";
@@ -6578,95 +6578,24 @@ async function __refreshDmListNow() {
 
 const roomsGuestListEl = document.getElementById("roomsGuestList");
 const roomsGuestColEl = document.getElementById("roomsGuestCol");
-let __guestKeyRetryTimer = null;
-// Bumped by every open and every close. A step of an older view that finishes
-// late finds the number moved and stops - whichever room it was for. Comparing
-// rooms is not enough: the same room opened twice would end up with two
-// sockets, each drawing every message.
-let __guestViewGen = 0;
-// Every change to the chat area for a guest room goes through here, one at a
-// time. Decrypting is async: without this a live message could land in the
-// middle of a history page being redrawn, or overtake the one before it.
-let __guestRenderChain = Promise.resolve();
-// Ciphertexts already drawn in the open guest room.
-let __guestSeen = new Set();
-
-function __guestRender(gen, fn) {
-  const run = __guestRenderChain.then(async () => {
-    if (gen === __guestViewGen) await fn();
-  });
-  __guestRenderChain = run.catch((e) => console.warn("[Guest] render failed:", e?.message || e));
-  return __guestRenderChain;
-}
+const GRF = () => globalThis.WSGuestRoomFeed || null;
 
 function __isGuestMe(room, user) {
   return String(user || "").trim().toLowerCase() === String(room?.guestName || "").trim().toLowerCase();
 }
 
 function closeGuestRoomView() {
-  __guestViewGen++;
-  if (__guestKeyRetryTimer) {
-    clearInterval(__guestKeyRetryTimer);
-    __guestKeyRetryTimer = null;
-  }
-  const wasOpen = !!(activeGuestRoom || __guestSock);
-  try { __guestSock?.close(); } catch { /* already closed */ }
-  __guestSock = null;
+  const wasOpen = !!(activeGuestRoom || __guestFeed);
+  try { __guestFeed?.stop(); } catch { /* already stopped */ }
+  __guestFeed = null;
   activeGuestRoom = null;
   if (wasOpen) __renderGuestRoomsSection().catch(() => {});
 }
 
-async function __renderGuestMessage(room, gen, user, ciphertext, ts) {
-  const dec = await decryptFromGuestRoom(room, ciphertext || "", user);
-  if (gen !== __guestViewGen || dec == null) return;
-  const plain = (dec && typeof dec === "object") ? dec.text : dec;
-  const { text, reply } = parseV2Payload(plain || "");
-  addMsg(user, text, __isGuestMe(room, user), ts, reply);
-  __warnAboutRoomSignature(dec, user);
-}
-
-/**
- * Redraw the last page of the room. Run through __guestRender only.
- * `seen` collects the ciphertexts on the page, so the live copy of a message
- * that is also in it is not drawn twice.
- */
-async function __renderGuestHistory(room, gen, seen) {
-  let page;
-  try {
-    page = await fetchGuestRoomHistory(room, { limit: 100 });
-  } catch (e) {
-    if (gen === __guestViewGen) {
-      addMsg("System", (e?.status === 401 || e?.status === 403)
-        ? "Their server no longer lets you into this room."
-        : `Could not load this room from their server: ${e?.message || e}`);
-    }
-    return false;
-  }
-  if (gen !== __guestViewGen) return false;
-  const rows = Array.isArray(page?.messages) ? page.messages : [];
-  clearChat();
-  for (const m of rows) {
-    const ct = String(m?.text || "");
-    seen.add(ct);
-    await __renderGuestMessage(room, gen, m?.username || "unknown", ct, m?.ts || null);
-    if (gen !== __guestViewGen) return false;
-  }
-  return true;
-}
-
-function __guestKeyNotice(res) {
-  return res.notFound
-    ? "Waiting for this room's key. A moderator there sends it the next time their client is open; " +
-      "it will show up here by itself."
-    : res.refused
-      ? "Their server offered a key for this room that nobody in it could have given you, so it was not used."
-      : res.denied
-        ? "Their server no longer lets you into this room."
-        : res.unreachable
-          ? "Their server did not answer. Messages will appear once it does."
-          : res.locked
-            ? "Unlock to read this room."
-            : "This room's key could not be loaded yet.";
+function __drawGuestItem(it) {
+  const { text, reply } = parseV2Payload(it.text || "");
+  addMsg(it.user, text, it.mine, it.ts, reply);
+  __warnAboutRoomSignature({ from: it.from, sigValid: it.sigValid, mismatch: it.mismatch }, it.user);
 }
 
 /**
@@ -6674,10 +6603,8 @@ function __guestKeyNotice(res) {
  *
  * Whatever was open here is left first - including the worker's room socket,
  * whose presence messages would otherwise switch the view back to that room.
- *
- * Order matters for not losing anything: the socket is connected before the
- * history is read, so a message is either already in the history or arrives
- * on the socket afterwards; one that is both is drawn once.
+ * What is shown, and in what order, is guest-room-feed.js's business; this
+ * only draws what it hands over.
  */
 async function openGuestRoomView(room) {
   try {
@@ -6695,7 +6622,6 @@ async function openGuestRoomView(room) {
   activeRoomKey = "";
   lastHistoryRoomId = null;
   renderedHistoryRoomId = null;
-  const gen = ++__guestViewGen;
   activeGuestRoom = room;
 
   setInviteVisible(false);
@@ -6705,86 +6631,28 @@ async function openGuestRoomView(room) {
   try { highlightActiveRoom(); } catch { /* list not on screen */ }
   __renderGuestRoomsSection().catch(() => {});
 
-  const seen = new Set();
-  __guestSeen = seen;
-  // Whether the socket is up now, and whether the history on screen was read
-  // while it was not: then something may have been written in between that
-  // only a second read of the history can show.
-  let socketUp = false;
-  let needResync = false;
-  let markConnected;
-  const connected = new Promise((resolve) => { markConnected = resolve; });
-
-  __guestSock = openGuestRoomSocket(room, {
-    onMessage: (m) => {
-      __guestRender(gen, async () => {
-        const ct = String(m?.text || "");
-        if (seen.has(ct)) return;
-        seen.add(ct);
-        await __renderGuestMessage(room, gen, m?.from || "unknown", ct, m?.ts || Date.now());
-      });
+  const feed = GRF().createFeed({
+    openSocket: (handlers) => openGuestRoomSocket(room, handlers),
+    loadKey: () => loadGuestRoomKey(room),
+    fetchHistory: () => fetchGuestRoomHistory(room, { limit: 100 }),
+    decrypt: (ciphertext, user) => decryptFromGuestRoom(room, ciphertext, user),
+    isMe: (user) => __isGuestMe(room, user),
+    onReset: (items) => {
+      clearChat();
+      for (const it of items) __drawGuestItem(it);
     },
-    onStatus: (s) => {
-      if (gen !== __guestViewGen) return;
-      renderCurrentRoom({ online: !!s?.online });
-      if (s?.online && !socketUp) {
-        socketUp = true;
-        markConnected();
-        if (needResync) {
-          needResync = false;
-          __guestRender(gen, () => __renderGuestHistory(room, gen, seen));
-        }
-      } else if (!s?.online && socketUp) {
-        socketUp = false;
-        needResync = true;
-      }
-      if (s?.error === "refused") {
-        markConnected();
-        __guestRender(gen, async () => addMsg("System", "Their server no longer lets you into this room."));
-      } else if (s?.online && s?.error) {
-        // A refusal of something we sent - a read-only room, a rate limit.
-        // Shown, because the message it refers to is not going to appear.
-        const said = String(s.error).slice(0, 200);
-        __guestRender(gen, async () => addMsg("System", `Their server: ${said}`));
-      }
-    },
+    onAppend: (it) => __drawGuestItem(it),
+    onNotice: (n) => addMsg("System", n.text),
+    onStatus: (s) => renderCurrentRoom({ online: !!s?.online }),
+    log: (...args) => console.warn("[Guest]", ...args),
   });
-
-  await __guestRender(gen, async () => {
-    // Up to a few seconds for the socket; a server that does not take it
-    // still gets its history shown.
-    let waited = null;
-    await Promise.race([connected, new Promise((r) => { waited = setTimeout(r, 5000); })]);
-    clearTimeout(waited);
-    if (gen !== __guestViewGen) return;
-    if (!socketUp) needResync = true;
-    const keyRes = await loadGuestRoomKey(room);
-    if (gen !== __guestViewGen) return;
-    await __renderGuestHistory(room, gen, seen);
-    if (gen !== __guestViewGen || keyRes.ok) return;
-
-    addMsg("System", __guestKeyNotice(keyRes));
-    if (keyRes.notFound || keyRes.unreachable) {
-      // Nothing tells a guest that its key has arrived - the island's notify
-      // socket is not ours - so look again now and then while the room is open.
-      __guestKeyRetryTimer = setInterval(async () => {
-        if (gen !== __guestViewGen) return;
-        const again = await loadGuestRoomKey(room);
-        if (!again.ok || gen !== __guestViewGen) return;
-        clearInterval(__guestKeyRetryTimer);
-        __guestKeyRetryTimer = null;
-        __guestRender(gen, () => __renderGuestHistory(room, gen, seen));
-      }, 30000);
-    }
-  });
+  __guestFeed = feed;
+  await feed.start();
 }
 
 /** After an unlock: what arrived while locked could not be read, so read the page again. */
 function refreshGuestRoomAfterUnlock() {
-  const room = activeGuestRoom;
-  if (!room) return;
-  const gen = __guestViewGen;
-  __guestRender(gen, () => __renderGuestHistory(room, gen, __guestSeen));
+  __guestFeed?.refresh();
 }
 
 /**

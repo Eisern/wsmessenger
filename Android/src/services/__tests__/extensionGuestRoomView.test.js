@@ -6,7 +6,8 @@
  * The order of things in the extension's view of a room on another island.
  *
  * The view (chrome_extension/panel-ui.js, "Rooms on other servers, as a
- * guest") juggles a socket, a history read and async decryption. Each is easy
+ * guest", over guest-room-feed.js) juggles a socket, a history read and async
+ * decryption. Each is easy
  * to get right alone; together they decide whether a message is lost, drawn
  * twice, drawn out of order, or drawn into a view that was closed - none of
  * which any crypto test would notice. So the section runs here for real, with
@@ -19,6 +20,7 @@ const path = require('path');
 const vm = require('vm');
 
 const PANEL_UI = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'panel-ui.js');
+const FEED = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-room-feed.js');
 const MARKER = '// Rooms on other servers, as a guest';
 
 function deferred() {
@@ -91,7 +93,7 @@ function makeView() {
   vm.createContext(sandbox);
   vm.runInContext(`
     let activeGuestRoom = null;
-    let __guestSock = null;
+    let __guestFeed = null;
     let activeRoomId = null, activeRoomName = "", activeRoomKey = "";
     let lastHistoryRoomId = null, renderedHistoryRoomId = null;
     const __apiBaseReady = Promise.resolve();
@@ -99,6 +101,7 @@ function makeView() {
     function setModeRoom() { closeGuestRoomView(); }
     function setModeDm() { closeGuestRoomView(); }
   `, sandbox);
+  vm.runInContext(fs.readFileSync(FEED, 'utf8'), sandbox, { filename: 'guest-room-feed.js' });
   vm.runInContext(section, sandbox, { filename: 'panel-ui.js#guest' });
 
   return {
