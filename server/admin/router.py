@@ -6,15 +6,21 @@
 from __future__ import annotations
 
 import asyncio
-from fastapi import APIRouter, Request, Form, HTTPException
+
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 
 from .auth import (
-    create_session, destroy_session, require_admin, set_session_cookie,
+    AdminPrincipal,
     check_rate_limit,
-    get_csrf_token, verify_csrf,
+    create_session,
+    destroy_session,
+    get_csrf_token,
+    require_admin,
+    set_session_cookie,
+    verify_csrf,
 )
 
 templates = Jinja2Templates(directory="admin/templates")
@@ -75,14 +81,12 @@ def __json(d: dict) -> str:
 ROLE_HIERARCHY = {"admin": 1, "superadmin": 2}
 
 
-async def _assert_can_act_on_user(db, actor: "AdminPrincipal", target_user_id: int):
+async def _assert_can_act_on_user(db, actor: AdminPrincipal, target_user_id: int):
     """
     Проверяет, что actor имеет строго более высокий уровень привилегий,
     чем target (если target тоже админ). Обычных пользователей не защищает.
     Бросает HTTPException(403) при нарушении.
     """
-    from .auth import AdminPrincipal  # noqa: already imported, just for clarity
-
     res = await db.execute(
         text("SELECT role FROM admin_users WHERE user_id=:id"),
         {"id": target_user_id},

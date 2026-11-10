@@ -2,13 +2,14 @@
 # Copyright (C) 2026 Yevgeniy Kropochev <y.kropochev87@gmail.com>
 # This file is part of WS Messenger. See LICENSE for terms.
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from collections import defaultdict
+import hmac
 import secrets
 import time
-import hmac
-from fastapi import Request, Response, HTTPException
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+
+from fastapi import HTTPException, Request, Response
 
 SESSION_COOKIE = "admin_session"
 SESSION_TTL = timedelta(hours=8)
@@ -54,7 +55,7 @@ def create_session(user_id: int, username: str, role: str) -> str:
         "user_id": user_id,
         "username": username,
         "role": role,
-        "exp": datetime.now(timezone.utc) + SESSION_TTL,
+        "exp": datetime.now(UTC) + SESSION_TTL,
         "csrf_token": secrets.token_urlsafe(32),
     }
     return sid
@@ -69,7 +70,7 @@ def get_principal(request: Request) -> AdminPrincipal | None:
     s = _sessions.get(sid)
     if not s:
         return None
-    if s["exp"] < datetime.now(timezone.utc):
+    if s["exp"] < datetime.now(UTC):
         destroy_session(sid)
         return None
     return AdminPrincipal(user_id=s["user_id"], username=s["username"], role=s["role"])

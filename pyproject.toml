@@ -27,13 +27,23 @@ ignore = [
     "S101",     # assert (allowed; primarily for future tests)
     "RUF002",   # ambiguous-unicode-character-docstring — Russian text is intentional
     "RUF003",   # ambiguous-unicode-character-comment   — same reason
+    # Lint is here to catch bugs, not to restyle working code. These encode
+    # patterns the server uses on purpose:
+    "S110",     # try-except-pass     — best-effort cleanup (closing a socket that may be gone)
+    "S112",     # try-except-continue — same, inside a loop
+    "SIM105",   # contextlib.suppress instead of try/except/pass — style only
+    "SIM102",   # collapsible-if      — style only
+    "SIM117",   # nested with         — style only; keeps a transaction visibly inside its session
+    "B904",     # raise ... from err  — only changes how the traceback is chained in the log
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Self-host bind on 0.0.0.0 is intentional.
-"server/main.py" = ["S104"]
-# The server tests start uvicorn and node as subprocesses on purpose.
-"server/tests/*" = ["S603"]
+# Self-host bind on 0.0.0.0 is intentional. The file is assembled in sections,
+# each importing what it needs where it starts (E402).
+"server/main.py" = ["S104", "E402"]
+# The server tests start uvicorn and node as subprocesses on purpose, and sign
+# test accounts up with passwords written in the test.
+"server/tests/*" = ["S603", "S105", "S106"]
 
 [tool.ruff.format]
 quote-style = "double"

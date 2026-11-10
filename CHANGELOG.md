@@ -98,6 +98,17 @@ island - waited for somebody's browser extension.
 - A cross-island contact now keeps the card exactly as they signed it, because
   inviting them hands it to an island that checks the signature. Contacts added
   before this have no card; the extension says so and asks for the card again.
+- **CI is green again; it had been red since April.** The Android job ran Node
+  20, below the `>= 22.11.0` that `Android/package.json` declares, and on 20
+  five extension-crypto suites fail (44 tests): its WebCrypto refuses typed
+  arrays made inside the Jest sandbox. Both Node jobs now run 22, and with
+  `test:unit` passing, `test:screens` and the Android lint run in CI for the
+  first time. The server lint (`ruff`, 438 findings in code older than the
+  lint) now checks for bugs, not style: `try/except/pass` as best-effort
+  cleanup, `contextlib.suppress`, collapsed `if`/`with` and `raise ... from`
+  are off, as are mid-file imports in `main.py`; what was left is fixed —
+  unused and repeated imports, whitespace, `timezone.utc` → `UTC`, and the
+  findings below.
 
 ### Fixed
 
@@ -123,6 +134,13 @@ island - waited for somebody's browser extension.
   room owner re-shares it (Rooms → Manage → Members → *Re-share key*). Guests
   from other islands are the common case: their name is built from the display
   name on their card.
+- **A server socket being closed for a revoked session or a ban swallowed
+  its own cancellation.** Ten `return`s inside `finally` turned anything
+  `ws.close()` raised - `asyncio.CancelledError` too, which is how a shutdown
+  stops a handler - into an ordinary return. They now ignore ordinary errors
+  only. The check behind *Turn off 2FA* was spelled out again (same rule: the
+  code, or else the password) and the closure that hands an owner's rooms on
+  when they delete their account binds its room and heir; both are now tested.
 
 ### Fixed — security
 
@@ -150,6 +168,14 @@ island - waited for somebody's browser extension.
   local members. CI runs them against a `postgres:17` service. Each protection
   was checked by removing it: the allow-list, the `/ws-dm` refusal, the nonce
   spend and both signature checks each fail their own tests.
+- `server/tests/test_account.py` — turning 2FA off (either factor, never
+  neither); a revoked session turned away by all three sockets when it
+  connects and, on `/ws-dm`, mid-session by the socket's own check; and an
+  owner's account deletion leaving each room to its own member, renamed when
+  the heir already owns a room of that name. Of 10 deliberate breakages, 9 fail
+  a test; the tenth - dropping only the revocation check at connect - is
+  covered by the forced check that runs right after it, and dropping both is
+  caught.
 - Guest rooms in the extension, offline: `guestRooms.test.js` (the protocol,
   against an island that checks the session signature with its own byte layout
   and its own Ed25519), `extensionGuestRooms.test.js` (the real

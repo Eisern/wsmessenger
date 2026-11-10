@@ -28,9 +28,9 @@ import hmac
 import json
 import os
 import time
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response
 from cryptography.hazmat.primitives.asymmetric.x25519 import (
     X25519PrivateKey,
     X25519PublicKey,
@@ -38,6 +38,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.hashes import SHA256
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 ENVELOPE_VERSION = 0x03
 INFO_REQ = b"ws-relay-seal-v1:req"
