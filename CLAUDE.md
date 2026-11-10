@@ -20,7 +20,7 @@ Requires PostgreSQL 13+ (tested on 17). Runtime dependencies are pinned in [`ser
 
 For a full self-hosting walkthrough (VPS, systemd, nginx + TLS, first admin, updates), see [`docs/self-hosting.md`](docs/self-hosting.md).
 
-Schema lives in [`server/schema.sql`](server/schema.sql) — apply once with `psql -d <db> -f server/schema.sql` before starting the server. The server itself only lazily creates a few archive tables at runtime (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`); base tables must exist before the first request.
+Schema lives in [`server/schema.sql`](server/schema.sql) — apply once with `psql -d <db> -f server/schema.sql` before starting the server. The server itself creates only a few tables on first use — the archives (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`) and, with `ISLAND_ID` set, the cross-island ones (`chat_dm_foreign_boxes`, `chat_foreign_challenges`, `chat_foreign_guests`), so the DB user must be allowed to create tables; base tables must exist before the first request.
 
 Configuration is via environment variables — copy `server/config.example.env` to `server/.env` and fill in values.
 
@@ -79,7 +79,7 @@ On login (`login.js`) and on panel re-unlock (`panel-crypto.js` `interactiveUnlo
 3. Panel and background perform a **secure handoff** (per-request ephemeral P-256 ECDH + HKDF-SHA-256, `info = "wsapp-unlock-handoff-v1"`, 30 s TTL via `UNLOCK_HANDOFF_TTL_MS`); the master bytes and a fresh session KEK are AES-GCM-encrypted on the wire between contexts. The legacy direct `unlock_kek_set` message is refused server-side in the worker.
 4. The panel decrypts the EPK and imports the X25519 identity key as a non-extractable `CryptoKey` into `CryptoManager`, where it stays until lock/logout.
 
-The **panel** holds the identity private key, not the service worker. `crypto-utils.js` and `crypto-manager.js` are loaded only by `panel.html` and `login.html`; `background.js` has no `importScripts` and never sees an X25519 key. What background keeps is the password-derived `_masterKey` (for `storage_encrypt`/`storage_decrypt`), the one-shot `_unlockKekKey` session key, and the ephemeral P-256 key pair used for the handoff in step 3 — each on the 10-minute idle TTL. Room-key wrapping and message decryption therefore happen in the panel; the worker is a transport, not a crypto oracle.
+The **panel** holds the identity private key, not the service worker. `crypto-utils.js` and `crypto-manager.js` are loaded only by `panel.html` and `login.html`; `background.js` imports only `endpoints.js` (the entry-point selector) and never sees an X25519 key. What background keeps is the password-derived `_masterKey` (for `storage_encrypt`/`storage_decrypt`), the one-shot `_unlockKekKey` session key, and the ephemeral P-256 key pair used for the handoff in step 3 — each on the 10-minute idle TTL. Room-key wrapping and message decryption therefore happen in the panel; the worker is a transport, not a crypto oracle.
 
 EPK is **never** on the server. `GET /crypto/keys` returns HTTP 410 Gone (`get_user_crypto_keys` in [server/main.py](server/main.py)); any Android/extension code path that still calls it is deprecated and will fail.
 
@@ -190,7 +190,8 @@ DMs use a **separate** WebSocket connection (`/ws-dm?thread_id=...`) managed in 
 | `chrome.storage.local` | EPK (`e2ee_local_identity_v2:<username>` — JSON with `v`/`username`/`salt`/`iv`/`data`/`kdf`), room pinned context, UI preferences |
 | `chrome.storage.session` | Active username marker (`e2ee_active_user_v2`) and transient UI hand-off state. **Nothing password-derived.** |
 | Server DB | Public keys, wrapped room/DM key blobs, ciphertext, metadata, delivery secrets — **no private key material, no plaintext** |
-| Service-worker RAM | Non-extractable `CryptoKey`s (identity, room, DM), `_masterKey`, `_unlockKekKey`, JWT, WebSocket state, `dmDeliverySecrets` Map. Cleared on lock/logout/10-min idle. |
+| Panel RAM | Non-extractable `CryptoKey`s (identity, room, DM) in `CryptoManager`. Cleared on lock/logout. |
+| Service-worker RAM | `_masterKey`, `_unlockKekKey`, handoff P-256 key pairs, JWT, WebSocket state, `dmDeliverySecrets` Map. Cleared on lock/logout/10-min idle. |
 
 ### Backend Hosts
 

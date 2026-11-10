@@ -113,10 +113,14 @@ PGPASSWORD='choose-a-long-random-password' \
   psql -h 127.0.0.1 -U wsapp -d wsapp -f server/schema.sql
 ```
 
-The server itself only lazily creates a few archive tables
+The server itself creates only a few tables on first use: the archives
 (`chat_room_key_archive`, `chat_dm_key_archive`,
-`chat_dm_delete_requests`) — every other table must exist before the
-first request, so do not skip this step.
+`chat_dm_delete_requests`) and, with the island identity of §8.3 on,
+the tables for other islands (`chat_dm_foreign_boxes`,
+`chat_foreign_challenges`, `chat_foreign_guests`). That needs a database
+user allowed to create tables — the owner of the database, as above.
+Every other table must exist before the first request, so do not skip
+this step.
 
 ### Backups
 
@@ -445,7 +449,8 @@ becomes a lever for denial of service against its own users.
 
 Your server and its database are an **island**. With an island identity set,
 people on your island can exchange **direct messages** with people on any other
-WS Messenger server. Rooms do not cross islands, and neither do files yet.
+WS Messenger server, and take them into their rooms as **guests** (below).
+Files do not cross islands yet.
 
 How it works, in one paragraph: the servers never connect to each other. Each
 person opens a *mailbox* on their own island for the other's key, and each
@@ -522,14 +527,24 @@ mailbox label; the server now drops it and erases what was stored.) Relays are o
 up with each relay operator; see [`relay/README.md`](../relay/README.md).
 
 **Guests in rooms.** With the island identity on, a room's owner or admin can
-also invite somebody from another server *into a room*, by their contact card.
-They become a **guest** of your island: an account bound to the key on that
-card, with no password, which signs in by signing a one-time challenge and can
-reach only the rooms it was invited to — no DMs, no room creation, no
-moderation, whatever role it is given. Your server learns about a guest what it
-learns about any member of the room; their own server learns nothing about it.
-The server side is in place; **the clients do not offer it yet**. To refuse
-guests altogether, set `ISLAND_ACCEPT_GUESTS=0`. The startup line says which:
+also invite somebody from another server *into a room*, by their contact card —
+so only someone they already have as a cross-island contact. In the extension:
+Rooms → **Manage** → **Members** → **Invite someone from another server**; on Android:
+the room's member list → **Invite someone from another server**. The
+invitation arrives in the conversation with them; they press **Join** there,
+and the room appears in their list as `<your island> · as <their guest name>`.
+
+On your island they are a **guest**: an account bound to the key on that card,
+with no password, which signs in by signing a one-time challenge and can reach
+only the rooms it was invited to — no DMs, no room creation, no moderation,
+whatever role it is given. Your server learns about a guest what it learns
+about any member of the room; their own server learns nothing about it. Not
+in guest rooms yet: files, history older than the last 100 messages, and
+unread markers.
+
+**Guests are on whenever `ISLAND_ID` is set** — including on a server that
+already had the island identity before guests existed. To refuse them, set
+`ISLAND_ACCEPT_GUESTS=0` and restart. The startup line says which:
 
 ```
 [island] messenger.example.com: guests from other islands in rooms here: on
@@ -591,8 +606,12 @@ inserting a row into `admin_users`.
 ### Chrome extension
 
 No edit and no reload required. On the login screen open **"Connect to
-another server"**, enter your API base (`https://messenger.example.com`),
-press **Add**, then **Save**. The extension asks Chrome for permission to talk
+another server"**. The list there starts with the author's default server:
+**remove it with ×** first, then enter your API base
+(`https://messenger.example.com`), press **Add**, then **Save**. Added next to
+the default, your server would only be its second address — the client keeps
+using the first while it answers, and registers your account there. The
+extension asks Chrome for permission to talk
 to that origin, stores the choice in `chrome.storage.local` under
 `server_config`, and every later request follows it. **Test all** checks
 `/health` on each address before you commit to them.
@@ -636,7 +655,9 @@ grep -rn "imagine-1-ws.xyz\|chat-room.work" background.js login.js panel.js mani
 ### Android
 
 No rebuild required. On the Login screen tap **"Connect to another
-server"**, enter `https://messenger.example.com`, tap **+**, then **Save**.
+server"**, remove the author's default server from the list (×), enter
+`https://messenger.example.com`, tap **+**, then **Save** — for the same
+reason as in the extension.
 The list is saved per-device and is also reachable later from
 **Profile → Server**.
 
@@ -662,6 +683,12 @@ sudo systemctl restart wsapp
 ```
 
 Watch `journalctl -u wsapp -f` on first start after an update.
+
+**From 0.5.0 to the next release:** no schema change and no new required
+setting. One behaviour changes without asking: if `ISLAND_ID` is set, your
+island starts accepting **guests from other islands** in rooms (§8.3). Put
+`ISLAND_ACCEPT_GUESTS=0` in `.env` before restarting if you do not want that.
+The guest tables are created on first use (§5).
 
 If you installed with `scripts/bootstrap.sh`, re-running it is also an update:
 it pulls the code, refreshes dependencies, the systemd unit and nginx, and adds
