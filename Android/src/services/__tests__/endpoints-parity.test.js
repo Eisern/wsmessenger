@@ -171,6 +171,70 @@ describe('foreign-dm.js parity between the two clients', () => {
   });
 });
 
+const GRF_ANDROID = path.join(__dirname, '..', 'guest-room-feed.js');
+const GRF_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-room-feed.js');
+
+describe('guest-room-feed.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(GRF_ANDROID)).toBe(true);
+    expect(fs.existsSync(GRF_EXTENSION)).toBe(true);
+    expect(normalized(GRF_ANDROID)).toBe(normalized(GRF_EXTENSION));
+  });
+});
+
+const KS_ANDROID = path.join(__dirname, '..', 'key-sweep.js');
+const KS_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'key-sweep.js');
+
+describe('key-sweep.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(KS_ANDROID)).toBe(true);
+    expect(fs.existsSync(KS_EXTENSION)).toBe(true);
+    expect(normalized(KS_ANDROID)).toBe(normalized(KS_EXTENSION));
+  });
+});
+
+const GR_ANDROID = path.join(__dirname, '..', 'guest-rooms.js');
+const GR_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-rooms.js');
+
+describe('guest-rooms.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(GR_ANDROID)).toBe(true);
+    expect(fs.existsSync(GR_EXTENSION)).toBe(true);
+    expect(normalized(GR_ANDROID)).toBe(normalized(GR_EXTENSION));
+  });
+
+  it('both copies sign the same bytes, and read each other\'s invitations', () => {
+    const a = require('../guest-rooms');
+    const vm = require('vm');
+    const sandbox = { console, JSON, Date, TextEncoder, TextDecoder, atob, btoa, encodeURIComponent };
+    sandbox.globalThis = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(GR_EXTENSION, 'utf8'), sandbox, { filename: 'guest-rooms.js' });
+    const b = sandbox.WSGuestRooms;
+    expect(b).toBeTruthy();
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+
+    // The island checks this signature byte for byte; a client that disagrees
+    // can never sign in as a guest anywhere.
+    const nonce = new Uint8Array(32).map((_, i) => 255 - i);
+    const hex = (u8) => Buffer.from(Array.from(u8, Number)).toString('hex');
+    for (const [island, kid] of [
+      ['island-r', 'ca2a4fe727faaecf16ecd130a86e0885'],
+      ['остров-р', 'FFEEDDCCBBAA99887766554433221100'],
+    ]) {
+      expect(hex(a.sessionSigBytes(island, kid, nonce))).toBe(hex(b.sessionSigBytes(island, kid, nonce)));
+    }
+
+    // An invitation written by one client is read by the other.
+    const inv = { islandId: 'island-r', roomId: 42, roomName: 'Книжный клуб', guestName: 'alice@island-g~ca2a4f' };
+    expect(b.parseInvite(a.buildInvite(inv))).toEqual(inv);
+    expect(a.parseInvite(b.buildInvite(inv))).toEqual(inv);
+
+    expect(a.slot('Island-R', 42)).toBe(b.slot('Island-R', 42));
+    expect(a.listKey('Home', 'Me')).toBe(b.listKey('Home', 'Me'));
+  });
+});
+
 describe('endpoints.js parity between the two clients', () => {
   it('both copies exist', () => {
     expect(fs.existsSync(ANDROID_PATH)).toBe(true);

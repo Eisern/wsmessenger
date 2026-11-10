@@ -30,8 +30,131 @@ not offer it yet; this is the half they will talk to.
 - Guests are on wherever `ISLAND_ID` is set; `ISLAND_ACCEPT_GUESTS=0` turns
   them off, and the server says which at startup.
 
+### Added — rooms across islands, in the extension
+
+The extension uses the server half above, both as the inviting side and as the
+guest. Android does the same since the section below.
+
+- **Inviting.** Rooms → Manage → *Invite someone from another server* lists
+  your cross-island contacts. The island creates the guest from their card and
+  names them; the extension pins that name to the keys on the card before
+  anything else uses it, and refuses if the name is already pinned to other
+  keys. The invitation then goes to them inside your conversation. Somebody you
+  cannot write to yet is not created on the island at all.
+- **Being invited.** The invitation shows in the conversation with a *Join*
+  button. It is followed only to the inviter's island as their card names it:
+  the extension signs a challenge from that island with your key (a session per
+  island, held in memory, signed again when it runs out), accepts, and lists the
+  room under *Rooms on other servers*. The inviter's keys are pinned from their
+  card under their name there, so the room key they wrap for you is checked
+  against what they signed, not against what that island serves.
+- **Reading and writing.** The room key is accepted under exactly the rules
+  used at home (signed by a member, under a pinned key; an unsigned wrap cannot
+  introduce a key), with that island's names. Messages are signed as your guest
+  name there; other members' signatures are checked against keys pinned on that
+  island, kept apart from names at home. The panel holds the room's socket
+  itself; nothing goes through your own server, which is not told.
+- **Not yet:** files in guest rooms, older history than the last 100 messages,
+  unread markers for a guest room that is not open, and moderation by guests.
+
+### Added — rooms across islands, on Android
+
+- The same, with the same rules: *Invite someone from another server* in a
+  room's member list (owners and admins), a *Join* button on an invitation in a
+  cross-island conversation, *Rooms on other servers* in the room list, and a
+  guest room screen. Signatures and keys are checked by the same code as at
+  home (`CryptoService.acceptWrappedKeyIn` / `openRoomEnvelopeIn`, with that
+  island's names); pins go to the Keychain under that island.
+- What a guest room shows, and in what order, is one module both clients share
+  (`guest-room-feed.js`): the extension moved onto it from its own copy.
+- Not yet on Android either: files in guest rooms, older history than the last
+  100 messages, unread markers for guest rooms.
+
+### Added — Android hands out missing room keys
+
+Until now Android shared a room key only from the room screen of an owner who
+had that room open at the moment somebody accepted. Everybody else - a member
+who accepted while the owner was away, an admin's rooms, a guest from another
+island - waited for somebody's browser extension.
+
+- Android now sweeps like the extension: an owner's or admin's app asks the
+  island who in their rooms holds no key (`/crypto/rooms/key-gaps`) and
+  wraps it for them - signed, filling the gap only - on unlock, on the notify
+  socket's `notify_key_gap`, on a membership change, when they open the room,
+  when a peer is verified, and from **Send missing keys** in the member list.
+  A member whose key changed since it was pinned gets nothing until verified,
+  and the room says so.
+- The rules - when, how often, what each failure costs - are one module both
+  clients share (`key-sweep.js`); the extension's sweep moved onto it. On the
+  way: two runs asked for at the same moment could both start, because the
+  "already running" flag was set only after the first await. It is claimed
+  first now.
+- Android's key-share trust refusals carry the extension's codes
+  (`TRUST_CHANGED` / `TRUST_UNVERIFIED` / `TRUST_UNVERIFIABLE`), and
+  `shareRoomKeyToUser` takes `ifAbsent` and says whether it wrote.
+
+### Changed
+
+- A cross-island contact now keeps the card exactly as they signed it, because
+  inviting them hands it to an island that checks the signature. Contacts added
+  before this have no card; the extension says so and asks for the card again.
+- **CI is green again; it had been red since April.** The Android job ran Node
+  20, below the `>= 22.11.0` that `Android/package.json` declares, and on 20
+  five extension-crypto suites fail (44 tests): its WebCrypto refuses typed
+  arrays made inside the Jest sandbox. Both Node jobs now run 22, and with
+  `test:unit` passing, `test:screens` and the Android lint run in CI for the
+  first time. The server lint (`ruff`, 438 findings in code older than the
+  lint) now checks for bugs, not style: `try/except/pass` as best-effort
+  cleanup, `contextlib.suppress`, collapsed `if`/`with` and `raise ... from`
+  are off, as are mid-file imports in `main.py`; what was left is fixed —
+  unused and repeated imports, whitespace, `timezone.utc` → `UTC`, and the
+  findings below.
+
+### Fixed
+
+- **A contact card from a second domain named the wrong island.** Without a
+  signed island list the card carried the host the client happened to use,
+  not the island's name - so nobody could join that user's rooms as a guest
+  (the sign-in is checked against the name on the card). Both clients now ask
+  the island what it calls itself.
+- **"Send missing keys" said "everyone already has the key" when it could not
+  get the list.** A run now reports `incomplete`, and both buttons say so.
+- **A guest room's key was not looked for again after a passing server
+  error** - only after "not there yet" or "no answer". Two invitations of the
+  same new guest at once could also end in a 500 for one of them; the second
+  now finds the first's guest.
+- **A room key wrapped for somebody with a capital in their name did not open
+  on Android.** A signed wrap (0.5.0) binds the recipient's name, and each side
+  wrote that name on its own: the sharer as the member list spells it
+  ("Alice"), the Android reader lower-cased. The signature never matched, so
+  the key was refused as forged. Signer and recipient are now signed
+  lower-cased by both clients, as the server compares names. A wrap made before
+  this for a name with capitals no longer verifies on the extension either, and
+  the key sweep will not notice - the row exists, it only fills gaps - so the
+  room owner re-shares it (Rooms → Manage → Members → *Re-share key*). Guests
+  from other islands are the common case: their name is built from the display
+  name on their card.
+- **A server socket being closed for a revoked session or a ban swallowed
+  its own cancellation.** Ten `return`s inside `finally` turned anything
+  `ws.close()` raised - `asyncio.CancelledError` too, which is how a shutdown
+  stops a handler - into an ordinary return. They now ignore ordinary errors
+  only. The check behind *Turn off 2FA* was spelled out again (same rule: the
+  code, or else the password) and the closure that hands an owner's rooms on
+  when they delete their account binds its room and heir; both are now tested.
+
 ### Fixed — security
 
+- **A guest's sign-in handed out a refresh token.** Valid for a week, it was a
+  way in as the guest that needed no key - the one thing a guest session is
+  meant to require - and it put a row in `refresh_tokens`, which nothing ever
+  prunes, at every sign-in: every ten minutes while a guest room is open.
+  `/foreign/guest/session` now answers with an access token only; the client
+  signs a new challenge when it runs out, as it already did. `/auth/refresh`
+  is off a guest's allow-list.
+- **A room on another island showed a message its server wrote in the clear
+  as a member's.** At home an unencrypted message is history from before
+  encryption; in a guest room it is something that island wrote under a
+  member's name. Both clients now show it as unverified.
 - **`/foreign/claim` did not spend its nonce on a refusal**, contrary to its
   own comment: the nonce was deleted inside the transaction every refusal
   rolled back. It is now spent in a transaction of its own, before anything is
@@ -45,6 +168,47 @@ not offer it yet; this is the half they will talk to.
   local members. CI runs them against a `postgres:17` service. Each protection
   was checked by removing it: the allow-list, the `/ws-dm` refusal, the nonce
   spend and both signature checks each fail their own tests.
+- `server/tests/test_account.py` — turning 2FA off (either factor, never
+  neither); a revoked session turned away by all three sockets when it
+  connects and, on `/ws-dm`, mid-session by the socket's own check; and an
+  owner's account deletion leaving each room to its own member, renamed when
+  the heir already owns a room of that name. Of 10 deliberate breakages, 9 fail
+  a test; the tenth - dropping only the revocation check at connect - is
+  covered by the forced check that runs right after it, and dropping both is
+  caught.
+- Guest rooms in the extension, offline: `guestRooms.test.js` (the protocol,
+  against an island that checks the session signature with its own byte layout
+  and its own Ed25519), `extensionGuestRooms.test.js` (the real
+  `panel-crypto.js`, both the moderator and the guest, against an adversarial
+  island) and `extensionGuestRoomView.test.js` (the real view code from
+  `panel-ui.js`, stepped through by hand: nothing lost between history and
+  socket, nothing drawn twice or out of order, nothing drawn into a closed
+  view). 36 deliberate breakages of the code - each protection removed in turn -
+  are each caught; three that were not at first got the tests they lacked.
+- Android: `guestRoomService.test.js` and `guestRoomModerator.test.js` (the
+  real CryptoService, StorageService and ForeignService against an adversarial
+  island), `guestRoomFeed.test.js`, and `GuestRoomScreen.test.js` - a screen
+  rendered with react-test-renderer, run by the new `npm run test:screens`,
+  which CI now runs too. Each of 24 service, 9 feed and 7 screen protections,
+  removed in turn, fails a test.
+- Key sweep: `keySweep.test.js` (the shared rules, with the clock in the
+  test's hands), `keySweepService.test.js` (Android over the real CryptoService
+  and StorageService: what goes over the wire, the trust stop, the triggers),
+  `extensionKeySweep.test.js` (the extension's wiring) and
+  `MembersModal.test.js` (the member list's controls). 37 protections, each
+  removed in turn, fail a test.
+- End to end on two real islands: `guestRoomTwoIslands.test.js` (the extension
+  on both sides) and `guestRoomAndroid.test.js` (an Android guest, an extension
+  moderator) - card, invitation, signed sign-in, key sweep, messages both ways
+  over real room sockets, each verified on the other side.
+- `scripts/integration_stand.py` brings up everything the integration suites
+  need - two islands and a relay - from a checkout and one PostgreSQL; all 12
+  suites (116 tests) pass against it. The suites' failover ports can be moved
+  (`WSAPP_IT_*`), because Windows with Hyper-V reserves them; the integration
+  project gained the clipboard stub the first suite to load CryptoService
+  needed. Two waits in the unit suites counted event-loop turns where real
+  WebCrypto had to finish, and failed now and then under a full parallel run;
+  they wait for the condition instead.
 
 ## 0.5.0 — 2026-11-08
 

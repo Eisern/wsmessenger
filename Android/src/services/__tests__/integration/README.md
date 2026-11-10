@@ -1,3 +1,28 @@
+# Running every suite here at once
+
+`scripts/integration_stand.py` brings up everything these suites need from this
+checkout, against one PostgreSQL: island A (`island-test`, :8000, its database
+named `wsapp` for `chainTamper`), island B (`island-b`, :8001) and a relay
+(:18800), each island with its own secrets, a signed list and raised rate
+limits. The sections below describe the same stand built by hand in containers.
+
+```sh
+docker run -d --name wsapp-test-pg -e POSTGRES_PASSWORD=pgtest \
+  -p 127.0.0.1:55432:5432 postgres:17
+pip install -r server/requirements.txt -r relay/requirements.txt
+python scripts/integration_stand.py up        # again to restart clean; `down` to stop
+
+cd Android
+ISLAND_A_CONTAINER=wsapp-test-pg npx jest --selectProjects integration --runInBand --forceExit
+```
+
+On Windows, if the failover ports are reserved (see below), add
+`WSAPP_STAND_FAILOVER_PORTS=19101,19102` to the stand and
+`WSAPP_IT_FAILOVER_PORT_A=19101 WSAPP_IT_FAILOVER_PORT_B=19102
+WSAPP_IT_TWO_ISLANDS_PORT_A=19201 WSAPP_IT_TWO_ISLANDS_PORT_B=19202` to jest.
+
+---
+
 # Failover integration tests
 
 These run the **real** `NetworkService` against a **real** backend. Only the
@@ -46,6 +71,13 @@ answers 403 and the DM rows cannot run.
 
 Ports 18101 and 18102 are the two entry points. Both forward to 8000 - that is
 the whole point: one island, one database, several doors.
+
+On Windows, Hyper-V and WinNAT reserve dynamic TCP port ranges that often cover
+these (`netsh interface ipv4 show excludedportrange protocol=tcp`), and binding
+them fails with `EACCES`. Pick free ports and say so: `WSAPP_IT_FAILOVER_PORT_A`
+/ `_B` (failover, and the unreachable entry `panelCrossIsland` expects) and
+`WSAPP_IT_TWO_ISLANDS_PORT_A` / `_B` (twoIslands). Island A's
+`ISLAND_ENTRY_POINTS` must list the same failover ports.
 
 ## What each mode reproduces
 
@@ -308,6 +340,25 @@ docker exec wsapp-island-b bash -lc 'su postgres -c "psql -d wsapp -c \"
   GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO wsapp;
   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO wsapp;\""'
 ```
+
+---
+
+# Guest rooms across two islands
+
+A room on island A, a guest from island B, end to end on the real servers.
+
+`guestRoomTwoIslands.test.js` runs the extension's `panel-crypto.js` on both
+sides: cards, the invitation by card (`POST /rooms/{id}/guests`) with the guest
+pinned from it, the invitation arriving in the guest's mailbox on B, the guest's
+signed sign-in on A walking past A's two dead entry points, the key sweep
+wrapping the room key for the guest, messages both ways over a real room socket
+each verifying on the other side, an entry point that now leads to the other
+island passed over unsigned, the guest's reach limited to the room, and leaving.
+
+`guestRoomAndroid.test.js` is the same with the Android stack as the guest -
+ForeignService, GuestRoomService and the shared feed over the real CryptoService
+and StorageService - and the extension as the moderator: the two clients meet
+only through the shared modules and the servers.
 
 ---
 

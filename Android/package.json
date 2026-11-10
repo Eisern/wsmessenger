@@ -15,7 +15,8 @@
     "test:relay": "jest --selectProjects integration --runInBand --forceExit -t \"relay prototype\"",
     "test:island-list": "jest --selectProjects integration --runInBand --forceExit -t \"signed island list\"",
     "test:two-islands": "jest --selectProjects integration --runInBand --forceExit twoIslands",
-    "test:unit": "jest --selectProjects crypto selector"
+    "test:unit": "jest --selectProjects crypto selector",
+    "test:screens": "jest --selectProjects react-native --testPathPattern screens.__tests__"
   },
   "dependencies": {
     "@noble/curves": "^2.0.1",

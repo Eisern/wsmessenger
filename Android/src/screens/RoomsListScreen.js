@@ -17,6 +17,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NetworkService from '../services/NetworkService';
 import CryptoService from '../services/CryptoService';
+import GuestRoomService from '../services/GuestRoomService';
 import { useApp } from '../contexts/AppContext';
 import { Colors, Spacing, Radii, Typography } from '../theme';
 import RoomLogo from '../components/RoomLogo';
@@ -33,6 +34,18 @@ export default function RoomsListScreen({ navigation }) {
   const [roomPassword, setRoomPassword] = useState('');
   const [passwordLoading, setPasswordLoading] = useState(false);
   const [passwordError, setPasswordError] = useState('');
+
+  // Rooms on other islands this account takes part in as a guest. They live on
+  // this device, not on this server, so they are read here rather than loaded
+  // into the app state with the server's rooms.
+  const [guestRooms, setGuestRooms] = useState([]);
+  const loadGuestRooms = useCallback(async () => {
+    setGuestRooms(await GuestRoomService.listRooms());
+  }, []);
+  useEffect(() => {
+    loadGuestRooms();
+    return navigation.addListener('focus', loadGuestRooms);
+  }, [navigation, loadGuestRooms]);
 
   useEffect(() => {
     handleRefresh();
@@ -52,9 +65,9 @@ export default function RoomsListScreen({ navigation }) {
 
   const handleRefresh = useCallback(async () => {
     setRefreshing(true);
-    await Promise.all([loadMyRooms(), loadPublicRooms(searchQuery)]);
+    await Promise.all([loadMyRooms(), loadPublicRooms(searchQuery), loadGuestRooms()]);
     setRefreshing(false);
-  }, [searchQuery, loadMyRooms, loadPublicRooms]);
+  }, [searchQuery, loadMyRooms, loadPublicRooms, loadGuestRooms]);
 
   const searchTimerRef = useRef(null);
   const handleSearchChange = useCallback((q) => {
@@ -137,8 +150,51 @@ export default function RoomsListScreen({ navigation }) {
 
   const sections = [
     { title: `My Rooms (${myRooms.length})`, data: myRooms, type: 'mine' },
+    ...(guestRooms.length
+      ? [{ title: `Rooms on other servers (${guestRooms.length})`, data: guestRooms, type: 'guest' }]
+      : []),
     { title: `Public Rooms (${publicRooms.length})`, data: publicRooms, type: 'public' },
   ];
+
+  const handleLeaveGuestRoom = useCallback((room) => {
+    Alert.alert(
+      'Leave room',
+      `Leave "${room.roomName || room.roomId}" on ${room.islandId}? To come back you need a new invitation.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Leave', style: 'destructive', onPress: async () => {
+          try {
+            await GuestRoomService.leave(room);
+          } catch (e) {
+            Alert.alert('Error', e?.message || 'Could not leave');
+          }
+          loadGuestRooms();
+        }},
+      ],
+    );
+  }, [loadGuestRooms]);
+
+  function renderGuestRoom(item) {
+    const name = item.roomName || `#${item.roomId}`;
+    return (
+      <TouchableOpacity
+        style={styles.roomRow}
+        onPress={() => navigation.navigate('GuestRoom', { room: item })}
+        activeOpacity={0.7}
+      >
+        <RoomLogo logoUrl={null} roomName={name} size={40} />
+        <View style={styles.roomInfo}>
+          <Text style={styles.roomName} numberOfLines={1}>{name}</Text>
+          <Text style={styles.roomAlias} numberOfLines={1}>{item.islandId} · as {item.guestName}</Text>
+        </View>
+        <View style={styles.roomRight}>
+          <TouchableOpacity style={styles.leaveBtn} onPress={() => handleLeaveGuestRoom(item)}>
+            <Text style={styles.leaveBtnText}>Leave</Text>
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
+  }
 
   const handleLeaveRoom = useCallback(async (room) => {
     const roomId = room.id || room.room_id;
@@ -167,6 +223,7 @@ export default function RoomsListScreen({ navigation }) {
   }, [loadMyRooms]);
 
   function renderRoom({ item, section }) {
+    if (section.type === 'guest') return renderGuestRoom(item);
     const roomId = item.id || item.room_id;
     const roomName = item.name || item.room_name || item.alias || item.room_alias;
     const unread = state.unreadRooms[roomId] || 0;
@@ -271,7 +328,9 @@ export default function RoomsListScreen({ navigation }) {
       {/* Sections */}
       <SectionList
         sections={sections}
-        keyExtractor={(item, idx) => String(item.id || item.room_id || idx)}
+        keyExtractor={(item, idx) => (item.islandId && item.guestName
+          ? GuestRoomService.slotOf(item)
+          : String(item.id || item.room_id || idx))}
         renderItem={renderRoom}
         renderSectionHeader={({ section }) => (
           <View style={styles.sectionHeader}>

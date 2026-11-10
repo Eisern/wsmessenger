@@ -2,25 +2,25 @@
 # Copyright (C) 2026 Yevgeniy Kropochev <y.kropochev87@gmail.com>
 # This file is part of WS Messenger. See LICENSE for terms.
 
-import os
-import json
-import time
-import secrets
-import string
-import shutil
 import asyncio
-from contextlib import asynccontextmanager
-import mimetypes
 import base64
 import hashlib
-import uuid
-import pyotp
-import io
 import hmac
-import smtplib
-import re
-from email.message import EmailMessage
+import io
+import json
 import logging
+import os
+import re
+import secrets
+import smtplib
+import string
+import time
+import uuid
+from contextlib import asynccontextmanager
+from email.message import EmailMessage
+
+import pyotp
+
 logger = logging.getLogger("wsapp.feedback")
 
 try:
@@ -29,44 +29,33 @@ try:
     _HAS_QRCODE = True
 except ImportError:
     _HAS_QRCODE = False
-from fastapi import Response
-from fastapi import Header
-from sqlalchemy.exc import IntegrityError
-
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import WebSocket
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Set, List
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from pydantic import BaseModel
-from jose import jwt, JWTError
-from passlib.context import CryptContext
-from jose.utils import base64url_decode
-from jose.constants import Algorithms
-
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import text
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Query
-from fastapi import status
-
-from fastapi import UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from fastapi import Query
-from fastapi import HTTPException
-from pydantic import Field
 
-from sqlalchemy import bindparam, Integer
-
+from admin.router import router as admin_router
+from fastapi import (
+    FastAPI,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from pydantic import BaseModel, Field
+from sqlalchemy import Integer, bindparam, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from fastapi.staticfiles import StaticFiles
-from admin.router import router as admin_router
-
-import base64, hmac, hashlib, time
-from pydantic import BaseModel
 
 class UdDmSendIn(BaseModel):
     thread_id: int
@@ -200,12 +189,12 @@ async def _room_logo_lock(room_id: int):
             _ROOM_LOGO_LOCKS.pop(room_id, None)
 
 def forbid_room():
-    
+
     raise HTTPException(status_code=404, detail="Not found")
-        
+
 def forbid_dm():
     raise HTTPException(status_code=404, detail="Not found")
-    
+
 def _sniff_image_ext(first_bytes: bytes) -> str | None:
     # PNG
     if first_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -263,7 +252,6 @@ RL_ROOMS_APPROVE_USER_PER_10MIN= _env_int("RL_ROOMS_APPROVE_USER_PER_10MIN", 60)
 MAX_DM_MSG_BYTES = 32 * 1024  # 32KB
 
 from collections import deque
-from fastapi import Request
 
 TRUST_PROXY_HEADERS = (os.getenv("TRUST_PROXY_HEADERS") or "0").strip().lower() in (
     "1", "true", "yes", "y", "on"
@@ -444,19 +432,20 @@ if not CORS_ORIGINS:
 
 from fastapi.exceptions import RequestValidationError
 
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¹Ã¢â‚¬Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ Pydantic ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¹ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡"""
     errors = exc.errors()
     if errors:
-        
+
         first_error = errors[0]
         field = first_error.get("loc", ["", ""])[-1]
         msg = first_error.get("msg", "Invalid value")
         detail = f"{field}: {msg}" if field else msg
     else:
         detail = "Validation error"
-    
+
     return JSONResponse(
         status_code=422,
         content={"detail": detail}
@@ -534,6 +523,7 @@ if __name__ == "__main__" and len(sys.argv) >= 2:
 
     if cmd == "cleanup_ud_nonces":
         import asyncio
+
         from sqlalchemy import text
 
         days = int(sys.argv[2]) if len(sys.argv) >= 3 else 7
@@ -640,17 +630,17 @@ def _parse_jwt_keyring(raw: str) -> dict[str, str]:
 JWT_KEYRING = _parse_jwt_keyring(JWT_SECRETS_RAW)
 
 def _require_strong_secret(s: str) -> None:
-    
+
     if not s or len(s) < 32:
         raise RuntimeError("JWT secret is too short. Set JWT_SECRETS or JWT_SECRET >= 32 chars.")
 
 if JWT_KEYRING:
     if not JWT_CURRENT_KID:
-        
+
         JWT_CURRENT_KID = next(iter(JWT_KEYRING.keys()))
     if JWT_CURRENT_KID not in JWT_KEYRING:
         raise RuntimeError("JWT_CURRENT_KID not found in JWT_SECRETS keyring.")
-    
+
     for _kid, _sec in JWT_KEYRING.items():
         _require_strong_secret(_sec)
 else:
@@ -662,7 +652,7 @@ def _jwt_signing_key_and_headers() -> tuple[str, dict]:
     return JWT_SECRET, {}
 
 def create_access_token(user_id: int, username: str) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "username": username,
@@ -676,7 +666,7 @@ def create_access_token(user_id: int, username: str) -> str:
 
 def create_refresh_token(user_id: int, username: str, family_id: str | None = None) -> tuple[str, str, str]:
     """Create a refresh token. Returns (token_str, jti, family_id)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     jti = str(uuid.uuid4())
     fid = family_id or str(uuid.uuid4())
     payload = {
@@ -742,7 +732,7 @@ def decode_token(token: str) -> dict:
     # 1) keyring mode (rotation)
     if JWT_KEYRING:
         kid = (hdr.get("kid") or "").strip()
-        
+
         if kid:
             key = JWT_KEYRING.get(kid)
             if not key:
@@ -751,7 +741,7 @@ def decode_token(token: str) -> dict:
                 return jwt.decode(token, key, algorithms=[JWT_ALG])
             except JWTError:
                 raise HTTPException(status_code=401, detail="Invalid token")
-        
+
         if ALLOW_LEGACY_JWT_NO_KID and JWT_SECRET:
             try:
                 return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
@@ -800,7 +790,7 @@ TOTP_TEMP_TOKEN_EXPIRE_SEC = 300  # 5 min to enter TOTP code
 
 def create_temp_token(user_id: int, username: str) -> str:
     """Short-lived JWT that proves password-OK but still needs 2FA."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": str(user_id),
         "username": username,
@@ -872,7 +862,7 @@ def generate_alias(length: int = 6) -> str:
     return "".join(secrets.choice(ALIAS_ALPHABET) for _ in range(length))
 
 async def get_or_create_user_id(username: str) -> int:
-    
+
     async with SessionLocal() as session:
         res = await session.execute(
             text("""
@@ -886,7 +876,6 @@ async def get_or_create_user_id(username: str) -> int:
         await session.commit()
         return int(res.scalar_one())
 
-from sqlalchemy.exc import IntegrityError
 
 async def create_room(
     owner_user_id: int,
@@ -900,12 +889,12 @@ async def create_room(
         raise HTTPException(status_code=400, detail="Room name required")
 
     ph = (await hash_password_async(room_password)) if (room_password and room_password.strip()) else None
-    
+
     join_policy = "approval" if bool(is_public) else "invite_only"
 
 
     async with SessionLocal() as session:
-        
+
         res = await session.execute(
             sql_i("""
                 SELECT id, owner_user_id, name, alias, password_hash, is_public, is_readonly, join_policy, created_at
@@ -917,7 +906,7 @@ async def create_room(
         existing = res.mappings().first()
         if existing:
             raise HTTPException(status_code=409, detail="Room with this name already exists for this user")
-        
+
         for _ in range(20):
             alias = generate_alias(6)
             try:
@@ -954,7 +943,7 @@ async def create_room(
 
             except IntegrityError as e:
                 await session.rollback()
-                
+
                 diag = getattr(getattr(e, "orig", None), "diag", None)
                 c = getattr(diag, "constraint_name", None)
 
@@ -987,8 +976,8 @@ class CsrfMiddleware(BaseHTTPMiddleware):
         origin = request.headers.get("origin")
         cookie = request.headers.get("cookie") or ""
 
-        has_csrf_cookie = "csrf_token=" in cookie  
-        
+        has_csrf_cookie = "csrf_token=" in cookie
+
         if has_csrf_cookie:
             if origin and origin not in CORS_ORIGINS:
                 return JSONResponse(
@@ -1014,16 +1003,16 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ security headers ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼"""
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-                
+
         response.headers["X-Frame-Options"] = "DENY"
-                
+
         response.headers["X-Content-Type-Options"] = "nosniff"
-                
+
         response.headers["X-XSS-Protection"] = "1; mode=block"
-        
+
         # Referrer policy
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        
+
         # Permissions policy
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
 
@@ -1041,10 +1030,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "object-src 'none'; "
             "frame-ancestors 'none';"
         )
-        
+
         if ENV == "prod":
             response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        
+
         return response
 
 app.add_middleware(SecurityHeadersMiddleware)
@@ -1069,7 +1058,7 @@ class RegisterIn(BaseModel):
 class LoginIn(BaseModel):
     username: str
     password: str
-    
+
 class RoomCreateIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
     password: str | None = Field(None, max_length=128)
@@ -1092,7 +1081,7 @@ class RoomJoinResolveOut(BaseModel):
 class RoomPinIn(BaseModel):
     url: str | None = Field(None, max_length=MAX_PIN_URL_LEN)
     text: str | None = Field(None, max_length=MAX_PIN_TEXT_LEN)
-    
+
 class RoomInviteIn(BaseModel):
     username: str = Field(..., min_length=1, max_length=32)
 
@@ -1104,7 +1093,7 @@ class FriendRequestIn(BaseModel):
 
 class FriendRequestActionIn(BaseModel):
     username: str
-    
+
 class RoomKeyIn(BaseModel):
     room_id: int
     encrypted_room_key: str = Field(..., max_length=MAX_ENCRYPTED_KEY_B64_LEN)
@@ -1136,7 +1125,7 @@ class DmKeyShareIn(BaseModel):
 
 class Ed25519KeyIn(BaseModel):
     public_key: str = Field(..., max_length=64)  # base64-encoded 32-byte Ed25519 pubkey
-    
+
 class RoomMetaOut(BaseModel):
     room_id: int
     description: str = ""
@@ -1148,7 +1137,8 @@ class RoomMetaOut(BaseModel):
 class RoomMetaIn(BaseModel):
     description: str = Field("", max_length=2000)
 
-from typing import Any, Dict
+from typing import Any
+
 
 class PrivacySettings(BaseModel):
     allow_group_invites_from_non_friends: bool = False
@@ -1463,12 +1453,12 @@ class ConnectionManager:
 
     def disconnect(self, room, ws):
         room = str(room)
-                
+
         if room in self.rooms:
             self.rooms[room].discard(ws)
             if not self.rooms[room]:
                 del self.rooms[room]
-        
+
         username = self.users.pop(ws, None)
         if username:
             still_here = any(
@@ -1491,7 +1481,7 @@ class ConnectionManager:
             try:
                 await ws.send_json(message)
             except Exception:
-                
+
                 self.disconnect(room, ws)
 
     async def kick_user(self, room, username: str, code: int = 1008, reason: str = "kicked"):
@@ -1518,10 +1508,8 @@ class ConnectionManager:
         for room in list(self.rooms.keys()):
             await self.kick_user(room, uname, code=code, reason=reason)
 
-from pydantic import BaseModel
-from typing import Any, Dict
-
 from pydantic import BaseModel, Field
+
 
 class KeyPublishIn(BaseModel):
     kid: str
@@ -1540,7 +1528,7 @@ def _normalize_privacy(v) -> dict:
         return dict(DEFAULT_PRIVACY)
 
     out = dict(DEFAULT_PRIVACY)
-    for k in out.keys():
+    for k in out:
         if k in v:
             out[k] = bool(v[k])
     return out
@@ -1558,13 +1546,13 @@ async def get_profile_row(session: AsyncSession, user_id: int) -> dict:
             "about": row.get("about") or "",
             "privacy": _normalize_privacy(row.get("privacy")),
         }
-    
+
     await session.execute(sql_i("""
         INSERT INTO chat_user_profiles(user_id, about, privacy)
         VALUES (:uid, '', CAST(:privacy AS jsonb))
         ON CONFLICT (user_id) DO NOTHING
     """, "uid"), {"uid": int(user_id), "privacy": json.dumps(DEFAULT_PRIVACY)})
-    
+
     res2 = await session.execute(sql_i("""
         SELECT user_id, about, privacy
         FROM chat_user_profiles
@@ -1577,7 +1565,7 @@ async def get_profile_row(session: AsyncSession, user_id: int) -> dict:
             "about": row2.get("about") or "",
             "privacy": _normalize_privacy(row2.get("privacy")),
         }
-    
+
     return {"user_id": int(user_id), "about": "", "privacy": dict(DEFAULT_PRIVACY)}
 
 async def are_friends(session: AsyncSession, a: int, b: int) -> bool:
@@ -1633,7 +1621,7 @@ async def _purge_room_storage_files(session: AsyncSession, room_id: int) -> None
             pass
 
 def _assert_within_dir(path: Path, base_dir: Path) -> None:
-    
+
     try:
         path.resolve().relative_to(base_dir.resolve())
     except Exception:
@@ -1653,10 +1641,13 @@ def _sniff_image_ext(first_bytes: bytes) -> str | None:
 
 def _logo_ext_from_content_type(ct: str | None) -> str:
     ct = (ct or "").lower()
-    if ct == "image/png": return ".png"
-    if ct in ("image/jpeg", "image/jpg"): return ".jpg"
-    if ct == "image/webp": return ".webp"
-    
+    if ct == "image/png":
+        return ".png"
+    if ct in ("image/jpeg", "image/jpg"):
+        return ".jpg"
+    if ct == "image/webp":
+        return ".webp"
+
     return ""
 
 manager = ConnectionManager()
@@ -1865,8 +1856,9 @@ def _make_ws_ban_checker(ws: WebSocket, user_id: int, interval: float = 10.0):
         try:
             close_reason = ("banned" + (f": {reason}" if reason else ""))[:120]
             await ws.close(code=1008, reason=close_reason)
-        finally:
-            return False
+        except Exception:
+            pass
+        return False
 
     return _check_ban_maybe
 
@@ -2091,7 +2083,7 @@ async def require_room_owner_only(session, room_id: int, user_id: int) -> None:
 
     role = await get_room_role(session, room_id, user_id)
     if role is None:
-        
+
         r = await session.execute(
             sql_i("SELECT 1 FROM chat_rooms WHERE id=:rid", "rid"),
             {"rid": int(room_id)},
@@ -2128,7 +2120,7 @@ async def require_room_access(session: AsyncSession, room_id: int, user_id: int)
     """, "rid", "uid"), {"rid": room_id, "uid": user_id})
 
     if not res.scalar_one_or_none():
-        
+
         raise HTTPException(status_code=404, detail="Not found")
 
 async def require_room_owner(session: AsyncSession, room_id: int, user_id: int) -> None:
@@ -2194,7 +2186,7 @@ async def _issue_token_pair(user_id: int, username: str) -> dict:
     """Issue access + refresh token pair, store refresh in DB."""
     access = create_access_token(user_id, username)
     refresh, jti, fid = create_refresh_token(user_id, username)
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=REFRESH_TOKEN_EXPIRES_MIN)
+    expires_at = datetime.now(UTC) + timedelta(minutes=REFRESH_TOKEN_EXPIRES_MIN)
     await store_refresh_token(jti, user_id, fid, expires_at)
     return {
         "access_token": access,
@@ -2461,12 +2453,12 @@ async def totp_disable(payload: TotpDisableIn, authorization: str | None = Heade
         if not row or not row.get("totp_secret"):
             raise HTTPException(status_code=400, detail="2FA is not enabled")
 
-        # Verify by TOTP code
-        if code and verify_totp_code(row["totp_secret"], code):
-            pass  # OK
-        elif password and await verify_password_async(password, row["password_hash"]):
-            pass  # OK
-        else:
+        # Either factor will do: a valid TOTP code, or the account password
+        # (checked only when the code is not, so Argon2 runs at most once).
+        verified = bool(code) and verify_totp_code(row["totp_secret"], code)
+        if not verified and password:
+            verified = await verify_password_async(password, row["password_hash"])
+        if not verified:
             raise HTTPException(status_code=401, detail="Invalid code or password")
 
         await db.execute(
@@ -2508,7 +2500,7 @@ async def profile_update_me(payload: ProfileUpdate, request: Request, authorizat
     await enforce_http_rate_limit(f"profile:update:user:{int(u['user_id'])}", RL_PROFILE_UPDATE_USER_PER_10MIN, 600)
 
     about = (payload.about or "").strip()
-    
+
     if len(about) > 360:
         about = about[:360]
 
@@ -2565,7 +2557,7 @@ async def profile_public(username: str, request: Request, authorization: str | N
 async def register(payload: RegisterRequest, request: Request):
     username = payload.username.strip().lower()
     password = payload.password
-    
+
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(
         f"register:ip:{ip}",
@@ -2578,7 +2570,7 @@ async def register(payload: RegisterRequest, request: Request):
         raise HTTPException(status_code=400, detail="Username/password required")
 
     async with SessionLocal() as db:
-       
+
         q = text("SELECT id FROM users WHERE LOWER(username) = LOWER(:u)")
         res = await db.execute(q, {"u": username})
         exists = res.scalar_one_or_none()
@@ -2646,7 +2638,7 @@ async def register(payload: RegisterRequest, request: Request):
             "kid": kid,
             "pk": public_key,
         })
-        
+
         await db.execute(sql_i("""
             INSERT INTO chat_user_profiles(user_id, about, privacy)
             VALUES (:uid, '', CAST(:privacy AS jsonb))
@@ -2735,7 +2727,7 @@ async def refresh_tokens(payload: RefreshRequest, request: Request):
         # Rotate: revoke old, issue new pair atomically
         new_access = create_access_token(user_id, username)
         new_refresh, new_jti, _ = create_refresh_token(user_id, username, family_id=db_family_id)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=REFRESH_TOKEN_EXPIRES_MIN)
+        expires_at = datetime.now(UTC) + timedelta(minutes=REFRESH_TOKEN_EXPIRES_MIN)
 
         upd = await db.execute(text("""
             UPDATE refresh_tokens
@@ -2973,9 +2965,9 @@ async def recover(payload: RecoverIn, request: Request):
     return {"ok": True, "message": "Password reset successfully"}
 
 
+from fastapi import Header, HTTPException, Request
 from sqlalchemy import text
-import json
-from fastapi import Header, Request, HTTPException
+
 
 def _normalize_alg(v: str | None) -> str:
     alg = (v or "x25519").strip().lower()
@@ -3187,17 +3179,17 @@ async def save_room_key(
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"crypto:keywrite:ip:{ip}", RL_CRYPTO_KEYWRITE_IP_PER_10MIN, 600)
     await enforce_http_rate_limit(f"crypto:keywrite:user:{int(u['user_id'])}", RL_CRYPTO_KEYWRITE_USER_PER_10MIN, 600)
-    
+
     async with SessionLocal() as session:
         await _ensure_key_archive_tables(session)
         # Check room access
         await require_room_access(session, payload.room_id, u["user_id"])
-        
+
         # Upsert encrypted room key
         await session.execute(sql_i("""
             INSERT INTO chat_room_keys (room_id, user_id, encrypted_room_key)
             VALUES (:rid, :uid, :erk)
-            ON CONFLICT (room_id, user_id) 
+            ON CONFLICT (room_id, user_id)
             DO UPDATE SET encrypted_room_key = EXCLUDED.encrypted_room_key
         """, "rid", "uid"), {
             "rid": payload.room_id,
@@ -3217,7 +3209,7 @@ async def save_room_key(
                 "erk": payload.encrypted_room_key,
             })
         await session.commit()
-    
+
     return {"ok": True, "room_id": payload.room_id}
 
 @app.post("/crypto/room/{room_id}/share")
@@ -3241,7 +3233,7 @@ async def share_room_key(
 
     async with SessionLocal() as session:
         await _ensure_key_archive_tables(session)
-        
+
         # Existence first, so a missing room stays a 404 instead of becoming the
         # moderator guard's 403 — both clients surface `detail` verbatim.
         res = await session.execute(sql_i("""
@@ -3268,7 +3260,7 @@ async def share_room_key(
         if not trow:
             raise HTTPException(status_code=404, detail="Target user not found")
         target_user_id = int(trow["id"])
-        
+
         res3 = await session.execute(sql_i("""
             SELECT 1
             FROM chat_room_members
@@ -3276,7 +3268,7 @@ async def share_room_key(
         """, "rid", "uid"), {"rid": room_id, "uid": target_user_id})
         if not res3.first():
             raise HTTPException(status_code=403, detail="Target user is not a member of this room")
-        
+
         # The chat_room_keys row *is* "the current key for this user", and
         # rotateRoomKey() relies on overwriting it so a kicked member's copy goes
         # stale. A sharer whose in-memory key predates a rotation would otherwise
@@ -3328,11 +3320,11 @@ async def share_room_key(
 async def get_room_key(room_id: int, authorization: str | None = Header(default=None)):
     """Get encrypted room key for user"""
     u = require_user_from_bearer(authorization)
-    
+
     async with SessionLocal() as session:
         # Check room access
         await require_room_access(session, room_id, u["user_id"])
-        
+
         # Get encrypted room key
         res = await session.execute(sql_i("""
             SELECT encrypted_room_key
@@ -3340,10 +3332,10 @@ async def get_room_key(room_id: int, authorization: str | None = Header(default=
             WHERE room_id = :rid AND user_id = :uid
         """, "rid", "uid"), {"rid": room_id, "uid": u["user_id"]})
         row = res.mappings().first()
-        
+
         if not row or not row["encrypted_room_key"]:
             raise HTTPException(status_code=404, detail="Room key not found")
-        
+
         return {
             "room_id": room_id,
             "encrypted_room_key": row["encrypted_room_key"]
@@ -3470,7 +3462,7 @@ async def rooms_create(
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"rooms:create:ip:{ip}", RL_ROOMS_CREATE_IP_PER_10MIN, 600)
     await enforce_http_rate_limit(f"rooms:create:user:{int(u['user_id'])}", RL_ROOMS_CREATE_USER_PER_10MIN, 600)
-    
+
     if not payload.encrypted_room_key:
         raise HTTPException(status_code=400, detail="encrypted_room_key is required")
 
@@ -3483,7 +3475,7 @@ async def rooms_create(
     )
 
     async with SessionLocal() as session:
-                
+
         await session.execute(sql_i("""
             INSERT INTO chat_room_members (room_id, user_id, role, invited_by, status)
             VALUES (:rid, :uid, 'owner', NULL, 'accepted')
@@ -3492,7 +3484,7 @@ async def rooms_create(
                 status='accepted',
                 invited_by=NULL
         """, "rid", "uid"), {"rid": row["id"], "uid": u["user_id"]})
-        
+
         await session.execute(sql_i("""
             INSERT INTO chat_room_keys (room_id, user_id, encrypted_room_key)
             VALUES (:rid, :uid, :erk)
@@ -3651,24 +3643,24 @@ async def get_history(
 async def rooms_mine(authorization: str | None = Header(default=None)):
     u = require_user_from_bearer(authorization)
     user_id = u["user_id"]
-    
+
     async with SessionLocal() as session:
         res = await session.execute(sql_i("""
-            SELECT 
+            SELECT
                 r.id, r.name, r.alias, r.password_hash, r.created_at,
                 r.description, r.logo_path, r.is_public, r.is_readonly,
-                (SELECT MAX(m.ts) 
-                 FROM chat_messages m 
+                (SELECT MAX(m.ts)
+                 FROM chat_messages m
                  WHERE m.room_id = r.id) as last_message_at,
-                (SELECT rs.seen_at 
-                 FROM room_seen rs 
+                (SELECT rs.seen_at
+                 FROM room_seen rs
                  WHERE rs.room_id = r.id AND rs.user_id = :uid) as last_seen_at
             FROM chat_rooms r
             WHERE r.owner_user_id = :oid
             ORDER BY r.created_at DESC
         """, "oid", "uid"), {"oid": user_id, "uid": user_id})
         rows = res.mappings().all()
-        
+
     return [{
         "id": int(r["id"]),
         "name": r["name"],
@@ -3699,20 +3691,20 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
 
     async def ws_forbid():
-        
+
         await ws.close(code=1008, reason="forbidden")
 
     async def ws_try_later():
-        
+
         await ws.close(code=1013, reason="try later")
 
-    # [OK] connect rate-limit 
+    # [OK] connect rate-limit
     ip = get_client_ip_ws(ws)
     retry = await rate_limiter.check(f"ws:connect:ip:{ip}", RL_WS_CONNECT_IP_PER_MIN, 60)
     if retry is not None:
         await ws_try_later()
         return
-    
+
     try:
         first = await asyncio.wait_for(ws.receive_json(), timeout=5)
     except Exception:
@@ -3747,8 +3739,9 @@ async def websocket_endpoint(ws: WebSocket):
             pass
         try:
             await ws.close(code=1008, reason="session revoked")
-        finally:
-            return
+        except Exception:
+            pass
+        return
 
     BAN_CHECK_INTERVAL = 10.0
     _last_ban_check = 0.0
@@ -3774,8 +3767,9 @@ async def websocket_endpoint(ws: WebSocket):
                 pass
             try:
                 await ws.close(code=1008, reason="session revoked")
-            finally:
-                return False
+            except Exception:
+                pass
+            return False
         if banned:
             try:
                 await ws.send_json({
@@ -3800,14 +3794,15 @@ async def websocket_endpoint(ws: WebSocket):
                 # include close reason so clients can display it even if they miss the last JSON frame
                 close_reason = ("banned" + (f": {reason}" if reason else ""))[:120]
                 await ws.close(code=1008, reason=close_reason)
-            finally:
-                return False
+            except Exception:
+                pass
+            return False
         return True
 
     if not await _check_ban_maybe(force=True):
         return
     username = (user.get("username") or "").strip() or f"user_{user_id}"
-    
+
     room_id_raw = ws.query_params.get("room_id")
     alias = ws.query_params.get("alias")
 
@@ -3853,7 +3848,7 @@ async def websocket_endpoint(ws: WebSocket):
         """, "rid"), {"rid": room_id})
         room = res.mappings().first()
         if not room:
-            
+
             await ws_forbid()
             return
 
@@ -3878,19 +3873,19 @@ async def websocket_endpoint(ws: WebSocket):
             text_msg = (await ws.receive_text()).strip()
             if not text_msg:
                 continue
-            
+
             if len(text_msg.encode("utf-8")) > MAX_WS_MSG_BYTES:
                 await ws.close(code=1009, reason="message too big")
                 return
-            
+
             retry = await rate_limiter.check(f"ws:msg:{room_id}:{user_id}", RL_WS_MSG_PER_10S, 10)
             if retry is not None:
-                
+
                 await ws.send_text(json.dumps({"type": "error", "message": "rate limited", "retry_after": retry}))
                 continue
 
             t = text_msg
-            
+
             if t in ("ping", "pong"):
                 if t == "ping":
                     await ws.send_text(json.dumps({"type": "pong"}))
@@ -3902,13 +3897,13 @@ async def websocket_endpoint(ws: WebSocket):
                     obj = json.loads(t)
                     if isinstance(obj, dict):
                         msg_type = obj.get("type")
-                        
+
                         # ping/pong
                         if msg_type in ("ping", "pong"):
                             if msg_type == "ping":
                                 await ws.send_text(json.dumps({"type": "pong"}))
                             continue
-                        
+
                         # rooms_meta_get
                         if msg_type == "rooms_meta_get":
                             room_id_meta = obj.get("roomId")
@@ -3924,7 +3919,7 @@ async def websocket_endpoint(ws: WebSocket):
                                         WHERE id = :rid
                                     """, "rid"), {"rid": rid_meta})
                                     row = res.mappings().first()
-                                    
+
                                     if row:
                                         has_logo = bool(row.get("logo_path"))
                                         await ws.send_text(json.dumps({
@@ -3951,7 +3946,7 @@ async def websocket_endpoint(ws: WebSocket):
                                     "roomId": room_id_meta,
                                     "message": "Room not found"
                                 }))
-                            except Exception as e:
+                            except Exception:
                                 await ws.send_text(json.dumps({
                                     "type": "rooms_meta_get",
                                     "ok": False,
@@ -3959,7 +3954,7 @@ async def websocket_endpoint(ws: WebSocket):
                                     "message": "Failed to get room metadata"
                                 }))
                             continue
-                        
+
                         # rooms_meta_set / rooms_change_password are HTTP-only now.
                         # Use PUT /rooms/{id}/meta and PUT /rooms/{id}/password — those
                         # have dedicated rate limits and the canonical validation.
@@ -3974,7 +3969,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                 except Exception:
                     pass
-            
+
             async with SessionLocal() as session:
                 try:
                     await require_room_access(session, room_id, user_id)
@@ -4049,7 +4044,6 @@ async def websocket_endpoint(ws: WebSocket):
             "online": manager.get_online(room_key),
         })
 
-from fastapi import Response
 
 @app.delete("/rooms/{room_id}", status_code=204)
 async def rooms_delete(room_id: int, request: Request, authorization: str | None = Header(default=None)):
@@ -4082,7 +4076,7 @@ async def rooms_delete(room_id: int, request: Request, authorization: str | None
 async def rooms_invite(room_id: int, payload: RoomInviteIn, request: Request, authorization: str | None = Header(default=None)):
 
     u = require_user_from_bearer(authorization)
-    target_username = (payload.username or "").strip() 
+    target_username = (payload.username or "").strip()
 
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"rooms:invite:ip:{ip}", RL_ROOMS_INVITE_IP_PER_10MIN, 600)
@@ -4090,19 +4084,19 @@ async def rooms_invite(room_id: int, payload: RoomInviteIn, request: Request, au
 
     if not target_username:
         raise HTTPException(status_code=400, detail="username required")
-    
+
     if len(target_username) > 32:
         raise HTTPException(status_code=400, detail="username too long")
 
     target_user_id = await get_user_id_by_username(target_username)
     if not target_user_id:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     if int(target_user_id) == int(u["user_id"]):
         raise HTTPException(status_code=400, detail="can't invite yourself")
-        
+
     async with SessionLocal() as session:
-        
+
         res = await session.execute(sql_i("""
             SELECT id, name, alias
             FROM chat_rooms
@@ -4111,9 +4105,9 @@ async def rooms_invite(room_id: int, payload: RoomInviteIn, request: Request, au
         room = res.mappings().first()
         if not room:
             raise HTTPException(status_code=404, detail="Room not found")
-        
+
         await require_room_moderator(session, room_id, u["user_id"])
-        
+
         invitee_profile = await get_profile_row(session, int(target_user_id))
         allow_from_non_friends = bool((invitee_profile.get("privacy") or {}).get(
             "allow_group_invites_from_non_friends", False
@@ -4229,14 +4223,14 @@ async def rooms_kick(room_id: int, payload: RoomKickIn, request: Request, author
     target_user_id = await get_user_id_by_username(target_username)
     if not target_user_id:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     if int(target_user_id) == int(u["user_id"]):
         raise HTTPException(status_code=400, detail="Cannot kick yourself")
 
     removed = False
 
     async with SessionLocal() as session:
-       
+
         res = await session.execute(
             sql_i("""
                 SELECT id
@@ -4248,21 +4242,21 @@ async def rooms_kick(room_id: int, payload: RoomKickIn, request: Request, author
         room = res.mappings().first()
         if not room:
             raise HTTPException(status_code=404, detail="Room not found")
-        
+
         actor_role = await require_room_moderator(session, int(room_id), int(u["user_id"]))
-        
+
         target_role = await get_room_role(session, int(room_id), int(target_user_id))
         if not target_role:
-            
+
             removed = False
         else:
-            
+
             if target_role == ROLE_OWNER:
                 raise HTTPException(status_code=400, detail="Cannot kick room owner")
-            
+
             if actor_role == ROLE_ADMIN and target_role == ROLE_ADMIN:
                 raise HTTPException(status_code=403, detail="Admin cannot kick another admin")
-            
+
             r1 = await session.execute(
                 sql_i("""
                     UPDATE chat_room_members
@@ -4272,7 +4266,7 @@ async def rooms_kick(room_id: int, payload: RoomKickIn, request: Request, author
                 {"rid": int(room_id), "uid": int(target_user_id)},
             )
             removed = bool((r1.rowcount or 0) > 0)
-            
+
             await session.execute(
                 sql_i("""
                     DELETE FROM chat_room_keys
@@ -4282,10 +4276,10 @@ async def rooms_kick(room_id: int, payload: RoomKickIn, request: Request, author
             )
 
             await session.commit()
-    
+
     if removed:
         await manager.kick_user(str(room_id), target_username, code=1008, reason="kicked")
-        
+
         await manager.broadcast(str(room_id), {
             "type": "members_changed",
             "ts": int(time.time()),
@@ -4293,7 +4287,7 @@ async def rooms_kick(room_id: int, payload: RoomKickIn, request: Request, author
             "action": "kick",
             "username": target_username,
         })
-        
+
         await manager.broadcast(str(room_id), {
             "type": "presence",
             "ts": int(time.time()),
@@ -4314,7 +4308,7 @@ async def rooms_members(room_id: int, authorization: str | None = Header(default
     u = require_user_from_bearer(authorization)
 
     async with SessionLocal() as session:
-       
+
         res = await session.execute(sql_i("""
             SELECT 1
             FROM chat_rooms r
@@ -4392,7 +4386,7 @@ async def rooms_set_member_role(
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"rooms:setrole:ip:{ip}", RL_ROOMS_SETROLE_IP_PER_10MIN, 600)
     await enforce_http_rate_limit(f"rooms:setrole:user:{actor_id}", RL_ROOMS_SETROLE_USER_PER_10MIN, 600)
-    
+
     new_role = body.role.strip().lower()
 
     # Validate new role
@@ -4554,7 +4548,7 @@ async def rooms_public_list(authorization: str | None = Header(default=None)):
 @app.post("/rooms/{room_id}/join-request")
 async def rooms_join_request(room_id: int, payload: RoomJoinRequestIn, request: Request, authorization: str | None = Header(default=None)):
     u = require_user_from_bearer(authorization)
-    user_id = int(u["user_id"]) 
+    user_id = int(u["user_id"])
 
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"rooms:joinreq:ip:{ip}:{int(room_id)}", RL_ROOMS_JOINREQ_IP_PER_10MIN, 600)
@@ -4572,7 +4566,7 @@ async def rooms_join_request(room_id: int, payload: RoomJoinRequestIn, request: 
 
         if not bool(room.get("is_public")):
             raise HTTPException(status_code=400, detail="Room is not public")
-        
+
         if room.get("password_hash"):
             p = (payload.password or "").strip()
             if not p or not await verify_password_async(p, room["password_hash"]):
@@ -4608,7 +4602,7 @@ async def rooms_join_requests(room_id: int, authorization: str | None = Header(d
     admin_id = int(u["user_id"])
 
     async with SessionLocal() as session:
-        
+
         res = await session.execute(sql_i("""
             SELECT 1
             FROM chat_rooms
@@ -4634,17 +4628,17 @@ async def rooms_join_requests(room_id: int, authorization: str | None = Header(d
 async def rooms_join_approve(room_id: int, username: str, request: Request, authorization: str | None = Header(default=None)):
     u = require_user_from_bearer(authorization)
     admin_id = int(u["user_id"])
-    
+
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"rooms:joinadm:ip:{ip}", RL_ROOMS_JOINADM_IP_PER_10MIN, 600)
     await enforce_http_rate_limit(f"rooms:joinadm:user:{admin_id}", RL_ROOMS_JOINADM_USER_PER_10MIN, 600)
-    
+
     username = (username or "").strip()
     if not username:
         raise HTTPException(status_code=400, detail="username required")
 
     async with SessionLocal() as session:
-        
+
         res = await session.execute(sql_i("""
             SELECT 1
             FROM chat_rooms
@@ -4691,24 +4685,24 @@ async def rooms_join_approve(room_id: int, username: str, request: Request, auth
         "room_id": int(room_id),
         "online": manager.get_online(str(room_id)),
     })
-    
+
     return {"ok": True, "room_id": int(room_id), "username": username, "status": "accepted"}
 
 @app.post("/rooms/{room_id}/join-requests/{username}/reject")
 async def rooms_join_reject(room_id: int, username: str, request: Request, authorization: str | None = Header(default=None)):
     u = require_user_from_bearer(authorization)
     admin_id = int(u["user_id"])
-    
+
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"rooms:joinadm:ip:{ip}", RL_ROOMS_JOINADM_IP_PER_10MIN, 600)
     await enforce_http_rate_limit(f"rooms:joinadm:user:{admin_id}", RL_ROOMS_JOINADM_USER_PER_10MIN, 600)
-    
+
     username = (username or "").strip()
     if not username:
         raise HTTPException(status_code=400, detail="username required")
 
     async with SessionLocal() as session:
-        
+
         res = await session.execute(sql_i("""
             SELECT 1
             FROM chat_rooms
@@ -4921,7 +4915,7 @@ async def friends_request(request: Request, payload: FriendRequestIn, authorizat
                 # Cooldown: prevent harassment via repeated re-requests
                 if row.get("responded_at"):
                     cooldown_end = row["responded_at"] + timedelta(seconds=FRIENDS_DECLINE_COOLDOWN_SEC)
-                    if datetime.now(timezone.utc) < cooldown_end:
+                    if datetime.now(UTC) < cooldown_end:
                         raise HTTPException(status_code=429, detail="Request was declined recently; please wait before re-sending")
 
                 await session.execute(sql_i("""
@@ -5255,12 +5249,12 @@ async def upload_file(
 
     if not file or not file.filename:
         raise HTTPException(status_code=400, detail="File required")
-    
+
     if content_length is not None and content_length > (MAX_UPLOAD_BYTES + 2 * 1024 * 1024):
         raise HTTPException(status_code=413, detail="File too large (max 100MB)")
 
     token = secrets.token_urlsafe(18)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = now + timedelta(days=FILE_TTL_DAYS)
 
     safe_name = os.path.basename(file.filename)
@@ -5269,7 +5263,7 @@ async def upload_file(
     tmp_path = (UPLOAD_DIR / f"{token}.part").resolve()
 
     size = 0
-    
+
     async with SessionLocal() as session:
         await _ensure_chat_files_dm_support(session)
         await require_room_access(session, room_id, u["user_id"])
@@ -5290,8 +5284,8 @@ async def upload_file(
                 raise HTTPException(status_code=403, detail="Room is read-only: only owner/admin can upload files")
 
     try:
-        
-        with open(tmp_path, "wb") as out:
+
+        with open(tmp_path, "wb") as out:  # noqa: ASYNC230 - local disk, 1 MB writes; the await is the upload read
             while True:
                 chunk = await file.read(1024 * 1024)  # 1MB
                 if not chunk:
@@ -5300,7 +5294,7 @@ async def upload_file(
                 if size > MAX_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="File too large (max 100MB)")
                 out.write(chunk)
-        
+
         os.replace(tmp_path, final_path)
 
         async with SessionLocal() as session:
@@ -5339,7 +5333,7 @@ async def upload_file(
             await session.commit()
 
     except HTTPException:
-        
+
         for p in (tmp_path, final_path):
             try:
                 if os.path.exists(p):
@@ -5394,7 +5388,7 @@ async def upload_dm_file(
         raise HTTPException(status_code=413, detail="File too large (max 100MB)")
 
     token = secrets.token_urlsafe(18)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = now + timedelta(days=FILE_TTL_DAYS)
     safe_name = os.path.basename(file.filename)
     final_path = (UPLOAD_DIR / token).resolve()
@@ -5406,7 +5400,7 @@ async def upload_dm_file(
         await require_dm_access(session, thread_id, u["user_id"])
 
     try:
-        with open(tmp_path, "wb") as out:
+        with open(tmp_path, "wb") as out:  # noqa: ASYNC230 - local disk, 1 MB writes; the await is the upload read
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
@@ -5486,8 +5480,8 @@ async def download_file(token: str, authorization: str | None = Header(default=N
 
         if not row:
             raise HTTPException(status_code=404, detail="File not found")
-        
-        now = datetime.now(timezone.utc)
+
+        now = datetime.now(UTC)
         if row["expires_at"] and row["expires_at"] < now:
             try:
                 if row["storage_path"] and os.path.exists(row["storage_path"]):
@@ -5517,9 +5511,8 @@ async def download_file(token: str, authorization: str | None = Header(default=N
             filename=row["original_name"],
         )
 
-import json
 from fastapi import Header, HTTPException
-from sqlalchemy import text
+
 
 @app.post("/dm/open")
 async def dm_open(payload: DmOpenIn, request: Request, authorization: str | None = Header(default=None)):
@@ -5543,7 +5536,7 @@ async def dm_open(payload: DmOpenIn, request: Request, authorization: str | None
 
         if peer_id == me_id:
             raise HTTPException(400, "Cannot DM yourself")
-        
+
         await session.execute(sql_i("""
             INSERT INTO chat_user_profiles(user_id, about, privacy)
             VALUES (:uid, '', CAST(:privacy AS jsonb))
@@ -5567,7 +5560,7 @@ async def dm_open(payload: DmOpenIn, request: Request, authorization: str | None
             privacy = dict(DEFAULT_PRIVACY)
 
         allow_dm_from_non_friends = bool(privacy.get("allow_dm_from_non_friends", False))
-        
+
         if not allow_dm_from_non_friends:
             fr = await session.execute(sql_i("""
                 SELECT 1
@@ -5591,10 +5584,10 @@ async def dm_open(payload: DmOpenIn, request: Request, authorization: str | None
         tid = r.scalar_one_or_none()
 
         if tid is None:
-            
+
             r = await session.execute(text("INSERT INTO chat_dm_threads DEFAULT VALUES RETURNING id"))
             tid = int(r.scalar_one())
-           
+
             await session.execute(sql_i("""
                 INSERT INTO chat_dm_pairs(user_low, user_high, thread_id)
                 VALUES (:low, :high, :tid)
@@ -5680,7 +5673,7 @@ async def dm_delete(
         raise HTTPException(status_code=400, detail="Invalid scope")
 
     confirm_ttl_sec = 10 * 60
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     async with SessionLocal() as session:
         await require_dm_access(session, thread_id, me["user_id"])
@@ -5920,8 +5913,9 @@ async def websocket_dm(ws: WebSocket, thread_id: int = Query(...)):
             pass
         try:
             await ws.close(code=1008, reason="session revoked")
-        finally:
-            return
+        except Exception:
+            pass
+        return
 
     # ---- BAN CHECKER (local closure) ----
     BAN_CHECK_INTERVAL = 10.0
@@ -5950,8 +5944,9 @@ async def websocket_dm(ws: WebSocket, thread_id: int = Query(...)):
                 pass
             try:
                 await ws.close(code=1008, reason="session revoked")
-            finally:
-                return False
+            except Exception:
+                pass
+            return False
 
         if not banned:
             return True
@@ -5979,8 +5974,9 @@ async def websocket_dm(ws: WebSocket, thread_id: int = Query(...)):
         try:
             close_reason = ("banned" + (f": {reason}" if reason else ""))[:120]
             await ws.close(code=1008, reason=close_reason)
-        finally:
-            return False
+        except Exception:
+            pass
+        return False
 
     if not await _check_ban_maybe(force=True):
         return
@@ -6131,8 +6127,9 @@ async def websocket_notify(ws: WebSocket):
             pass
         try:
             await ws.close(code=1008, reason="session revoked")
-        finally:
-            return
+        except Exception:
+            pass
+        return
 
     # 4) Ban check
     BAN_CHECK_INTERVAL = 30.0
@@ -6159,8 +6156,9 @@ async def websocket_notify(ws: WebSocket):
                 pass
             try:
                 await ws.close(code=1008, reason="session revoked")
-            finally:
-                return False
+            except Exception:
+                pass
+            return False
         if not banned:
             return True
         try:
@@ -6173,8 +6171,9 @@ async def websocket_notify(ws: WebSocket):
             pass
         try:
             await ws.close(code=1008, reason=("banned" + (f": {reason}" if reason else ""))[:120])
-        finally:
-            return False
+        except Exception:
+            pass
+        return False
 
     if not await _check_ban_maybe(force=True):
         return
@@ -6555,7 +6554,7 @@ async def room_meta_get(room_id: int, authorization: str | None = Header(default
         "is_readonly": bool(row.get("is_readonly")),
         "updated_at": row.get("meta_updated_at").isoformat() if row.get("meta_updated_at") else None,
     }
-    
+
 @app.put("/rooms/{room_id}/meta", response_model=RoomMetaOut)
 async def room_meta_put(
     room_id: int,
@@ -6579,7 +6578,7 @@ async def room_meta_put(
             WHERE id = :rid
         """, "rid"), {"rid": int(room_id), "d": desc})
         await session.commit()
-        
+
         res = await session.execute(sql_i("""
             SELECT description, logo_path, meta_updated_at, is_readonly
             FROM chat_rooms
@@ -6698,7 +6697,7 @@ async def room_logo_upload(
         async with _room_logo_lock(int(room_id)):
             if DEBUG:
                 print(f"[LOGO UPLOAD][DEBUG] room={room_id} user={u['user_id']} ct={ct} filename={file.filename!r}")
-            
+
             first = await file.read(64)
             if not first:
                 raise HTTPException(status_code=400, detail="Empty file")
@@ -6715,13 +6714,13 @@ async def room_logo_upload(
 
             _assert_within_dir(final_path, ROOM_LOGO_DIR)
             _assert_within_dir(tmp_path, ROOM_LOGO_DIR)
-            
+
             if DEBUG:
                 print(f"[LOGO UPLOAD] room={room_id} start")
 
             size = 0
             try:
-                with open(tmp_path, "wb") as out:
+                with open(tmp_path, "wb") as out:  # noqa: ASYNC230 - local disk, 1 MB writes; the await is the upload read
                     out.write(first)
                     size += len(first)
                     if size > MAX_ROOM_LOGO_BYTES:
@@ -6744,7 +6743,7 @@ async def room_logo_upload(
                         f"[LOGO UPLOAD][DEBUG] moved tmp->final final={final_path.name} "
                         f"written={size} actual={actual_size}"
                     )
-                
+
                 for old_ext in (".png", ".jpg", ".webp"):
                     old = (ROOM_LOGO_DIR / f"room_{int(room_id)}{old_ext}").resolve()
                     if old != final_path and old.exists():
@@ -6764,7 +6763,7 @@ async def room_logo_upload(
                         {"rid": int(room_id), "p": str(final_path)},
                     )
                     await session.commit()
-                
+
                 if DEBUG:
                     print(f"[LOGO UPLOAD] room={room_id} ok ext={ext} size={size}")
 
@@ -6775,7 +6774,7 @@ async def room_logo_upload(
                             os.remove(p)
                     except Exception:
                         pass
-                
+
                 if DEBUG:
                     print(f"[LOGO UPLOAD] room={room_id} fail=http")
                 raise
@@ -6787,7 +6786,7 @@ async def room_logo_upload(
                             os.remove(p)
                     except Exception:
                         pass
-                
+
                 if DEBUG:
                     print(f"[LOGO UPLOAD] room={room_id} fail=exception")
                 raise HTTPException(status_code=500, detail="Logo upload failed")
@@ -6874,7 +6873,7 @@ async def get_csrf(response: Response):
         path="/",
     )
     return {"csrf_token": token}
-    
+
 @app.post("/rooms/{room_id}/mark_seen")
 async def mark_room_seen(room_id: int, authorization: str | None = Header(default=None)):
     u = require_user_from_bearer(authorization)
@@ -6906,7 +6905,7 @@ async def delete_account(
     """
     ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â.
     ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° "DELETE".
-    
+
     ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¢ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬ÂÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¯ ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂºÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¾ÃƒÆ’Ã‚ÂÃƒÂ¢Ã¢â€šÂ¬Ã…â€œÃƒÆ’Ã‚ÂÃƒâ€¹Ã…â€œÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â:
     - ÃƒÆ’Ã‚ÂÃƒâ€¦Ã‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‹Å“ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â´ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¹ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Âµ
     - ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â±ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â² ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¡ÃƒÆ’Ã¢â‚¬ËœÃƒâ€ Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¶ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂºÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦: ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â° ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¸ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚ÂÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¼ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â½ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â³ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¿ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€¦Ã¢â‚¬â„¢ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â·ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â¾ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â²ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â°ÃƒÆ’Ã¢â‚¬ËœÃƒÂ¢Ã¢â€šÂ¬Ã…Â¡ÃƒÆ’Ã‚ÂÃƒâ€šÃ‚ÂµÃƒÆ’Ã‚ÂÃƒâ€šÃ‚Â»ÃƒÆ’Ã¢â‚¬ËœÃƒâ€šÃ‚Â "Deleted account"
@@ -6919,9 +6918,9 @@ async def delete_account(
     ip = get_client_ip_request(request)
     await enforce_http_rate_limit(f"auth:delete-account:ip:{ip}", RL_DELETE_ACCOUNT_IP_PER_HOUR, 3600)
     await enforce_http_rate_limit(f"auth:delete-account:user:{user_id}", RL_DELETE_ACCOUNT_USER_PER_HOUR, 3600)
-    
+
     async with SessionLocal() as session:
-        
+
         res = await session.execute(
             text("SELECT password_hash FROM users WHERE id = :uid"),
             {"uid": user_id}
@@ -6929,10 +6928,10 @@ async def delete_account(
         row = res.mappings().first()
         if not row:
             raise HTTPException(status_code=404, detail="User not found")
-        
+
         if not await verify_password_async(payload.password, row["password_hash"]):
-            raise HTTPException(status_code=403, detail="Invalid password")              
-        
+            raise HTTPException(status_code=403, detail="Invalid password")
+
         deleted_user = await session.execute(
             text("SELECT id FROM users WHERE username = :u AND password_hash = :marker"),
             {"u": "deleted account", "marker": "!SYSTEM_USER_NO_LOGIN!"}
@@ -6952,8 +6951,8 @@ async def delete_account(
                 """),
                 {"u": "deleted account", "ph": "!SYSTEM_USER_NO_LOGIN!"}
             )
-            deleted_user_id = res.scalar_one()      
-        
+            deleted_user_id = res.scalar_one()
+
         async def safe_execute(query, params):
             try:
                 await session.execute(query, params)
@@ -6962,27 +6961,27 @@ async def delete_account(
                 if "UndefinedTable" in err_str or "does not exist" in err_str:
                     pass
                 else:
-                    raise       
-        
+                    raise
+
         owned_rooms = await session.execute(
             sql_i("SELECT id FROM chat_rooms WHERE owner_user_id = :uid", "uid"),
             {"uid": user_id}
         )
         owned_room_ids = [r["id"] for r in owned_rooms.mappings().all()]
-        
+
         for room_id in owned_room_ids:
-            
+
             new_owner_query = await session.execute(
                 sql_i("""
-                    SELECT user_id, role FROM chat_room_members 
-                    WHERE room_id = :rid 
+                    SELECT user_id, role FROM chat_room_members
+                    WHERE room_id = :rid
                       AND user_id != :uid
                       AND status = 'accepted'
-                    ORDER BY 
-                      CASE role 
-                        WHEN 'admin' THEN 1 
-                        WHEN 'member' THEN 2 
-                        ELSE 3 
+                    ORDER BY
+                      CASE role
+                        WHEN 'admin' THEN 1
+                        WHEN 'member' THEN 2
+                        ELSE 3
                       END,
                       created_at ASC
                     LIMIT 1
@@ -6990,26 +6989,31 @@ async def delete_account(
                 {"rid": room_id, "uid": user_id}
             )
             new_owner = new_owner_query.mappings().first()
-            
+
             if new_owner:
-                
+
                 new_owner_id = new_owner["user_id"]
                 transfer_success = False
 
-                async def _attempt_owner_transfer(rename_to: str | None = None) -> bool:
+                # The room and the heir are bound here, not read from the loop
+                # when the closure runs: today it only runs within this
+                # iteration, and binding them keeps it that way by construction.
+                async def _attempt_owner_transfer(
+                    rename_to: str | None = None, *, rid: int = room_id, heir: int = new_owner_id,
+                ) -> bool:
                     async with session.begin_nested():
                         await session.execute(
                             sql_i("DELETE FROM chat_room_members WHERE room_id = :rid AND user_id = :uid", "rid", "uid"),
-                            {"rid": room_id, "uid": user_id}
+                            {"rid": rid, "uid": user_id}
                         )
                         await session.execute(
                             sql_i("UPDATE chat_room_members SET role = 'owner' WHERE room_id = :rid AND user_id = :new_uid", "rid", "new_uid"),
-                            {"rid": room_id, "new_uid": new_owner_id}
+                            {"rid": rid, "new_uid": heir}
                         )
                         if rename_to is None:
                             await session.execute(
                                 sql_i("UPDATE chat_rooms SET owner_user_id = :new_uid WHERE id = :rid", "rid", "new_uid"),
-                                {"rid": room_id, "new_uid": new_owner_id}
+                                {"rid": rid, "new_uid": heir}
                             )
                         else:
                             await session.execute(
@@ -7018,15 +7022,15 @@ async def delete_account(
                                     SET owner_user_id = :new_uid, name = :new_name
                                     WHERE id = :rid
                                 """, "rid", "new_uid"),
-                                {"rid": room_id, "new_uid": new_owner_id, "new_name": rename_to}
+                                {"rid": rid, "new_uid": heir, "new_name": rename_to}
                             )
                     return True
-                
+
                 try:
                     transfer_success = await _attempt_owner_transfer()
-                    
+
                 except Exception as e:
-                    
+
                     if "UniqueViolation" in str(type(e).__name__) or "duplicate key" in str(e).lower():
                         room_info = await session.execute(
                             sql_i("SELECT name FROM chat_rooms WHERE id = :rid", "rid"),
@@ -7051,7 +7055,7 @@ async def delete_account(
                 # before ownership transfer on account deletion. Also support deterministic fallback:
                 # transfer to the longest-tenured member and rename room as
                 # "<room_name__from_<old_owner_username>>".
-                
+
                 if not transfer_success:
 
                     await _purge_room_storage_files(session, int(room_id))
@@ -7108,27 +7112,27 @@ async def delete_account(
                     sql_i("DELETE FROM chat_rooms WHERE id = :rid", "rid"),
                     {"rid": room_id}
                 )
-                
+
         await session.execute(
             sql_i("UPDATE chat_messages SET user_id = :deleted_uid WHERE user_id = :uid", "uid", "deleted_uid"),
             {"uid": user_id, "deleted_uid": deleted_user_id}
         )
-                
+
         await safe_execute(
             sql_i("DELETE FROM chat_room_members WHERE user_id = :uid", "uid"),
             {"uid": user_id}
         )
-                
+
         await safe_execute(
             sql_i("DELETE FROM chat_room_keys WHERE user_id = :uid", "uid"),
             {"uid": user_id}
         )
-                
+
         await safe_execute(
             sql_i("DELETE FROM room_seen WHERE user_id = :uid", "uid"),
             {"uid": user_id}
         )
-                
+
         await safe_execute(
             sql_i("UPDATE chat_dm_messages SET user_id = :deleted_uid WHERE user_id = :uid", "uid", "deleted_uid"),
             {"uid": user_id, "deleted_uid": deleted_user_id}
@@ -7140,12 +7144,12 @@ async def delete_account(
                 WHERE user_id = :uid
             """), {"uid": user_id})
         ).scalars().all()
-                
+
         await safe_execute(
             sql_i("DELETE FROM chat_dm_members WHERE user_id = :uid", "uid"),
             {"uid": user_id}
         )
-               
+
         await safe_execute(
             sql_i("DELETE FROM chat_dm_thread_keys WHERE user_id = :uid", "uid"),
             {"uid": user_id}
@@ -7157,12 +7161,12 @@ async def delete_account(
             """), {"tid": int(tid)})
             if int(left.scalar_one() or 0) > 0:
                 await _rotate_dm_delivery_secret(session, int(tid))
-                
+
         await safe_execute(
             sql_i("DELETE FROM chat_friendships WHERE requester_id = :uid OR addressee_id = :uid", "uid"),
             {"uid": user_id}
         )
-                
+
         await safe_execute(
             sql_i("UPDATE chat_files SET uploader_user_id = :deleted_uid WHERE uploader_user_id = :uid", "uid", "deleted_uid"),
             {"uid": user_id, "deleted_uid": deleted_user_id}
@@ -7171,12 +7175,12 @@ async def delete_account(
             await _purge_orphan_dm_thread_files(session)
         except Exception:
             pass
-                
+
         await safe_execute(
             sql_i("UPDATE chat_room_members SET invited_by = NULL WHERE invited_by = :uid", "uid"),
             {"uid": user_id}
         )
-        
+
         await safe_execute(
             sql_i("DELETE FROM chat_user_profiles WHERE user_id = :uid", "uid"),
             {"uid": user_id}
@@ -7191,7 +7195,7 @@ async def delete_account(
             sql_i("DELETE FROM users WHERE id = :uid", "uid"),
             {"uid": user_id}
         )
-        
+
         await session.commit()
 
     # Invalidate local ban cache immediately and drop active WS sessions for this username.
@@ -7209,15 +7213,15 @@ async def delete_account(
         await notify_manager.kick_user(user_id, code=1008, reason="account deleted")
     except Exception:
         pass
-    
+
     if DEBUG:
         print(f"[DELETE ACCOUNT] User {username} (id={user_id}) deleted successfully")
-    
+
     return {
         "ok": True,
         "message": "Account deleted successfully"
     }
-    
+
 @app.get("/rooms/{room_id}/pin")
 async def room_pin_get(room_id: int, authorization: str | None = Header(default=None)):
     u = require_user_from_bearer(authorization)
@@ -7266,7 +7270,7 @@ async def room_pin_put(
     async with SessionLocal() as session:
 
         await require_room_moderator(session, int(room_id), int(u["user_id"]))
-       
+
         if not url and not text_:
             await session.execute(sql_i("""
                 DELETE FROM chat_room_pins WHERE room_id=:rid
@@ -7452,7 +7456,7 @@ async def dm_delivery_secret(thread_id: int, request: Request, authorization: st
         row = res.mappings().first()
 
         # Rotate if missing or expired
-        if not row or (row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc)):
+        if not row or (row["expires_at"] is not None and row["expires_at"] < datetime.now(UTC)):
             await _rotate_dm_delivery_secret(session, int(thread_id))
             await session.commit()
             res2 = await session.execute(text("""
@@ -7914,7 +7918,7 @@ async def foreign_claim(payload: ForeignClaimIn, request: Request):
                 FROM chat_dm_delivery WHERE thread_id = :tid
             """), {"tid": tid})
             row = res.mappings().first()
-            if not row or (row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc)):
+            if not row or (row["expires_at"] is not None and row["expires_at"] < datetime.now(UTC)):
                 await _rotate_dm_delivery_secret(session, tid)
                 res = await session.execute(text("""
                     SELECT delivery_secret, expires_at
@@ -8010,7 +8014,9 @@ async def _is_guest_user(user_id: int) -> bool:
 # guests until somebody decides otherwise.
 _GUEST_ALLOWED: list[tuple[str, re.Pattern]] = [
     ("GET", re.compile(r"^/(health|api/notice)$")),
-    ("POST", re.compile(r"^/auth/(logout|logout-all|refresh)$")),
+    # No /auth/refresh: a guest is never given a refresh token (see
+    # foreign_guest_session); it signs in again with its key.
+    ("POST", re.compile(r"^/auth/(logout|logout-all)$")),
     ("GET", re.compile(r"^/rooms/(invites|mine|list)$")),
     ("GET", re.compile(r"^/rooms/\d+/(history|members|meta|pin|logo)$")),
     ("POST", re.compile(r"^/rooms/\d+/(invites/accept|invites/decline|leave|mark_seen|files)$")),
@@ -8114,23 +8120,30 @@ def _guest_username_base(display: str, island: str) -> str:
     return f"{name}@{isl}"
 
 
-async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]:
-    """Find or create the guest bound to this card's key. Returns (user_id, username)."""
-    await _ensure_guest_tables(session)
-    await _ensure_ed25519_support(session)
-
+async def _existing_guest(session: AsyncSession, card: dict) -> tuple[int, str] | None:
     res = await session.execute(text("""
         SELECT g.user_id, g.ed25519_pub, u.username
         FROM chat_foreign_guests g JOIN users u ON u.id = g.user_id
         WHERE g.kid = :kid
     """), {"kid": card["kid"]})
     row = res.mappings().first()
-    if row:
-        # One key, one signing key: they are derived from the same identity, so
-        # a card pairing this kid with another Ed25519 key is not that person.
-        if row["ed25519_pub"] != card["ed25519"]:
-            raise HTTPException(status_code=409, detail="this key is already a guest here, with another signing key")
-        return int(row["user_id"]), row["username"]
+    if not row:
+        return None
+    # One key, one signing key: they are derived from the same identity, so
+    # a card pairing this kid with another Ed25519 key is not that person.
+    if row["ed25519_pub"] != card["ed25519"]:
+        raise HTTPException(status_code=409, detail="this key is already a guest here, with another signing key")
+    return int(row["user_id"]), row["username"]
+
+
+async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]:
+    """Find or create the guest bound to this card's key. Returns (user_id, username)."""
+    await _ensure_guest_tables(session)
+    await _ensure_ed25519_support(session)
+
+    found = await _existing_guest(session, card)
+    if found:
+        return found
 
     base_name = _guest_username_base(card["display_name"], card["island_id"])
     username = None
@@ -8145,6 +8158,23 @@ async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]
     if not username:
         raise HTTPException(status_code=409, detail="cannot name this guest")
 
+    # Two invitations of the same new key at once both get past the lookup
+    # above and collide on a unique index here (the name, or the kid). The
+    # loser's insert is undone by the savepoint alone, and its answer is the
+    # guest the winner made - not a 500.
+    try:
+        async with session.begin_nested():
+            uid = await _create_guest(session, card, username)
+    except IntegrityError:
+        found = await _existing_guest(session, card)
+        if not found:
+            raise HTTPException(status_code=409, detail="cannot name this guest") from None
+        return found
+    _GUEST_IDS[uid] = True
+    return uid, username
+
+
+async def _create_guest(session: AsyncSession, card: dict, username: str) -> int:
     res = await session.execute(text("""
         INSERT INTO users (username, password_hash, public_key)
         VALUES (:u, :ph, :pk)
@@ -8170,8 +8200,7 @@ async def _guest_principal(session: AsyncSession, card: dict) -> tuple[int, str]
         "uid": uid, "kid": card["kid"], "x": card["x25519"], "ed": card["ed25519"],
         "isl": card["island_id"], "card": json.dumps(card["card"]),
     })
-    _GUEST_IDS[uid] = True
-    return uid, username
+    return uid
 
 
 class GuestInviteIn(BaseModel):
@@ -8286,10 +8315,19 @@ async def foreign_guest_session(payload: GuestSessionIn, request: Request):
     except Exception as e:
         raise _denied(f"signature does not verify for kid {kid} on island {island}: {e}") from None
 
-    out = await _issue_token_pair(int(row["user_id"]), row["username"])
-    out["guest"] = True
-    out["island_id"] = island
-    return out
+    # An access token only. When it runs out the guest signs a new challenge -
+    # that is what its key is for - so a refresh token would be a second way in
+    # that needs no key, valid for a week, and one more row in refresh_tokens
+    # for every sign-in (every ten minutes while a room is open), which nothing
+    # ever deletes.
+    return {
+        "access_token": create_access_token(int(row["user_id"]), row["username"]),
+        "token_type": "bearer",
+        "expires_in": ACCESS_TOKEN_EXPIRES_MIN * 60,
+        "username": row["username"],
+        "guest": True,
+        "island_id": island,
+    }
 
 
 # --- Config via env ---
@@ -8309,7 +8347,7 @@ _re_header_injection = re.compile(r"[\r\n]")  # forbid newline in email headers
 class FeedbackMeta(BaseModel):
     ts: int | None = None
     client: str | None = None
-    
+
     ua: str | None = None
 
 class FeedbackSendIn(BaseModel):
@@ -8404,7 +8442,7 @@ async def feedback_send(
         meta = {
             "ts": meta_in.get("ts"),
             "client": meta_in.get("client"),
-            
+
         }
     else:
         meta = {}

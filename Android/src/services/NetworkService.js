@@ -1383,6 +1383,18 @@ class NetworkService {
     });
   }
 
+  /**
+   * Invite somebody from another island into a room here, by their signed
+   * contact card. The island checks the card itself and answers with the name
+   * it gave them: { ok, room_id, guest_username, status, island_id }.
+   */
+  async inviteGuestToRoom(roomId, card) {
+    return this._fetch(`/rooms/${encodeURIComponent(roomId)}/guests`, {
+      method: 'POST',
+      body: { card },
+    });
+  }
+
   async kickFromRoom(roomId, username) {
     return this._fetch(`/rooms/${encodeURIComponent(roomId)}/kick`, {
       method: 'POST',
@@ -1953,13 +1965,26 @@ class NetworkService {
     return this._fetch('/crypto/keys');
   }
 
-  async shareRoomKey(roomId, targetUsername, encryptedRoomKey, keyId) {
+  async shareRoomKey(roomId, targetUsername, encryptedRoomKey, keyId, { ifAbsent = false } = {}) {
     const body = { encrypted_room_key: encryptedRoomKey };
     if (keyId) body.key_id = keyId;
+    // Fill a gap only, never replace a key the member already holds. The
+    // server forces this for anybody but the owner anyway.
+    if (ifAbsent) body.if_absent = true;
     return this._fetch(`/crypto/room/${encodeURIComponent(roomId)}/share?target_username=${encodeURIComponent(targetUsername)}`, {
       method: 'POST',
       body,
     });
+  }
+
+  /**
+   * Accepted members without a room key, in rooms this account may serve
+   * (owner or admin): { gaps: [{room_id, room_name, username}], truncated }.
+   */
+  async getRoomKeyGaps({ roomId = 0, limit = 100 } = {}) {
+    let path = `/crypto/rooms/key-gaps?limit=${encodeURIComponent(String(limit))}`;
+    if (roomId) path += `&room_id=${encodeURIComponent(String(roomId))}`;
+    return this._fetch(path);
   }
 
   async getRoomKey(roomId) {

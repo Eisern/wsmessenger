@@ -240,6 +240,19 @@ async function buildMyCard() {
     // An island that publishes no list still works: the card then carries the
     // address this client is actually using, which is what the peer needs.
   }
+  if (!signingKey) {
+    // No signed list, so the id above is this client's guess - the host it
+    // happens to use. The island's own name is what a peer's client checks a
+    // room invitation and a guest sign-in against, and a guess from a second
+    // domain would fail both; the challenge answers it to anybody.
+    try {
+      const c = await fetch(cfg.apiBase + '/foreign/challenge');
+      if (c.ok) {
+        const said = String((await c.json())?.island_id || '').trim();
+        if (said) islandId = said;
+      }
+    } catch (_e) { /* keep the guess */ }
+  }
 
   const blob = await FD.buildContactBlob(
     { kid, x25519PubB64: myPub, ed25519PubB64: edPub, displayName: me },
@@ -317,6 +330,10 @@ async function addContact(cardText) {
     island: { islandId: c.islandId, signingKeyB64: c.islandSigningKeyB64, entryPoints: c.entryPoints },
     inbox: { threadId, keyB64, keyId },
     outbox: null,
+    // The card exactly as they signed it. Inviting them into a room hands it
+    // to an island, which checks the signature itself - a copy rebuilt from
+    // the fields above would not verify.
+    card: blob,
     addedAt: Date.now(),
   };
   await saveContact(contact);

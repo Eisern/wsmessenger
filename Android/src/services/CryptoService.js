@@ -601,7 +601,7 @@ const CryptoService = {
    * @param {string} targetUsername
    * @returns {Promise<boolean>}
    */
-  async shareRoomKeyToUser(roomId, targetUsername) {
+  async shareRoomKeyToUser(roomId, targetUsername, { ifAbsent = false } = {}) {
     if (!CryptoService.isReady()) return false;
     try {
       const rawB64 = await cryptoManager.exportRoomKeyForSharing(roomId);
@@ -624,8 +624,10 @@ const CryptoService = {
       const wrapped = await CryptoUtils.encryptRoomKeyForUser(
         peerPubB64, rawB64, await CryptoService._wrapSignOpts(roomId, targetUsername, keyId),
       );
-      await NetworkService.shareRoomKey(roomId, targetUsername, wrapped, keyId);
-      return true;
+      const res = await NetworkService.shareRoomKey(roomId, targetUsername, wrapped, keyId, { ifAbsent });
+      // written:false - with ifAbsent, somebody else closed the gap first.
+      // Older servers answer without the field; that was a write.
+      return { ok: true, written: res?.written !== false };
     } catch (_e) {
       console.warn('[CryptoService] shareRoomKeyToUser error:', _e?.message);
       throw _e;
@@ -747,6 +749,30 @@ const CryptoService = {
   /** Check whether a room key is loaded in memory (no I/O). */
   isRoomKeyLoaded(roomId) {
     return cryptoManager.roomKeys.has(roomId);
+  },
+
+  // ---- Rooms on other islands (GuestRoomService) ----
+  //
+  // The same two checks that keep this island honest, run with another
+  // island's names: who we are there, and the PINNED signing key of a name
+  // there. A ctx without both is refused rather than defaulted - defaulting
+  // would quietly check a guest room against this island's key server.
+
+  /** _acceptWrappedKey for a room on another island. */
+  async acceptWrappedKeyIn(ctx, encryptedB64, opts) {
+    if (!ctx || !ctx.me || typeof ctx.edKeyOf !== 'function') throw new Error('A key from another island needs its names');
+    return _acceptWrappedKey(encryptedB64, { ...opts, ctx });
+  },
+
+  /** _openRoomEnvelope for a room on another island; `roomId` is its id there. */
+  async openRoomEnvelopeIn(ctx, roomId, plain, claimedAuthor) {
+    if (!ctx || !ctx.me || typeof ctx.edKeyOf !== 'function') throw new Error('A message from another island needs its names');
+    return _openRoomEnvelope(roomId, plain, claimedAuthor, ctx);
+  },
+
+  /** The island this device files pins under, with old pins migrated first. */
+  pinScope() {
+    return _pinScope();
   },
 
   /**
@@ -1245,6 +1271,9 @@ const CryptoService = {
       await StorageService.removePendingEd25519(island, me, peer);
     }
     _ed25519PubKeyCache.delete(String(peer || '').toLowerCase());
+    // The key sweep held back this peer's room keys until now. (Its trust
+    // check clears the "changed" flag itself, now that the pin is this key.)
+    _emit('peer_verified', { username: peer });
   },
 
   /**
@@ -1689,7 +1718,7 @@ function _deriveSigningSeed() {
  * every message written before this existed, and a reader that turned them into
  * "unverified" noise would cry wolf over the whole history.
  */
-async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
+async function _openRoomEnvelope(roomId, plain, claimedAuthor, ctx = null) {
   if (typeof plain !== 'string' || !plain.startsWith('{')) return plain;
   let inner;
   try {
@@ -1709,10 +1738,12 @@ async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
   let sigValid = null;
   if (inner.sig && from) {
     try {
-      const me = await _resolveUsername();
+      // ctx: a room on another island, where our name and everybody's keys
+      // are that island's (GuestRoomService). Without it, this island's.
+      const me = ctx ? String(ctx.me || '').trim().toLowerCase() : await _resolveUsername();
       const pub = (me && from.toLowerCase() === me)
         ? CryptoService.ed25519PublicKey()
-        : await CryptoService._fetchPeerEd25519PubKey(from);
+        : ctx ? await ctx.edKeyOf(from) : await CryptoService._fetchPeerEd25519PubKey(from);
       if (pub) {
         sigValid = CryptoUtils.ed25519Verify(
           pub,
@@ -1746,10 +1777,14 @@ async function _openRoomEnvelope(roomId, plain, claimedAuthor) {
  *
  * Mirrors acceptWrappedKey in the extension's panel-crypto.js.
  *
+ * `ctx` is the island the key comes from when it is not ours - { me, edKeyOf } -
+ * for a room joined as a guest elsewhere: every rule holds unchanged, only the
+ * names are that island's.
+ *
  * @returns {Promise<string|null>} the key (base64), or null when refused
  */
-async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, signers }) {
-  const me = await _resolveUsername();
+async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, signers, ctx = null }) {
+  const me = ctx ? String(ctx.me || '').trim().toLowerCase() : await _resolveUsername();
   if (!me || !cryptoManager.userPrivateKey) return null;
 
   // Open it first (AES-GCM: a forged blob just fails here) so the signature is
@@ -1790,7 +1825,7 @@ async function _acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, sig
           console.warn(`[keywrap] ${info.signer} is not entitled to hand out this ${scope} key - refusing it`);
           return null;
         }
-        pub = await CryptoService._fetchPeerEd25519PubKey(info.signer);
+        pub = ctx ? await ctx.edKeyOf(info.signer) : await CryptoService._fetchPeerEd25519PubKey(info.signer);
       }
       if (!pub) {
         console.warn(`[keywrap] no signing key known for ${info.signer} - refusing the key`);
@@ -2237,15 +2272,18 @@ async function _assertPeerKeyTrustedForSharing(peerUsername, actionLabel = 'shar
 
   const keyCheck = await _checkPeerKeyChanged(peer, { force: true, peerPublicKeyB64 });
 
+  // Each refusal carries a code, as the extension's do: the key sweep tells
+  // "a person must verify this peer" (TRUST_CHANGED / TRUST_UNVERIFIED - asking
+  // again changes nothing) from "could not check right now" (TRUST_UNVERIFIABLE).
   if (keyCheck === null) {
-    throw new Error(
+    throw _trustError('TRUST_UNVERIFIABLE',
       `Unable to verify trust state for "${peer}". ` +
       `Open Safety Number and verify before ${actionLabel}.`
     );
   }
 
   if (keyCheck.changed) {
-    throw new Error(
+    throw _trustError('TRUST_CHANGED',
       `Public key for "${peer}" has changed since last known. ` +
       `Verify safety numbers before ${actionLabel}.`
     );
@@ -2257,17 +2295,24 @@ async function _assertPeerKeyTrustedForSharing(peerUsername, actionLabel = 'shar
   try {
     const stillChanged = await StorageService.getKeyChanged(await _pinScope(), me || keyCheck.username, peer);
     if (stillChanged) {
-      throw new Error(
+      throw _trustError('TRUST_UNVERIFIED',
         `Public key for "${peer}" has recently changed and requires re-verification. ` +
         `Open Safety Numbers and verify before ${actionLabel}.`
       );
     }
   } catch (e) {
-    if (String(e?.message || '').includes('re-verification')) throw e;
+    if (e?.code === 'TRUST_UNVERIFIED') throw e;
     // Storage error — fail closed: do NOT allow key sharing without verification
     console.warn('[CryptoService] TOFU storage check failed — blocking key share:', e?.message);
-    throw new Error(`Cannot verify trust state for "${peer}" due to storage error. Retry or re-verify safety numbers.`);
+    throw _trustError('TRUST_UNVERIFIABLE',
+      `Cannot verify trust state for "${peer}" due to storage error. Retry or re-verify safety numbers.`);
   }
+}
+
+function _trustError(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
 }
 
 export default CryptoService;

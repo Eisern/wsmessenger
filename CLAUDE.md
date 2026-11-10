@@ -90,7 +90,8 @@ A room key reaches a new member by being wrapped for their public key and upload
 - `GET /crypto/rooms/key-gaps[?room_id=N]` returns accepted members who have no `chat_room_keys` row, in rooms the caller may serve. The state is derived, not stored — there is no request table.
 - `POST /crypto/room/{id}/share` accepts the room **owner or an admin** (`require_room_moderator`). Body field `if_absent: true` makes the write fill a gap only; the server forces it on for every non-owner, so only the owner can ever replace an existing key (which is what `rotateRoomKey` depends on). The response carries `written: bool` — `false` means another provider closed the gap first, which is a success.
 - `notify_key_gap` is pushed on `/ws-notify` (per-user, always on) when someone becomes an accepted member. It is a wake-up carrying only `room_id`; recipients re-query the endpoint above.
-- The panel's sweep (`sweepRoomKeyGaps` / `scheduleRoomKeySweep` in `panel-crypto.js`) drains the list on startup, unlock, notify, membership change, room open, and a manual **Rooms → Manage → Keys → Send missing keys**. It never prompts for a password: locked means defer, and it backs off on failure.
+- Both clients sweep. When to run, how often and what each failure costs is `key-sweep.js`, byte-identical in `chrome_extension/` and `Android/src/services/`: one timer for every trigger, one run at a time (claimed before its first await), a 60 s floor between runs, 5 min after infrastructure trouble or as long as a 429 asks, a 10 min cooldown per failed room+member, and a 30 min hold on a member whose key changed (`TRUST_CHANGED` / `TRUST_UNVERIFIED`) until they are verified. Each client supplies only how to fetch the gaps and share one key: `sweepRoomKeyGaps` / `scheduleRoomKeySweep` in `panel-crypto.js`, and `KeySweepService.js` on Android (started while signed in, from `App.tsx`).
+- Triggers: start-up, unlock, `notify_key_gap`, a membership change (`invite_accepted` / `join_approved`), an owner or admin opening the room, a peer verified, and a manual **Send missing keys** (extension: Rooms → Manage → Keys; Android: the room's member list). It never prompts for a password on its own: locked means defer.
 
 The old behaviour required the owner to be connected to that specific room's socket at the moment of acceptance; since a client holds one room socket at a time, that failed whenever the owner was offline or simply in another room.
 
@@ -121,7 +122,7 @@ there is no way to address a stranger.
   server logs `[island] …` at startup saying what is on or missing.
   Operator docs: `docs/self-hosting.md` §8.3.
 
-**Guests in rooms** (server side only so far; design and threat model in
+**Guests in rooms** (server and both clients; design and threat model in
 `docs/internal/cross-island-rooms-assessment.md`): a person from another island
 takes part in a room as a guest — a `users` row with the `!guest` password
 marker, created from their signed contact card by `POST /rooms/{id}/guests`
@@ -131,6 +132,35 @@ read from the database (`_is_guest_user`), never from a token claim, and
 `guest_scope_middleware` holds a guest's token to `_GUEST_ALLOWED` — an
 allow-list, so a new endpoint is closed to guests until added there.
 `/ws-dm` refuses guests explicitly. `ISLAND_ACCEPT_GUESTS=0` turns it off.
+
+Clients: the protocol is `guest-rooms.js` and the feed ordering
+`guest-room-feed.js`, each byte-identical between `chrome_extension/` and
+`Android/src/services/` and platform-free like `foreign-dm.js`: the session
+signature, `createSessions` (one session per island, signed again on 401, never
+a stored refresh token), the `ROOMINV1::` invitation that travels as the
+plaintext of a cross-island DM, the key slot `gr:<island>:<roomId>`, and what a
+guest room shows in what order. The wiring is the "Rooms on other islands, as a
+guest" section of `panel-crypto.js` plus the matching section at the end of
+`panel-ui.js` in the extension, and `GuestRoomService.js` + `GuestRoomScreen.js`
+on Android (`CryptoService.acceptWrappedKeyIn` / `openRoomEnvelopeIn` carry the
+island context there). Rules that must hold:
+
+- An invitation is followed only to the inviter's island **as their card says**;
+  the island id in it is a consistency check, never an address.
+- Key wraps and room-message signatures in a guest room go through the same
+  `acceptWrappedKey` / `openRoomEnvelope` as at home, with a `ctx`
+  (`{me, edKeyOf}`) carrying that island's names; pins live under
+  `_fpBaseOn(<room island>, <our guest name>, <name>)`, never mixed with home.
+- The moderator pins the guest's keys from the card under the name the island
+  returns **before** anything else uses that name (`inviteForeignContactToRoom`),
+  and the guest pins the inviter from their card — only under the name their
+  card carries. So the room's island cannot swap either key even on first contact.
+- The client holds the guest room's socket itself (`openGuestRoomSocket` /
+  `GuestRoomService.openSocket`) — posting to a room is only possible over `/ws`.
+  `guest-room-feed.js` connects it **before** reading history, de-duplicates by
+  ciphertext, re-reads history after a reconnect, and serializes every draw;
+  `guestRoomFeed.test.js` and `extensionGuestRoomView.test.js` pin that order.
+  Views only draw what the feed hands them.
 
 A foreign thread must never enter the local DM key path: `ensureDmKeyReady`
 reads this island's 404 as "create a key and share it with the peer", for a peer
@@ -233,6 +263,9 @@ Full reasoning, threat model and what this deliberately does *not* buy:
 | `chrome_extension/rpc.js` | chrome.runtime port transport with reconnect/backoff; exposes `window.{connectPort,safePost,rpcOnMessage,rpcOffMessage,rpcOnConnect,rpcOnDisconnect,rpcDisconnect,rpcGetPort}` |
 | `chrome_extension/endpoints.js` | Entry-point list, failure classification and rotation state machine — byte-identical to `Android/src/services/endpoints.js` |
 | `chrome_extension/foreign-dm.js` | Cross-island DM protocol (contact cards, mailbox claims, delivery, relay envelopes) — byte-identical to `Android/src/services/foreign-dm.js` |
+| `chrome_extension/guest-rooms.js` | Guest-room protocol (guest sessions per island, room invitations, key slots) — byte-identical to `Android/src/services/guest-rooms.js` |
+| `chrome_extension/key-sweep.js` | Room-key backfill: when to hand out missing keys, how often, what a failure costs — byte-identical to `Android/src/services/key-sweep.js` |
+| `chrome_extension/guest-room-feed.js` | What a guest room shows and in what order (socket before history, dedupe, resync, serialized draws) — byte-identical to `Android/src/services/guest-room-feed.js` |
 | `chrome_extension/notifications.js` | Badge management; exposes `window.Notifications` singleton |
 | `chrome_extension/login.js` | Login, registration, 2FA, BIP39 recovery form, KEK derivation → background handoff |
 | `chrome_extension/argon2-selftest.js` | WASM integrity check (pinned SHA-256) + KDF test vector; blocks unlock on failure |

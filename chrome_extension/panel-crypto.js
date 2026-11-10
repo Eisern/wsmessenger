@@ -141,12 +141,16 @@ function wrapSignOpts(scopeId, recipient, keyId, scope = "room") {
  * @param {string} o.keyId        key id the island claims (logged if wrong, never trusted)
  * @param {number|string} o.rid   this client's key slot (room id / dmRid)
  * @param {function} o.signers    async () => Set<lowercase username> | null
+ * @param {object} [o.ctx]        the island the key comes from, when it is not
+ *   ours: { me, edKeyOf(name) } - who we are there, and the PINNED signing key
+ *   of a name there. A room joined as a guest elsewhere passes this; every
+ *   rule above holds unchanged, only the names are that island's.
  * @returns {Promise<string|null>} the key (base64), or null when refused
  */
-async function acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, signers }) {
+async function acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, signers, ctx = null }) {
   const cm = CM();
   const cu = CU();
-  const meName = getMeUsername();
+  const meName = ctx ? ctx.me : getMeUsername();
   const me = String(meName || "").toLowerCase();
   if (!me || !cm?.userPrivateKey) return null;
 
@@ -187,7 +191,7 @@ async function acceptWrappedKey(encryptedB64, { scope, scopeId, keyId, rid, sign
           console.warn(`[keywrap] ${info.signer} is not entitled to hand out this ${scope} key - refusing it`);
           return null;
         }
-        pub = await fetchPeerEd25519PubKey(info.signer);
+        pub = ctx ? await ctx.edKeyOf(info.signer) : await fetchPeerEd25519PubKey(info.signer);
       }
       if (!pub) {
         console.warn(`[keywrap] no signing key known for ${info.signer} - refusing the key`);
@@ -702,6 +706,14 @@ function lockCryptoSession() {
     cryptoLockTimer = null;
   }
   _ed25519PubKeyCache.clear();
+  // Tokens for rooms on other islands were signed for with the key that is
+  // being put away; they go with it.
+  try {
+    _guestSessions?.forget();
+    _guestEdKeyCache.clear();
+    _guestSignerCache.clear();
+    _guestKeyLoads.clear();
+  } catch { /* declared further down; nothing to clear before it ran */ }
   try { CM()?.clearUnlocked?.(); } catch {}
   try { CM()?.clear?.(); } catch {}
   try { safePost?.({ type: "unlock_kek_clear" }); } catch {}
@@ -2424,12 +2436,14 @@ async function encryptMessageForRoom(roomId, plaintext) {
  * that is every message written before this existed, and turning those into
  * "unverified" would cry wolf over the whole history.
  *
- * @param {number} rid
+ * @param {number} rid  the room id as signed - the id on the room's own island
  * @param {string} plain
  * @param {string|null} claimedAuthor who the SERVER says wrote it
+ * @param {object} [ctx]  { me, edKeyOf(name) } for a room on another island;
+ *   see acceptWrappedKey
  * @returns {Promise<string|{text:string, from:string, sigValid:boolean|null, mismatch:boolean}>}
  */
-async function openRoomEnvelope(rid, plain, claimedAuthor) {
+async function openRoomEnvelope(rid, plain, claimedAuthor, ctx = null) {
   if (typeof plain !== "string" || !plain.startsWith("{")) return plain;
   let inner;
   try {
@@ -2449,10 +2463,10 @@ async function openRoomEnvelope(rid, plain, claimedAuthor) {
   let sigValid = null;
   if (inner.sig && from) {
     try {
-      const me = String(getMeUsername() || "").trim().toLowerCase();
+      const me = String((ctx ? ctx.me : getMeUsername()) || "").trim().toLowerCase();
       const pub = (me && from.toLowerCase() === me && CM()?.ed25519Seed)
         ? await CU().ed25519GetPublicKey(CM().ed25519Seed)
-        : await fetchPeerEd25519PubKey(from);
+        : ctx ? await ctx.edKeyOf(from) : await fetchPeerEd25519PubKey(from);
       if (pub) {
         sigValid = await CU().ed25519Verify(
           pub,
@@ -2649,75 +2663,16 @@ async function shareRoomKeyToUser(roomId, targetUsername, { interactive = true, 
 // that nothing retried, and a client holds one room socket at a time, so the
 // owner of several rooms was listening to at most one of them.
 //
-// The sweep replaces that with a pull. The server derives "accepted member with
+// The sweep replaces that with a pull: the server derives "accepted member with
 // no key row" and hands the list to anyone entitled to serve it (owner or
-// admin); every provider drains it whenever it is alive and unlocked.
+// admin); every provider drains it whenever it is alive and unlocked. When to
+// run, how often and what a failure means is key-sweep.js, shared with Android;
+// this supplies how to fetch the list and how to share one key.
 //
 // It never prompts. A locked client defers to the unlock trigger instead — an
 // automatic background task must not raise a password dialog.
 
-const KEY_SWEEP_MIN_INTERVAL_MS  = 60_000;
-const KEY_SWEEP_ERROR_BACKOFF_MS = 5 * 60_000;
-const KEY_SWEEP_PAIR_COOLDOWN_MS = 10 * 60_000;
-const KEY_SWEEP_TRUST_BLOCK_MS   = 30 * 60_000;
-const KEY_SWEEP_MAX_PASSES       = 5;
-const KEY_SWEEP_PAGE             = 100;
-const KEY_SWEEP_MAX_TRANSIENT    = 3;
-const KEY_SWEEP_PAIR_COOLDOWN_CAP = 500;
-
-let __sweepRunning = false;
-let __sweepRerunRooms = new Set();
-let __sweepNextAllowedTs = 0;
-let __sweepTimer = null;
-let __sweepPendingRooms = new Set();
-let __sweepWantGlobal = false;
-const __sweepPairCooldown = new Map();   // "rid:username" -> ts
-const __sweepTrustBlocked = new Map();   // username -> {ts, reason, rooms:Set}
-
-function _sweepPairKey(rid, uname) {
-  return String(rid) + ":" + String(uname).toLowerCase();
-}
-
-function _sweepNotePairCooldown(rid, uname) {
-  if (__sweepPairCooldown.size >= KEY_SWEEP_PAIR_COOLDOWN_CAP) {
-    // Map preserves insertion order, so the first key is the oldest.
-    const oldest = __sweepPairCooldown.keys().next();
-    if (!oldest.done) __sweepPairCooldown.delete(oldest.value);
-  }
-  __sweepPairCooldown.set(_sweepPairKey(rid, uname), Date.now());
-}
-
-function _sweepPairOnCooldown(rid, uname) {
-  const ts = __sweepPairCooldown.get(_sweepPairKey(rid, uname));
-  return !!ts && (Date.now() - ts) < KEY_SWEEP_PAIR_COOLDOWN_MS;
-}
-
-function _sweepTrustBlockedFor(uname) {
-  const entry = __sweepTrustBlocked.get(String(uname).toLowerCase());
-  if (!entry) return false;
-  if ((Date.now() - entry.ts) >= KEY_SWEEP_TRUST_BLOCK_MS) {
-    __sweepTrustBlocked.delete(String(uname).toLowerCase());
-    return false;
-  }
-  return true;
-}
-
-/** Peers the sweep cannot serve until a human verifies their safety number. */
-function getKeyShareTrustBlocked() {
-  const out = [];
-  for (const [uname, entry] of __sweepTrustBlocked.entries()) {
-    if ((Date.now() - entry.ts) >= KEY_SWEEP_TRUST_BLOCK_MS) continue;
-    out.push({ username: uname, reason: entry.reason, rooms: [...entry.rooms] });
-  }
-  return out;
-}
-
-/** Clear a peer's block once they have been verified. */
-function clearKeyShareTrustBlock(uname) {
-  __sweepTrustBlocked.delete(String(uname || "").toLowerCase());
-}
-
-async function fetchRoomKeyGaps({ roomId = 0, limit = KEY_SWEEP_PAGE } = {}) {
+async function fetchRoomKeyGaps({ roomId = 0, limit = 100 } = {}) {
   const token = await requestToken();
   if (!token) throw new Error("No token");
 
@@ -2730,9 +2685,11 @@ async function fetchRoomKeyGaps({ roomId = 0, limit = KEY_SWEEP_PAGE } = {}) {
   });
 
   if (r.status === 429) {
-    const retryAfter = Number(r.headers.get("Retry-After")) || 120;
-    __sweepNextAllowedTs = Date.now() + retryAfter * 1000;
-    throw new Error(`Rate limited (retry in ${retryAfter}s)`);
+    const retryAfterS = Number(r.headers.get("Retry-After")) || 0;
+    const err = new Error(`Rate limited (retry in ${retryAfterS || "a while"}s)`);
+    err.status = 429;
+    err.retryAfterS = retryAfterS;
+    throw err;
   }
 
   // Not a provider for this room, or the room is gone. Ordinary members hit
@@ -2743,7 +2700,11 @@ async function fetchRoomKeyGaps({ roomId = 0, limit = KEY_SWEEP_PAGE } = {}) {
   }
 
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.detail || `key-gaps failed (${r.status})`);
+  if (!r.ok) {
+    const err = new Error(body.detail || `key-gaps failed (${r.status})`);
+    err.status = r.status;
+    throw err;
+  }
 
   return {
     gaps: Array.isArray(body.gaps) ? body.gaps : [],
@@ -2752,10 +2713,22 @@ async function fetchRoomKeyGaps({ roomId = 0, limit = KEY_SWEEP_PAGE } = {}) {
 }
 
 // Failures that will not change on an immediate retry: the gap is real but we
-// cannot close it right now, so cool the pair down instead of spinning.
+// cannot close it right now, so the pair is cooled down instead of the sweep.
 function _sweepIsPermanentish(msg) {
   return /not a member|not found|re-register|not valid base64|Not owner/i.test(msg);
 }
+
+const _keySweep = globalThis.WSKeySweep.createKeySweep({
+  isReady: ({ interactive }) => ensureCryptoReady({ interactive }),
+  fetchGaps: ({ roomId, limit }) => fetchRoomKeyGaps({ roomId, limit }),
+  refreshRoomKey: (rid) => loadRoomKey(rid),
+  // shareRoomKeyToUser fetches the member's key itself and checks it against
+  // the pin before wrapping - a trust refusal comes back with its .code.
+  share: (rid, uname) => shareRoomKeyToUser(rid, uname, { interactive: false, ifAbsent: true }),
+  isTransient: (e) => e?.code === "TRUST_UNVERIFIABLE" || !_sweepIsPermanentish(e?.message || String(e)),
+  onDone: (summary, blocked) => { window.onKeyGapSweepDone?.(summary, blocked); },
+  log: (...args) => console.log("[KeySweep]", ...args),
+});
 
 /**
  * Close every room-key gap this account is entitled to close.
@@ -2769,176 +2742,26 @@ function _sweepIsPermanentish(msg) {
  *   skipped: number, failed: number}>} ran=false means the sweep declined to
  *   start (already running, locked, or inside the backoff window).
  */
-async function sweepRoomKeyGaps({ roomId = 0, reason = "", interactive = false } = {}) {
-  const summary = { ran: false, shared: 0, alreadyHad: 0, skipped: 0, failed: 0 };
-
-  if (__sweepRunning) {
-    // 0 means "global"; either way the request is not lost.
-    __sweepRerunRooms.add(Number(roomId) || 0);
-    return summary;
-  }
-
-  const okCrypto = await ensureCryptoReady({ interactive });
-  if (!okCrypto) {
-    // Locked: defer. The unlock trigger re-enters, no prompt from here.
-    return summary;
-  }
-
-  if (Date.now() < __sweepNextAllowedTs) return summary;
-
-  __sweepRunning = true;
-  summary.ran = true;
-  let anyFailure = false;
-
-  try {
-    let pass = 0;
-    let more = true;
-
-    while (more && pass < KEY_SWEEP_MAX_PASSES) {
-      pass += 1;
-      more = false;
-
-      let page;
-      try {
-        page = await fetchRoomKeyGaps({ roomId });
-      } catch (e) {
-        anyFailure = true;
-        console.warn(`[KeySweep] gap fetch failed (${reason}):`, e?.message || e);
-        break;
-      }
-
-      if (!page.gaps.length) break;
-
-      const byRoom = new Map();
-      for (const g of page.gaps) {
-        const rid = Number(g?.room_id);
-        const uname = String(g?.username || "").trim();
-        if (!rid || !uname) continue;
-        if (!byRoom.has(rid)) byRoom.set(rid, []);
-        byRoom.get(rid).push(uname);
-      }
-
-      let transientRun = 0;
-      let progressed = false;
-
-      for (const [rid, unames] of byRoom.entries()) {
-        // Refresh from the server before sharing: shareRoomKeyToUser only falls
-        // back to loadRoomKey when no key is in memory at all, so a key that
-        // predates a rotation would otherwise be handed out as current.
-        try { await loadRoomKey(rid); } catch { /* share will report it */ }
-
-        for (const uname of unames) {
-          if (_sweepTrustBlockedFor(uname) || _sweepPairOnCooldown(rid, uname)) {
-            summary.skipped += 1;
-            continue;
-          }
-
-          try {
-            // Fetch the peer key here so the trust check stays off the network
-            // and a flaky fetch cannot masquerade as a trust failure.
-            const peerPub = await fetchPeerPublicKey(uname);
-            await assertPeerKeyTrustedForSharing(uname, "sharing the room key", { peerPublicKeyB64: peerPub });
-
-            const res = await shareRoomKeyToUser(rid, uname, { interactive: false, ifAbsent: true });
-            // written:false = another provider won the race. The gap is closed,
-            // which is all we wanted — a success, not a failure.
-            if (res?.written) {
-              summary.shared += 1;
-              console.log(`[KeySweep] room ${rid}: key delivered to ${uname} (${reason})`);
-            } else {
-              summary.alreadyHad += 1;
-            }
-            progressed = true;
-            transientRun = 0;
-          } catch (e) {
-            const code = e?.code || "";
-            const msg = e?.message || String(e);
-
-            if (code === "TRUST_CHANGED" || code === "TRUST_UNVERIFIED") {
-              const key = uname.toLowerCase();
-              const entry = __sweepTrustBlocked.get(key) || { ts: 0, reason: code, rooms: new Set() };
-              entry.ts = Date.now();
-              entry.reason = code;
-              entry.rooms.add(rid);
-              __sweepTrustBlocked.set(key, entry);
-              summary.skipped += 1;
-              console.warn(`[KeySweep] ${uname} needs verification before key share:`, msg);
-              continue;
-            }
-
-            summary.failed += 1;
-            _sweepNotePairCooldown(rid, uname);
-
-            if (code === "TRUST_UNVERIFIABLE" || !_sweepIsPermanentish(msg)) {
-              // Only infrastructure trouble earns the long global backoff. One
-              // member with, say, an unusable public key is already cooled down
-              // per pair and must not throttle every other room.
-              anyFailure = true;
-              transientRun += 1;
-              console.warn(`[KeySweep] room ${rid}/${uname} transient failure:`, msg);
-              if (transientRun >= KEY_SWEEP_MAX_TRANSIENT) {
-                console.warn("[KeySweep] too many transient failures, ending pass");
-                break;
-              }
-            } else {
-              console.warn(`[KeySweep] room ${rid}/${uname} skipped:`, msg);
-            }
-          }
-        }
-
-        if (transientRun >= KEY_SWEEP_MAX_TRANSIENT) break;
-      }
-
-      // Another page is only worth fetching if this one actually shrank the set.
-      more = page.truncated && progressed && transientRun < KEY_SWEEP_MAX_TRANSIENT;
-    }
-
-  } finally {
-    __sweepRunning = false;
-    __sweepNextAllowedTs = Date.now() +
-      (anyFailure ? KEY_SWEEP_ERROR_BACKOFF_MS : KEY_SWEEP_MIN_INTERVAL_MS);
-  }
-
-  if (summary.shared || summary.alreadyHad || summary.skipped || summary.failed) {
-    console.log(`[KeySweep] ${reason || "sweep"} done:`, summary);
-  }
-  try { window.onKeyGapSweepDone?.(summary, getKeyShareTrustBlocked()); } catch {}
-
-  // Triggers that arrived mid-run: re-arm the timer so they are not dropped.
-  // The backoff clock set in `finally` still governs when this actually runs.
-  if (__sweepRerunRooms.size) {
-    const pending = [...__sweepRerunRooms];
-    __sweepRerunRooms = new Set();
-    for (const r of pending) scheduleRoomKeySweep("rerun", { roomId: r, delayMs: KEY_SWEEP_MIN_INTERVAL_MS });
-  }
-
-  return summary;
+function sweepRoomKeyGaps(opts = {}) {
+  return _keySweep.run(opts);
 }
 
 /**
  * The only entry point triggers should use: one timer, one in-flight flag and
  * one backoff clock, so a locked or failing client cannot hammer the endpoint.
  */
-function scheduleRoomKeySweep(reason = "", { roomId = 0, delayMs = 0 } = {}) {
-  if (roomId) __sweepPendingRooms.add(Number(roomId));
-  else __sweepWantGlobal = true;
+function scheduleRoomKeySweep(reason = "", opts = {}) {
+  _keySweep.schedule(reason, opts);
+}
 
-  if (__sweepTimer) return;
+/** Peers the sweep cannot serve until a human verifies their safety number. */
+function getKeyShareTrustBlocked() {
+  return _keySweep.trustBlocked();
+}
 
-  __sweepTimer = setTimeout(() => {
-    __sweepTimer = null;
-    const rooms = [...__sweepPendingRooms];
-    const wantGlobal = __sweepWantGlobal;
-    __sweepPendingRooms = new Set();
-    __sweepWantGlobal = false;
-
-    // A global request supersedes the per-room ones queued behind it, and two
-    // or more rooms are cheaper to serve as one unfiltered query than as N.
-    const only = (!wantGlobal && rooms.length === 1) ? rooms[0] : 0;
-    sweepRoomKeyGaps({ roomId: only, reason }).catch((e) => {
-      console.warn("[KeySweep] sweep threw:", e?.message || e);
-    });
-  }, Math.max(0, delayMs));
+/** Clear a peer's block once they have been verified. */
+function clearKeyShareTrustBlock(uname) {
+  _keySweep.clearTrustBlock(uname);
 }
 
 // ============================
@@ -3568,6 +3391,13 @@ async function buildMyContactBlobText() {
     // An island that publishes no list still works: the card then carries the
     // address this client is actually using, which is what the peer needs.
   }
+  if (!signingKey) {
+    // No signed list, so the id above is this client's guess - the host it
+    // happens to use. The island's own name is what a peer's client checks a
+    // room invitation and a guest sign-in against, and a guess from a second
+    // domain would fail both; the challenge answers it to anybody.
+    islandId = (await _islandSaysItIs(API_BASE)) || islandId;
+  }
 
   const blob = await FD().buildContactBlob(
     { kid, x25519PubB64: myPub, ed25519PubB64: edPub, displayName: me },
@@ -3575,6 +3405,18 @@ async function buildMyContactBlobText() {
     _foreignDeps().sign,
   );
   return JSON.stringify(blob);
+}
+
+/** What an island calls itself, from its challenge endpoint; "" when it will not say. */
+async function _islandSaysItIs(apiBase) {
+  try {
+    const r = await fetch(String(apiBase).replace(/\/+$/, "") + "/foreign/challenge");
+    if (!r.ok) return "";
+    const body = await r.json().catch(() => null);
+    return String(body?.island_id || "").trim();
+  } catch {
+    return "";
+  }
 }
 
 /**
@@ -3663,6 +3505,10 @@ async function addForeignContact(blobText) {
     island: { islandId: c.islandId, signingKeyB64: c.islandSigningKeyB64, entryPoints: c.entryPoints },
     inbox: { threadId, keyB64, keyId },
     outbox: null,
+    // The card exactly as they signed it. Inviting them into a room hands it
+    // to an island, which checks the signature itself - a copy rebuilt from
+    // the fields above would not verify.
+    card: blob,
     addedAt: Date.now(),
   };
   await saveForeignContact(contact);
@@ -4210,4 +4056,700 @@ async function deliverForeignViaRelay(contact, box, ciphertext, opts) {
     console.warn(`[Foreign] relay ${relay.id} did not carry it (${last.status})`);
   }
   return last;
+}
+
+// ============================
+// Rooms on other islands, as a guest
+// ============================
+//
+// A room lives on one island; somebody from another takes part as a guest of
+// that island (guest-rooms.js for the protocol,
+// docs/internal/cross-island-rooms-assessment.md for the design). Both halves
+// live here:
+//
+//   * the moderator's: invite a cross-island contact into a room on this
+//     island, pin the keys from their card before the island can say anything
+//     about them, and tell them inside the DM;
+//   * the guest's: sign in to the room's island with the identity key, accept,
+//     load the room key, read and write.
+//
+// The guest half talks to an island this client has no account on, so none of
+// requestToken / API_BASE / getMeUsername applies to it. Every request goes
+// through the session for that island, and every name is that island's name -
+// our own included, which is the guest name it gave us.
+
+const GR = () => globalThis.WSGuestRooms || null;
+
+let _guestSessions = null;
+// "<island>|<me there>|<name>" -> Uint8Array: the pinned signing key of a name
+// in a room elsewhere.
+const _guestEdKeyCache = new Map();
+// key slot -> { at, set }: who may hand out a guest room's key.
+const _guestSignerCache = new Map();
+
+function guestSessions() {
+  if (_guestSessions) return _guestSessions;
+  const deps = _foreignDeps();
+  _guestSessions = GR().createSessions({
+    fetchJson: deps.fetchJson,
+    sign: deps.sign,
+    now: () => Date.now(),
+    myKid: async () => {
+      const pub = CM()?.userPublicKeyPem;
+      if (!pub) throw new Error("Locked");
+      return await CU().fingerprintPublicKey(pub);
+    },
+  });
+  return _guestSessions;
+}
+
+function guestRoomSlot(room) {
+  return GR().slot(room?.islandId, room?.roomId);
+}
+
+function _guestListKey() {
+  return GR().listKey(ISLAND_ID, getMeUsername());
+}
+
+/** Every room on another island this account takes part in as a guest. */
+async function listGuestRooms() {
+  await _islandSettled();
+  try {
+    const key = _guestListKey();
+    const got = await chrome.storage.local.get([key]);
+    return Array.isArray(got[key]) ? got[key] : [];
+  } catch (e) {
+    console.warn("[Guest] list failed:", e?.message || e);
+    return [];
+  }
+}
+
+// Writes to the list are read-modify-write; two of them interleaved (a join
+// finishing while a leave runs) would each write back a list without the
+// other's change. One at a time, in the order they were asked for.
+let _guestListChain = Promise.resolve();
+function _guestListWrite(fn) {
+  const run = _guestListChain.then(fn, fn);
+  _guestListChain = run.catch(() => {});
+  return run;
+}
+
+function _saveGuestRoom(room) {
+  return _guestListWrite(async () => {
+    const key = _guestListKey();
+    const list = await listGuestRooms();
+    const at = list.findIndex((r) => GR().sameRoom(r, room));
+    // A second accept of the same room adds what it learned; it does not
+    // erase the inviter or the date the first one recorded.
+    const merged = at >= 0 ? { ...list[at], ...room, joinedAt: list[at].joinedAt || room.joinedAt } : room;
+    if (at >= 0) list[at] = merged;
+    else list.push(merged);
+    await chrome.storage.local.set({ [key]: list });
+    return merged;
+  });
+}
+
+function _dropGuestRoom(room) {
+  return _guestListWrite(async () => {
+    const key = _guestListKey();
+    const list = (await listGuestRooms()).filter((r) => !GR().sameRoom(r, room));
+    await chrome.storage.local.set({ [key]: list });
+    _guestSignerCache.delete(guestRoomSlot(room));
+    _guestKeyLoads.delete(guestRoomSlot(room));
+  });
+}
+
+/**
+ * Where a guest room's island is. The contact's copy first: it follows their
+ * island's signed list when the island moves. The snapshot kept with the room
+ * is for when the contact has been removed since.
+ */
+async function _guestIsland(room) {
+  const want = String(room?.islandId || "").toLowerCase();
+  if (room?.contactKid) {
+    try {
+      const c = await getForeignContact(room.contactKid);
+      if (c?.island?.islandId && String(c.island.islandId).toLowerCase() === want) return c.island;
+    } catch { /* fall back to the snapshot */ }
+  }
+  return room?.island || { islandId: room?.islandId, entryPoints: [] };
+}
+
+/**
+ * Pin both of someone's keys under a name, from a card rather than from an
+ * island. An existing pin to other keys is never overwritten: that is either
+ * a different person who held the name before, or the island lying about who
+ * this is, and neither is ours to settle silently.
+ */
+async function _pinFromCard(pinBase, contact, { strict }) {
+  const got = await chrome.storage.local.get([pinBase, pinBase + ":ed"]);
+  const x = got[pinBase];
+  const ed = got[pinBase + ":ed"];
+  const clash = (x && x !== contact.kid) || (ed && ed !== contact.ed25519PubB64);
+  if (clash) {
+    if (strict) throw new Error("that name is already pinned to other keys on this device");
+    console.warn(`[Guest] ${pinBase} is pinned to other keys; keeping them`);
+    return false;
+  }
+  await chrome.storage.local.set({ [pinBase]: contact.kid, [pinBase + ":ed"]: contact.ed25519PubB64 });
+  return true;
+}
+
+/**
+ * Invite a cross-island contact into a room on this island, and tell them.
+ *
+ * The island creates (or finds) the guest from their card and answers with
+ * the name it gave them. Their keys are pinned under that name straight from
+ * the card before anything else happens, so when the key sweep later wraps
+ * this room's key for them, it checks the island's answer against what the
+ * person signed - the island cannot substitute a key of its own even on first
+ * contact, which TOFU alone would let it do.
+ */
+async function inviteForeignContactToRoom(roomId, peerKid, roomName = "") {
+  const rid = Number(roomId);
+  if (!Number.isInteger(rid) || rid <= 0) throw new Error("Bad room");
+  const contact = await getForeignContact(peerKid);
+  if (!contact) throw new Error("Contact not found");
+  const name = contact.displayName || String(contact.kid).slice(0, 8);
+  if (!contact.card?.payload) {
+    throw new Error(
+      `${name} was added before cards were kept. Remove them and add their card again, then invite.`,
+    );
+  }
+  const okCrypto = await ensureCryptoReady({ interactive: true, reason: "Invite to room" });
+  if (!okCrypto) throw new Error("Crypto is locked");
+  const me = getMeUsername();
+  const token = await requestToken();
+  if (!me || !token) throw new Error("Not logged in");
+
+  // The invitation reaches them only through the conversation. If we cannot
+  // write to them yet, say so now - before the island creates a guest that
+  // nobody will ever tell about it.
+  let reachable = contact;
+  if (!reachable.outbox?.keyB64) {
+    try {
+      reachable = await claimForeignOutbox(contact);
+    } catch (e) {
+      throw new Error(`${name} cannot be told about it yet: ${e?.message || e}`);
+    }
+  }
+  if (!reachable.outbox?.keyB64) throw new Error(`${name} cannot be told about it yet: no key for them`);
+
+  const r = await fetch(API_BASE + `/rooms/${rid}/guests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    body: JSON.stringify({ card: contact.card }),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    // 404 "Not found" is this island with guests switched off; a missing room
+    // is 404 "Room not found", and says so itself.
+    throw new Error(r.status === 404 && body.detail === "Not found"
+      ? "This server does not take guests from other servers"
+      : (body.detail || `Could not invite (${r.status})`));
+  }
+  const guestName = String(body.guest_username || "").trim();
+  if (!guestName) throw new Error("The server did not say who the guest is");
+
+  try {
+    await _pinFromCard(await _fpBase(me, guestName), contact, { strict: true });
+  } catch (e) {
+    throw new Error(`Not inviting ${name}: ${e.message}`);
+  }
+
+  // The room is on this island, which is the island their card for us names.
+  // That is what the invitation is checked against on their side.
+  const invite = GR().buildInvite({
+    islandId: String(body.island_id || ISLAND_ID),
+    roomId: rid,
+    roomName: String(roomName || "").trim(),
+    guestName,
+  });
+  let sent;
+  try {
+    sent = await sendForeignMessage(reachable, invite);
+  } catch (e) {
+    // The island has the invitation; only the message did not go. Inviting
+    // again is safe - the island answers "already invited" - and sends it again.
+    throw new Error(
+      `${name} is invited on this server, but the message telling them did not go ` +
+      `(${e?.message || e}). Invite them again to resend it.`,
+    );
+  }
+  return { guestName, status: body.status || "pending", queued: !!sent?.queued };
+}
+
+/**
+ * Accept an invitation that arrived in a cross-island conversation.
+ *
+ * The room is on the inviter's island. The invitation is checked against the
+ * card this client holds for them, and the session is opened against that
+ * card's addresses, so an invitation cannot send anybody to a server they were
+ * never introduced to.
+ *
+ * @param {string} peerKid      the contact whose conversation it arrived in
+ * @param {object} invite       as WSGuestRooms.parseInvite returns it
+ * @param {string} inviterName  who wrote it, by their name on their island
+ */
+async function acceptGuestInvite(peerKid, invite, inviterName) {
+  const contact = await getForeignContact(peerKid);
+  if (!contact) throw new Error("Contact not found");
+  const island = contact.island || {};
+  if (!island.islandId || String(island.islandId).toLowerCase() !== String(invite?.islandId || "").toLowerCase()) {
+    throw new Error("This invitation names a server other than theirs, so it was not followed");
+  }
+  // Granted when they were added; asking again is free and covers an address
+  // their island has published since. First, while this is still the click
+  // that asked for it - an unlock prompt in between would use the gesture up.
+  await _requestForeignOrigins(island.entryPoints);
+  const okCrypto = await ensureCryptoReady({ interactive: true, reason: "Join room" });
+  if (!okCrypto) throw new Error("Crypto is locked");
+
+  const sessions = guestSessions();
+  const s = await sessions.get(island, { force: true });
+  if (!s.ok) {
+    throw new Error(s.status === 403
+      ? "Their server does not know you as a guest. The invitation may have been withdrawn."
+      : (s.reason === "cannot sign" || s.reason === "locked")
+        ? "Unlock first: joining is signed with your key"
+        : s.reason === "wrong island"
+          ? "Their address now leads to a different server, so it was not signed in to"
+          : `Could not sign in to their server (${s.status || "no answer"})`);
+  }
+  if (invite.guestName && s.username.toLowerCase() !== invite.guestName.toLowerCase()) {
+    console.warn(`[Guest] invited as ${invite.guestName}, signed in as ${s.username}`);
+  }
+
+  const acc = await sessions.request(island, `/rooms/${invite.roomId}/invites/accept`, { method: "POST" });
+  if (!acc.ok) {
+    if (acc.status !== 404) throw new Error(`Could not accept (${acc.status || "no answer"})`);
+    // No pending invitation: fine if we are already in, which is what a second
+    // click on the same invitation looks like.
+    const mine = await sessions.request(island, "/rooms/list");
+    if (!mine.ok || !Array.isArray(mine.body)) {
+      throw new Error(`Could not check the invitation (${mine.status || "no answer"})`);
+    }
+    if (!mine.body.some((r) => Number(r?.id) === invite.roomId)) {
+      throw new Error("The invitation is no longer open");
+    }
+  }
+
+  // Their keys under their name THERE, from their card: the key they wrap for
+  // us then has to verify against what they signed, not what the island says.
+  // Only under the name their card carries: the name on a message is theirs
+  // to write, and pinning their keys to somebody else's name in the room
+  // would let them sign as that person here.
+  const said = String(inviterName || "").trim();
+  const carded = String(contact.displayName || "").trim();
+  const inviter = (said && carded && said.toLowerCase() === carded.toLowerCase()) ? said : "";
+  if (said && !inviter) {
+    console.warn(`[Guest] the invitation is signed "${said}" but their card says "${carded}"; not pinning`);
+  }
+  if (inviter) {
+    try {
+      await _pinFromCard(_fpBaseOn(island.islandId, s.username, inviter), contact, { strict: false });
+    } catch (e) {
+      console.warn("[Guest] could not pin the inviter:", e?.message || e);
+    }
+  }
+
+  const record = {
+    v: 1,
+    islandId: island.islandId,
+    roomId: invite.roomId,
+    roomName: invite.roomName || `#${invite.roomId}`,
+    guestName: s.username,
+    contactKid: contact.kid,
+    island: {
+      islandId: island.islandId,
+      signingKeyB64: island.signingKeyB64 || "",
+      entryPoints: island.entryPoints || [],
+    },
+    joinedAt: Date.now(),
+  };
+  if (inviter) record.inviter = inviter;
+  return await _saveGuestRoom(record);
+}
+
+function _guestCtx(room) {
+  return { me: room.guestName, edKeyOf: (name) => _guestEdKey(room, name) };
+}
+
+/**
+ * The signing key to check `name`'s signatures against, in a room elsewhere.
+ *
+ * Pinned on first sight under that island and our name there, exactly like a
+ * local peer's - and once pinned, the island is not asked again: a different
+ * key later is its word against the pin, and the pin wins. Somebody whose card
+ * we hold was pinned from the card before this ever ran.
+ */
+async function _guestEdKey(room, name) {
+  const who = String(name || "").trim();
+  if (!who || !room?.guestName) return null;
+  const cacheKey = [room.islandId, room.guestName, who].map((s) => String(s).toLowerCase()).join("|");
+  if (_guestEdKeyCache.has(cacheKey)) return _guestEdKeyCache.get(cacheKey);
+
+  const pinKey = _fpBaseOn(room.islandId, room.guestName, who) + ":ed";
+  let b64 = "";
+  try {
+    b64 = String((await chrome.storage.local.get([pinKey]))[pinKey] || "");
+  } catch {
+    return null;
+  }
+  if (!b64) {
+    let r;
+    try {
+      r = await guestSessions().request(await _guestIsland(room), `/keys/${encodeURIComponent(who)}`);
+    } catch {
+      return null;   // no answer is not "no key"
+    }
+    if (!r.ok) return null;
+    b64 = String(r.body?.ed25519_public_key || "").trim();
+    if (!b64) return null;
+    try {
+      await chrome.storage.local.set({ [pinKey]: b64 });
+    } catch {
+      return null;   // an unrecorded first contact would be re-decided next time
+    }
+  }
+  let raw;
+  try {
+    raw = new Uint8Array(CU().base64ToArrayBuffer(b64));
+  } catch {
+    return null;
+  }
+  if (raw.length !== 32) return null;
+  _guestEdKeyCache.set(cacheKey, raw);
+  return raw;
+}
+
+/**
+ * Who may hand out a guest room's key: its members, as the room's island lists
+ * them. `{ set }`, or `{ status }` when the island did not say - 0 for no
+ * answer, 401/403 for "not yours to ask".
+ */
+async function _fetchGuestRoomSigners(room) {
+  const slot = guestRoomSlot(room);
+  const hit = _guestSignerCache.get(slot);
+  if (hit && Date.now() - hit.at < _SIGNER_SET_TTL_MS) return { set: hit.set };
+  let r;
+  try {
+    r = await guestSessions().request(await _guestIsland(room), `/rooms/${room.roomId}/members`);
+  } catch {
+    return { status: 0 };
+  }
+  if (!r.ok || !Array.isArray(r.body)) return { status: r.status || 0 };
+  const set = new Set(r.body.map((m) => String(m?.username || "").toLowerCase()).filter(Boolean));
+  _guestSignerCache.set(slot, { at: Date.now(), set });
+  return { set };
+}
+
+async function _guestRoomSigners(room) {
+  return (await _fetchGuestRoomSigners(room)).set || null;
+}
+
+// slot -> { promise } while a load runs, { at, res } after one failed. The
+// decrypt path asks once per message, so a page of history arriving before the
+// key would otherwise be a hundred identical requests - and enough of them
+// trip the island's rate limit for everything else.
+const _guestKeyLoads = new Map();
+const _GUEST_KEY_RETRY_MS = 15 * 1000;
+
+/**
+ * Load a guest room's key - current and archived - into the manager, under
+ * the room's own slot. Every key goes through acceptWrappedKey with that
+ * island's names, so the rules that keep our own island honest keep this one
+ * honest too. Nothing is persisted: the island holds the wrapped copies, and
+ * a guest room is read only while the panel is open.
+ *
+ * Loads of one room never overlap: a second caller gets the first one's
+ * result. `throttled` callers (the decrypt path) also get a failure from the
+ * last few seconds instead of asking again.
+ *
+ * @returns {Promise<{ok:boolean, locked?:boolean, notFound?:boolean,
+ *   refused?:boolean, denied?:boolean, unreachable?:boolean, error?:boolean}>}
+ */
+function loadGuestRoomKey(room, { throttled = false } = {}) {
+  const slot = guestRoomSlot(room);
+  if (!slot) return Promise.resolve({ ok: false, error: true });
+  const cur = _guestKeyLoads.get(slot);
+  if (cur?.promise) return cur.promise;
+  if (throttled && cur?.res && Date.now() - cur.at < _GUEST_KEY_RETRY_MS) return Promise.resolve(cur.res);
+
+  const settle = (res) => {
+    // A lock is not the island's answer; after unlocking, ask at once.
+    if (res.ok || res.locked) _guestKeyLoads.delete(slot);
+    else _guestKeyLoads.set(slot, { at: Date.now(), res });
+    return res;
+  };
+  const promise = _loadGuestRoomKeyOnce(room, slot).then(settle, (e) => {
+    console.warn("[Guest] key load failed:", e?.message || e);
+    return settle({ ok: false, error: true });
+  });
+  _guestKeyLoads.set(slot, { promise });
+  return promise;
+}
+
+async function _loadGuestRoomKeyOnce(room, slot) {
+  const okCrypto = await ensureCryptoReady({ interactive: false });
+  if (!okCrypto) return { ok: false, locked: true };
+  const island = await _guestIsland(room);
+
+  let r;
+  try {
+    r = await guestSessions().request(island, `/crypto/room-key/${room.roomId}`);
+  } catch {
+    return { ok: false, unreachable: true };
+  }
+  if (r.status === 404) return { ok: false, notFound: true };
+  if (r.status === 401 || r.status === 403) return { ok: false, denied: true, status: r.status };
+  if (!r.ok || !r.body?.encrypted_room_key) {
+    return r.status ? { ok: false, error: true, status: r.status } : { ok: false, unreachable: true };
+  }
+
+  // Who may have wrapped it, asked once up front: without an answer every
+  // signed wrap would be refused, and "the island could not say" must not be
+  // reported as "the island offered a key nobody could have given".
+  const who = await _fetchGuestRoomSigners(room);
+  if (!who.set) {
+    return (who.status === 401 || who.status === 403)
+      ? { ok: false, denied: true, status: who.status }
+      : { ok: false, unreachable: true };
+  }
+  const opts = (keyId) => ({
+    scope: "room", scopeId: room.roomId, keyId, rid: slot,
+    signers: async () => who.set, ctx: _guestCtx(room),
+  });
+
+  const key = await acceptWrappedKey(r.body.encrypted_room_key, opts(String(r.body.key_id || "")));
+  if (!key) return { ok: false, refused: true };
+  if (!await CM()?.loadRoomKey(slot, key)) return { ok: false, error: true };
+
+  try {
+    const a = await guestSessions().request(island, `/crypto/room-key/${room.roomId}/archive`);
+    const entries = Array.isArray(a.body?.keys) ? a.body.keys : [];
+    for (const entry of entries) {
+      const enc = String(entry?.encrypted_room_key || "").trim();
+      if (!enc) continue;
+      const hint = String(entry?.key_id || "").trim().toLowerCase();
+      if (hint && CM().roomKeyArchive?.get(slot)?.has(hint)) continue;
+      const old = await acceptWrappedKey(enc, opts(hint));
+      if (!old) continue;
+      const kid = await CU().fingerprintRoomKeyBase64(old);
+      if (!CM().roomKeyArchive?.get(slot)?.has(kid)) await CM().loadArchivedKey(slot, kid, old);
+    }
+  } catch (e) {
+    // The current key is in; old messages under a key we could not get stay
+    // unreadable, which is what they would be anyway.
+    console.warn("[Guest] archive load failed:", e?.message || e);
+  }
+  return { ok: true };
+}
+
+/** Encrypt and sign a message for a guest room, as our guest name there. */
+async function encryptForGuestRoom(room, plaintext) {
+  const okCrypto = await ensureCryptoReady({ interactive: true, reason: "Send message" });
+  if (!okCrypto) throw new Error("Crypto locked");
+  const slot = guestRoomSlot(room);
+  if (!CM()?.roomKeys?.has(slot)) {
+    const res = await loadGuestRoomKey(room);
+    if (!res.ok) {
+      throw new Error(res.notFound
+        ? "No key for this room yet. A moderator there has to open their client once."
+        : "No key for this room");
+    }
+  }
+  const cm = CM();
+  if (!cm?.roomKeys?.has(slot)) throw new Error("Room key unavailable (crypto was locked during send)");
+  const seed = cm.ed25519Seed;
+  if (!seed) throw new Error("Cannot sign a room message: locked");
+
+  // Always signed. There is no history here from before signatures existed,
+  // so nothing for an unsigned message to be mistaken for.
+  const payload = JSON.stringify({
+    rs: 1,
+    from: room.guestName,
+    body: plaintext,
+    sig: await CU().ed25519Sign(seed, CU()._roomSigMessage(room.roomId, room.guestName, plaintext)),
+  });
+  return await cm.encryptMessage(slot, payload);
+}
+
+/** decryptMessageFromRoom, for a room on another island. */
+async function decryptFromGuestRoom(room, text, claimedAuthor = null) {
+  if (isPingPayloadText(text)) return null;
+  // Not encrypted at all. At home that is history from before encryption; in
+  // a room on another island it is something that island wrote under a
+  // member's name, and nobody can be held to it - so it is shown as such.
+  const unattributable = (t) => ({ text: String(t), from: String(claimedAuthor || ""), sigValid: false, mismatch: false });
+  if (typeof text !== "string") return unattributable(text);
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return unattributable(text);
+  }
+  if (!parsed?.encrypted || !parsed.iv || !parsed.data) return unattributable(text);
+
+  try {
+    if (!await ensureCryptoReady({ interactive: false })) return null;
+  } catch {
+    return null;
+  }
+  const slot = guestRoomSlot(room);
+  if (!CM()?.roomKeys?.has(slot)) {
+    const res = await loadGuestRoomKey(room, { throttled: true });
+    if (!res.ok) return "[Encrypted message - key not available]";
+  }
+  try {
+    const plain = await CM().decryptMessage(slot, parsed);
+    return await openRoomEnvelope(room.roomId, plain, claimedAuthor, _guestCtx(room));
+  } catch (e) {
+    console.warn("[Guest] decryption failed:", e?.name || "", e?.message || e);
+    return "[Encrypted message - decryption failed]";
+  }
+}
+
+/** A page of a guest room's history, as the island stores it. */
+async function fetchGuestRoomHistory(room, { limit = 50, beforeId = null } = {}) {
+  const q = new URLSearchParams({ limit: String(limit) });
+  if (beforeId) q.set("before_id", String(beforeId));
+  const r = await guestSessions().request(await _guestIsland(room), `/rooms/${room.roomId}/history?${q}`);
+  if (!r.ok) {
+    const err = new Error(`History unavailable (${r.status || "no answer"})`);
+    err.status = r.status;
+    throw err;
+  }
+  return r.body || { messages: [] };
+}
+
+/**
+ * Leave a room on another island. Not being a member any more is the state we
+ * wanted, so the island saying so is success.
+ */
+async function leaveGuestRoom(room) {
+  let r;
+  try {
+    r = await guestSessions().request(await _guestIsland(room), `/rooms/${room.roomId}/leave`, { method: "POST" });
+  } catch {
+    r = { ok: false, status: 0 };
+  }
+  if (!r.ok && r.status !== 403 && r.status !== 404) {
+    throw new Error(`Could not leave (${r.status || "their server did not answer"})`);
+  }
+  await _dropGuestRoom(room);
+  return true;
+}
+
+/**
+ * The room socket on the room's island, held by the panel.
+ *
+ * The worker's socket belongs to this island and to one room at a time; a
+ * guest room is neither, and the key that signs the session is here, not in
+ * the worker. Posting to a room is only possible over its socket, so it is
+ * also what carries new messages in - nothing to poll.
+ *
+ * @param {object} room
+ * @param {object} handlers { onMessage(msg), onPresence(msg), onStatus({online, error}) }
+ * @returns {{ send(text), close(), readonly online: boolean }}
+ */
+function openGuestRoomSocket(room, { onMessage, onPresence, onStatus } = {}) {
+  let ws = null;
+  let closed = false;
+  let attempt = 0;
+  let timer = null;
+  let refusedOnce = false;
+
+  const status = (s) => { try { onStatus?.(s); } catch { /* the view's problem */ } };
+
+  const schedule = () => {
+    if (closed) return;
+    const delay = Math.min(30000, 1000 * (2 ** attempt)) + Math.floor(Math.random() * 500);
+    attempt = Math.min(attempt + 1, 6);
+    timer = setTimeout(connect, delay);
+  };
+
+  async function connect() {
+    if (closed) return;
+    let island, s;
+    try {
+      island = await _guestIsland(room);
+      s = await guestSessions().get(island);
+    } catch (e) {
+      s = { ok: false, status: 0, reason: e?.message || "unreachable" };
+    }
+    if (closed) return;
+    if (!s?.ok) {
+      status({ online: false, error: s?.status === 403 ? "refused" : "unreachable" });
+      if (s?.status === 403) return;   // not a guest there any more: retrying will not change it
+      schedule();
+      return;
+    }
+
+    const entry = (island.entryPoints || [])
+      .find((e) => String(e?.apiBase || "").replace(/\/+$/, "") === s.apiBase) || { apiBase: s.apiBase };
+    let sock;
+    try {
+      sock = new WebSocket(GR().socketUrl(entry, room.roomId));
+    } catch {
+      schedule();
+      return;
+    }
+    ws = sock;
+    sock.onopen = () => {
+      try { sock.send(JSON.stringify({ type: "auth", token: s.token })); } catch { /* onclose follows */ }
+    };
+    sock.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      if (!m || typeof m !== "object") return;
+      if (m.type === "presence") {
+        attempt = 0;
+        refusedOnce = false;
+        status({ online: true });
+        try { onPresence?.(m); } catch { /* the view's problem */ }
+      } else if (m.type === "message") {
+        if (Number(m.room_id) !== Number(room.roomId)) return;
+        try { onMessage?.(m); } catch (e) { console.warn("[Guest] message handler failed:", e?.message || e); }
+      } else if (m.type === "error") {
+        status({ online: true, error: String(m.message || "error") });
+      }
+    };
+    sock.onclose = (ev) => {
+      if (ws === sock) ws = null;
+      if (closed) return;
+      status({ online: false });
+      if (ev?.code === 1008) {
+        // Refused: the token, or our membership. A fresh session settles the
+        // first; if that is refused too, it is the second and we stop.
+        if (refusedOnce) {
+          status({ online: false, error: "refused" });
+          return;
+        }
+        refusedOnce = true;
+        guestSessions().forget(room.islandId);
+      }
+      schedule();
+    };
+  }
+
+  const keepalive = setInterval(() => {
+    try { if (ws && ws.readyState === 1) ws.send("ping"); } catch { /* onclose follows */ }
+  }, 25000);
+  connect();
+
+  return {
+    send(text) {
+      if (!ws || ws.readyState !== 1) throw new Error("Not connected to their server");
+      ws.send(text);
+    },
+    close() {
+      closed = true;
+      clearTimeout(timer);
+      clearInterval(keepalive);
+      try { ws?.close(1000); } catch { /* already gone */ }
+      ws = null;
+    },
+    get online() { return !!ws && ws.readyState === 1; },
+  };
 }

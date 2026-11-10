@@ -49,11 +49,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
       - run: npm install --no-audit --no-fund
       - run: npm run lint
 
   test-android:
+    # Node 22 is the floor Android/package.json declares (engines). On 20 the
+    # extension-crypto suites fail: its WebCrypto refuses typed arrays made in
+    # the Jest sandbox ("is not instance of ArrayBuffer ..."), which 22 accepts.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -62,7 +65,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
           cache-dependency-path: Android/package-lock.json
       - run: npm ci --legacy-peer-deps
@@ -72,4 +75,8 @@ jobs:
       # nowhere but the author's machine. The integration project is left out
       # on purpose - it needs two live islands.
       - run: npm run test:unit
+      # Screens rendered with their services stubbed (react-test-renderer).
+      # Only src/screens: App.test.tsx needs native modules a node runner does
+      # not have.
+      - run: npm run test:screens
       - run: npm run lint

@@ -17,6 +17,8 @@ npm run android:release  # Release APK → android/app/build/outputs/apk/release
 npm run android:bundle   # AAB for Play Store → android/app/build/outputs/bundle/release/
 npm test                 # All Jest tests
 npm run test:crypto      # Crypto-only tests (Node env, verbose)
+npm run test:unit        # crypto + selector projects (what CI runs)
+npm run test:screens     # screens rendered with services stubbed (react-test-renderer)
 ```
 
 **Building APK directly via Gradle** (from `Android/android/`):
@@ -56,6 +58,10 @@ Unlike the Chrome Extension (two contexts via `chrome.runtime` ports), the Andro
 | `src/services/StorageService.js` | AsyncStorage (rooms, pinned context) + react-native-keychain (auth tokens) |
 | `src/services/ForeignService.js` | Cross-island DMs: contacts, mailboxes, delivery, queue — the Android half of panel-crypto.js's "Cross-island contacts" |
 | `src/services/foreign-dm.js` | Cross-island protocol — **byte-identical** to `chrome_extension/foreign-dm.js` |
+| `src/services/GuestRoomService.js` | Rooms on other islands as a guest: sessions, invitations (both sides), keys and signatures with that island's names, the room socket — the Android half of panel-crypto.js's "Rooms on other islands" |
+| `src/services/guest-rooms.js`, `guest-room-feed.js` | Guest-room protocol and feed ordering — **byte-identical** to the extension's copies |
+| `src/services/KeySweepService.js` | Hands the room key to accepted members who have none (owners/admins), on unlock, `notify_key_gap`, membership changes and "Send missing keys" — the Android half of the extension's sweep; rules in `key-sweep.js` (**byte-identical** to the extension's) |
+| `src/screens/GuestRoomScreen.js` | A guest room: draws what the feed hands it, with ChatScreen's `MessageBubble` |
 | `src/services/endpoints.js` | Entry-point list, failure classification, rotation — **byte-identical** to the extension's copy |
 | `src/services/island-list.js`, `outbox.js`, `thread-chain.js` | Signed island list, durable send queue, hash chains — all byte-identical duplicates |
 | `src/crypto/CryptoUtils.js` | Raw crypto primitives — adapted from `../crypto-utils.js` |

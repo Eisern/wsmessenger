@@ -48,9 +48,9 @@ import os
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+from fastapi import APIRouter, HTTPException
 
 SIGN_DOMAIN = b"ws-island-list-v1"
 

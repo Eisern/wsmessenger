@@ -256,6 +256,13 @@ const CryptoUtils = {
   //                   | u16BE len(keyId)     | keyId
   //                   | eph_pub | iv | ciphertext
   //
+  // signer and recipient are signed lower-cased. A name is one name whatever
+  // its case - the server looks names up with lower() - and the two sides
+  // write the recipient independently: the sharer from a member list
+  // ("Alice"), the reader from who it signed in as. Signed as written, a wrap
+  // for "Alice" did not verify on a client that knew her as "alice". The
+  // blob still carries the signer's name as written, for display.
+  //
   // Verifying is deliberately NOT done here: this file decides nothing about
   // trust. It says who claims to have wrapped the key and hands over the bytes
   // they signed; whether that person was entitled to give you this key is a
@@ -269,8 +276,8 @@ const CryptoUtils = {
     const enc = new TextEncoder();
     const domainB = enc.encode(this._KEYWRAP_DOMAIN);
     const scopeB = enc.encode(String(scope || ""));
-    const signerB = enc.encode(String(signer || ""));
-    const recipB = enc.encode(String(recipient || ""));
+    const signerB = enc.encode(String(signer || "").toLowerCase());
+    const recipB = enc.encode(String(recipient || "").toLowerCase());
     const keyIdB = enc.encode(String(keyId || ""));
     const total = domainB.length + 1 + scopeB.length + 4
       + 2 + signerB.length + 2 + recipB.length + 2 + keyIdB.length

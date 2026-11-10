@@ -21,6 +21,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import NetworkService from '../services/NetworkService';
 import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
+import ForeignService from '../services/ForeignService';
+import GuestRoomService from '../services/GuestRoomService';
+import KeySweepService from '../services/KeySweepService';
 
 // Auto-clear clipboard 60s after copying a message (plaintext is sensitive).
 let _clipClearTimer = null;
@@ -331,24 +334,43 @@ export default function ChatScreen({ navigation, route }) {
     return () => NetworkService.off('message', stableHandler);
   }, []); // empty deps — register once
 
-  // Auto-share room key when an invitee accepts (owner only)
+  // Somebody accepted: refresh the list. Their room key is KeySweepService's
+  // job - it hears the same event, asks the island who is actually missing a
+  // key, and serves admins and closed rooms too, which a share from this
+  // screen (owner only, only while open) never did.
   _handleMembersChangedRef.current = (msg) => {
     if (!screenReady) return;
     if (msg.type !== 'members_changed') return;
     if (String(msg.room_id) !== String(roomId)) return;
-    if (msg.action !== 'invite_accepted') return;
-    if (myRole !== 'owner') return;
-    const username = msg.username;
-    if (!username) return;
-    CryptoService.shareRoomKeyToUser(roomId, username).catch(err => {
-      if (String(err?.message || '').includes('re-verification')) {
-        Alert.alert('Key Verification Required', err.message);
-      } else if (__DEV__) {
-        console.warn('[ChatScreen] auto key share after accept failed:', err?.message);
-      }
-    });
+    if (msg.action !== 'invite_accepted' && msg.action !== 'join_approved') return;
     refreshMembers();
   };
+
+  // An owner or admin opening the room is a good moment to close its gaps.
+  useEffect(() => {
+    if (screenReady && isOwnerOrAdmin) KeySweepService.schedule('room_open', { roomId: Number(roomId) });
+  }, [screenReady, isOwnerOrAdmin, roomId]);
+
+  // Members the sweep could not serve because their key needs verifying -
+  // said once per member, in the room they are missing a key for.
+  const _blockedShownRef = useRef(new Set());
+  useEffect(() => {
+    if (!screenReady) return undefined;
+    return KeySweepService.onDone((_summary, blocked) => {
+      const here = (blocked || []).filter((b) => (b.rooms || []).includes(Number(roomId))
+        && !_blockedShownRef.current.has(b.username));
+      if (!here.length) return;
+      for (const b of here) _blockedShownRef.current.add(b.username);
+      const names = here.map((b) => b.username).join(', ');
+      const text = (here.length === 1
+        ? '1 member cannot receive the room key until you verify their safety number: '
+        : `${here.length} members cannot receive the room key until you verify their safety numbers: `) + names;
+      dispatch({
+        type: 'APPEND_ROOM_MESSAGE',
+        message: normMsg({ id: `sys_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, author: 'System', text, ts: Date.now(), _decrypted: text }),
+      });
+    });
+  }, [screenReady, roomId, dispatch]);
   useEffect(() => {
     const stableHandler = (msg) => _handleMembersChangedRef.current?.(msg);
     NetworkService.on('message', stableHandler);
@@ -1117,6 +1139,7 @@ export default function ChatScreen({ navigation, route }) {
         members={members}
         onlineUsers={onlineUsers}
         roomId={roomId}
+        roomName={currentRoom?.name || roomName || ''}
         myUsername={myUsername}
         myRole={myRole}
         onMembersChanged={refreshMembers}
@@ -1454,7 +1477,7 @@ function RoomSettingsModal({ visible, onClose, roomId, currentRoom, myRole, disp
 
 // ---- Members modal ----
 
-function MembersModal({ visible, onClose, members, onlineUsers, roomId, myUsername, myRole, onMembersChanged, onLeaveRoom, onSystemMessage }) {
+function MembersModal({ visible, onClose, members, onlineUsers, roomId, roomName, myUsername, myRole, onMembersChanged, onLeaveRoom, onSystemMessage }) {
   const onlineSet = new Set(onlineUsers);
   const canModerate = myRole === 'owner' || myRole === 'admin';
   const isOwner = myRole === 'owner';
@@ -1488,6 +1511,77 @@ function MembersModal({ visible, onClose, members, onlineUsers, roomId, myUserna
       Alert.alert('Error', e?.message || 'Failed to submit report');
     } finally {
       setReporting(false);
+    }
+  }
+
+  // Somebody from another server, by the card they gave you: the cross-island
+  // contacts list, picked from here. Owners and admins, as the island checks.
+  const [foreignPick, setForeignPick] = React.useState(null);   // contacts, while choosing
+
+  async function openForeignPick() {
+    const contacts = await ForeignService.listContacts().catch(() => []);
+    if (!contacts.length) {
+      Alert.alert(
+        'No contacts on other servers',
+        'Add their card first, in Direct messages. Then they can be invited here as a guest.',
+      );
+      return;
+    }
+    setForeignPick(contacts);
+  }
+
+  async function handleInviteForeign(contact) {
+    setInviting(true);
+    try {
+      const res = await GuestRoomService.inviteContact(roomId, contact.kid, roomName);
+      setForeignPick(null);
+      Alert.alert(
+        'Invited',
+        `${contact.displayName} is invited as ${res.guestName}. ` +
+        (res.queued
+          ? 'Their server did not answer, so the invitation is queued in your conversation with them. '
+          : 'The invitation is in your conversation with them. ') +
+        "Once they accept, an owner's or admin's client sends them the room key, as for anyone who joins.",
+      );
+      onMembersChanged?.();
+    } catch (e) {
+      Alert.alert('Could not invite', e?.message || String(e));
+    } finally {
+      setInviting(false);
+    }
+  }
+
+  const [sweeping, setSweeping] = React.useState(false);
+
+  async function handleSendMissingKeys() {
+    setSweeping(true);
+    try {
+      const res = await KeySweepService.run({ roomId: Number(roomId), reason: 'manual', interactive: true });
+      let text;
+      const none = !res.shared && !res.alreadyHad && !res.skipped && !res.failed;
+      if (!res.ran) {
+        text = 'Already running, locked, or tried a moment ago - try again shortly.';
+      } else if (none && res.incomplete) {
+        text = 'Could not get the list of missing keys from the server - try again shortly.';
+      } else if (none) {
+        text = 'Everyone in this room already has the key.';
+      } else {
+        const bits = [`Delivered to ${res.shared} member(s).`];
+        if (res.alreadyHad) bits.push(`${res.alreadyHad} already covered by someone else.`);
+        if (res.skipped) bits.push(`${res.skipped} skipped.`);
+        if (res.failed) bits.push(`${res.failed} failed.`);
+        const blocked = KeySweepService.trustBlocked().filter((b) => (b.rooms || []).includes(Number(roomId)));
+        if (blocked.length) {
+          bits.push(`Verify the safety number of ${blocked.map((b) => b.username).join(', ')} first.`);
+        }
+        if (res.incomplete) bits.push('Not finished - the rest is tried again shortly.');
+        text = bits.join(' ');
+      }
+      Alert.alert('Room keys', text);
+    } catch (e) {
+      Alert.alert('Room keys', e?.message || String(e));
+    } finally {
+      setSweeping(false);
     }
   }
 
@@ -1633,6 +1727,43 @@ function MembersModal({ visible, onClose, members, onlineUsers, roomId, myUserna
                   ? <ActivityIndicator size="small" color="#fff" />
                   : <Text style={styles.inviteBtnText}>Invite</Text>}
               </TouchableOpacity>
+            </View>
+          )}
+          {canModerate && !foreignPick && (
+            <TouchableOpacity style={guestStyles.openBtn} onPress={openForeignPick} disabled={inviting}>
+              <Text style={guestStyles.openBtnText}>Invite someone from another server</Text>
+            </TouchableOpacity>
+          )}
+          {canModerate && !foreignPick && (
+            <TouchableOpacity style={guestStyles.openBtn} onPress={handleSendMissingKeys} disabled={sweeping}>
+              {sweeping
+                ? <ActivityIndicator size="small" color="#fff" />
+                : <Text style={guestStyles.openBtnText}>Send missing keys</Text>}
+            </TouchableOpacity>
+          )}
+          {canModerate && foreignPick && (
+            <View style={guestStyles.pick}>
+              <Text style={guestStyles.pickHint}>
+                Who should join as a guest? This server learns the key and the name on their card, and nothing else.
+              </Text>
+              {foreignPick.map((c) => (
+                <TouchableOpacity
+                  key={c.kid}
+                  style={guestStyles.pickRow}
+                  onPress={() => handleInviteForeign(c)}
+                  disabled={inviting}
+                >
+                  <Text style={guestStyles.pickName}>{c.displayName || String(c.kid).slice(0, 8)}</Text>
+                  <Text style={guestStyles.pickIsland}>{c.island?.islandId || 'another server'}</Text>
+                </TouchableOpacity>
+              ))}
+              {inviting
+                ? <ActivityIndicator size="small" color="#fff" />
+                : (
+                  <TouchableOpacity onPress={() => setForeignPick(null)}>
+                    <Text style={guestStyles.cancel}>Cancel</Text>
+                  </TouchableOpacity>
+                )}
             </View>
           )}
           <FlatList
@@ -2441,3 +2572,31 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
 });
+
+const guestStyles = StyleSheet.create({
+  openBtn: {
+    marginHorizontal: Spacing.lg,
+    marginBottom: Spacing.md,
+    paddingVertical: Spacing.sm,
+    borderRadius: Radii.md,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    alignItems: 'center',
+  },
+  openBtnText: { color: Colors.accent, fontSize: Typography.md, fontWeight: '600' },
+  pick: { marginHorizontal: Spacing.lg, marginBottom: Spacing.md, gap: Spacing.xs },
+  pickHint: { color: Colors.textMuted, fontSize: Typography.xs, marginBottom: Spacing.xs },
+  pickRow: {
+    paddingVertical: Spacing.sm,
+    paddingHorizontal: Spacing.md,
+    borderRadius: Radii.md,
+    backgroundColor: Colors.bgCard,
+  },
+  pickName: { color: Colors.textMain, fontSize: Typography.md, fontWeight: '600' },
+  pickIsland: { color: Colors.textMuted, fontSize: Typography.xs },
+  cancel: { color: Colors.textMuted, fontSize: Typography.md, paddingVertical: Spacing.sm, textAlign: 'center' },
+});
+
+// A room on another island is drawn with the same bubble and the same chrome
+// (GuestRoomScreen): one look for a room, wherever it lives.
+export { MessageBubble, MembersModal, styles as chatStyles };

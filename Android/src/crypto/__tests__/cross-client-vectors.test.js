@@ -237,6 +237,38 @@ describe('round trips agree across clients', () => {
     },
   );
 
+  // A name is one name whatever its case - the server looks names up with
+  // lower() - but each side writes the recipient into the signed bytes on its
+  // own: the sharer from the member list ("Alice"), the reader from who it
+  // signed in as (Android lower-cases it). A wrap for "Alice" was therefore
+  // refused by her own Android client. Guests from other islands carry their
+  // display name in theirs, capitals and all.
+  it.each([['extension wraps, Android opens', 'EXT', 'AND'], ['Android wraps, extension opens', 'AND', 'EXT']])(
+    'a wrap is for its recipient whatever case either side writes the name in (%s)',
+    async (_name, fromName, toName) => {
+      const FROM = fromName === 'EXT' ? EXT : AND;
+      const TO = toName === 'EXT' ? EXT : AND;
+      const seed = await FROM.deriveEd25519Seed(PRIV);
+      const signerEdPub = await FROM.ed25519GetPublicKey(seed);
+      const roomKeyB64 = await FROM.exportRoomKey(await FROM.generateRoomKey(true));
+      const kid = await FROM.fingerprintRoomKeyBase64(roomKeyB64);
+      const { x25519 } = require('@noble/curves/ed25519');
+      const recipientPubB64 = Buffer.from(x25519.getPublicKey(x25519.utils.randomSecretKey())).toString('base64');
+
+      const wrapped = await FROM.encryptRoomKeyForUser(recipientPubB64, roomKeyB64, {
+        seed, signer: 'Bob', scope: 'room', scopeId: 42, recipient: 'Alice@island-g~ca2a4f', keyId: kid,
+      });
+      for (const recipient of ['alice@island-g~ca2a4f', 'Alice@island-g~ca2a4f', 'ALICE@ISLAND-G~CA2A4F']) {
+        const info = TO.inspectWrappedKey(wrapped, { scope: 'room', scopeId: 42, recipient, keyId: kid });
+        expect(info.signer).toBe('Bob');   // shown as written
+        expect(await TO.ed25519Verify(signerEdPub, info.sig, info.sigMessage)).toBe(true);
+      }
+      // Case is the only thing forgiven: another person is still another person.
+      const other = TO.inspectWrappedKey(wrapped, { scope: 'room', scopeId: 42, recipient: 'alicia@island-g~ca2a4f', keyId: kid });
+      expect(await TO.ed25519Verify(signerEdPub, other.sig, other.sigMessage)).toBe(false);
+    },
+  );
+
   it('bip39 decodes on either side what the other encoded', async () => {
     const fromExt = await EXT.bip39Encode(PRIV);
     const fromAnd = await AND.bip39Encode(PRIV);

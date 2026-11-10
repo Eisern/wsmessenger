@@ -23,6 +23,7 @@ import NetworkService from '../services/NetworkService';
 import StorageService from '../services/StorageService';
 import CryptoService from '../services/CryptoService';
 import ForeignService from '../services/ForeignService';
+import GuestRoomService from '../services/GuestRoomService';
 
 // Auto-clear clipboard 60s after copying a message (plaintext is sensitive).
 let _clipClearTimer = null;
@@ -1309,6 +1310,27 @@ export default function DMChatScreen({ navigation, route }) {
     setSearchIdx(i => (i + dir + searchHits.length) % searchHits.length);
   }
 
+  /**
+   * Follow an invitation into a room on the sender's island. Only from a
+   * cross-island conversation: the contact's card is what says where their
+   * island is, and GuestRoomService refuses an invitation naming any other.
+   */
+  async function handleJoinInvite(invite, author) {
+    const contact = foreignRef.current;
+    if (!contact) {
+      Alert.alert('Invitation', 'Open it from your conversation with them to join.');
+      return;
+    }
+    try {
+      const known = (await GuestRoomService.listRooms()).find((r) => GuestRoomService.sameRoom(r, invite));
+      const room = known || await GuestRoomService.acceptInvite(contact.kid, invite, author);
+      // Rooms tab, on top of its list, so "back" lands among the rooms.
+      navigation.navigate('Rooms', { screen: 'GuestRoom', params: { room }, initial: false });
+    } catch (e) {
+      Alert.alert('Could not join', e?.message || String(e));
+    }
+  }
+
   function renderMessage({ item, index }) {
     const meLower = (myUsername || '').toLowerCase();
     const isMe = (item.author || '').toLowerCase() === meLower || (item.username || '').toLowerCase() === meLower;
@@ -1326,6 +1348,7 @@ export default function DMChatScreen({ navigation, route }) {
     const ts = item.ts || item.created_at;
     const timeStr = ts ? new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
     const fileInfo = (decryptFailed || needsDecrypt) ? null : parseFileMarker(text);
+    const invite = (decryptFailed || needsDecrypt) ? null : GuestRoomService.parseInvite(text);
 
     return (
       <>
@@ -1373,6 +1396,22 @@ export default function DMChatScreen({ navigation, route }) {
             <Text style={styles.decryptFailedText}>Could not decrypt this message</Text>
           ) : needsDecrypt ? (
             <Text style={styles.decryptPendingText}>🔒 decrypting…</Text>
+          ) : invite ? (
+            <View>
+              <MessageText
+                isMe={isMe}
+                text={isMe
+                  ? `You invited them into ${invite.roomName ? `"${invite.roomName}"` : `room #${invite.roomId}`} on ${invite.islandId}.`
+                  : `${author || 'They'} invited you into ${invite.roomName ? `"${invite.roomName}"` : `room #${invite.roomId}`} on ${invite.islandId}.`}
+              />
+              {!isMe && (foreignContact ? (
+                <TouchableOpacity style={inviteStyles.btn} onPress={() => handleJoinInvite(invite, author)}>
+                  <Text style={inviteStyles.btnText}>Join</Text>
+                </TouchableOpacity>
+              ) : (
+                <Text style={inviteStyles.note}>Open it from your conversation with them to join.</Text>
+              ))}
+            </View>
           ) : fileInfo ? (
             isImageFile(fileInfo.filename) ? (
               <ImageCard token={fileInfo.token} filename={fileInfo.filename} sizeBytes={fileInfo.sizeBytes} />
@@ -1948,4 +1987,17 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: Typography.md,
   },
+});
+
+const inviteStyles = StyleSheet.create({
+  btn: {
+    marginTop: Spacing.sm,
+    alignSelf: 'flex-start',
+    backgroundColor: Colors.accent,
+    borderRadius: Radii.md,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.sm,
+  },
+  btnText: { color: '#fff', fontWeight: '700', fontSize: Typography.md },
+  note: { marginTop: Spacing.xs, color: Colors.textMuted, fontSize: Typography.xs },
 });

@@ -65,6 +65,7 @@ module.exports = {
         '^react-native$': '<rootDir>/src/services/__tests__/integration/helpers/reactNativeStub.js',
         '^@react-native-async-storage/async-storage$': '<rootDir>/src/services/__tests__/integration/helpers/asyncStorageStub.js',
         '^react-native-keychain$': '<rootDir>/src/services/__tests__/integration/helpers/keychainStub.js',
+        '^@react-native-clipboard/clipboard$': '<rootDir>/src/services/__tests__/integration/helpers/clipboardStub.js',
       },
       // @noble/* uses "exports" with .js suffixes — same resolver as the crypto
       // project, and the same transform exception (the packages ship ESM).

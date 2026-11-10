@@ -60,6 +60,8 @@ import ImportKeyScreen from './src/screens/ImportKeyScreen';
 import RecoveryScreen from './src/screens/RecoveryScreen';
 import RoomsListScreen from './src/screens/RoomsListScreen';
 import ChatScreen from './src/screens/ChatScreen';
+import GuestRoomScreen from './src/screens/GuestRoomScreen';
+import KeySweepService from './src/services/KeySweepService';
 import DMListScreen from './src/screens/DMListScreen';
 import DMChatScreen, { activeScreenThreadIds as activeDmScreens } from './src/screens/DMChatScreen';
 import InvitesScreen from './src/screens/InvitesScreen';
@@ -76,6 +78,7 @@ function RoomsStackNavigator() {
     <RoomsStack.Navigator screenOptions={{ headerShown: false }}>
       <RoomsStack.Screen name="RoomsList" component={RoomsListScreen} />
       <RoomsStack.Screen name="Chat" component={ChatScreen} />
+      <RoomsStack.Screen name="GuestRoom" component={GuestRoomScreen} />
     </RoomsStack.Navigator>
   );
 }
@@ -613,6 +616,15 @@ function RootNavigator() {
     NetworkService.on('message', globalDmHandler);
     return () => NetworkService.off('message', globalDmHandler);
   }, [state.isLoggedIn, dispatch]);
+
+  // ---- Room keys for members who have none (KeySweepService) ----
+  // While signed in: an owner or admin on this device hands the room key to
+  // whoever accepted while nobody was watching that room.
+  useEffect(() => {
+    if (!state.isLoggedIn) return;
+    KeySweepService.start();
+    return () => KeySweepService.stop();
+  }, [state.isLoggedIn]);
 
   // ---- Incoming messages → show notification when in background ----
   // NetworkService emits type='message' for room chat and type='dm_message' for DMs.
