@@ -257,3 +257,32 @@ describe('the feed', () => {
     });
   });
 });
+
+describe("the platform's own timers", () => {
+  // A browser's setTimeout throws "Illegal invocation" when called as a method
+  // of anything but the window; Node's does not care. Without injected timers
+  // the feed must call the platform's as plain functions, or in the extension
+  // the wait for the socket fails and a guest room shows nothing at all.
+  test('are called the way a browser allows', async () => {
+    const real = { setTimeout, clearTimeout, setInterval, clearInterval };
+    const strict = (name) => function (...args) {
+      if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+      return real[name](...args);
+    };
+    for (const k of Object.keys(real)) global[k] = strict(k);
+    try {
+      const log = jest.fn();
+      const F = make({ timers: undefined, log });
+      F.island.history = ['h1'];
+      const started = F.feed.start();
+      F.up();
+      await started;
+      await F.feed.idle();
+      expect(F.shown).toEqual(['h1']);
+      expect(log).not.toHaveBeenCalledWith('feed step failed', expect.anything());
+      F.feed.stop();
+    } finally {
+      Object.assign(global, real);
+    }
+  });
+});

@@ -207,8 +207,16 @@ async function retryPendingHistoryAfterUnlock() {
       return;
     }
 
-    try { requestRoomHistory?.(rid); } catch {}
-  } catch {}
+    // Read the page again: whatever arrived while locked was dropped, and a
+    // history that came back meanwhile cleared the chat without drawing it.
+    // Only if the room is still the one on screen; otherwise opening it reads it.
+    if (Number(activeRoomId) === Number(rid) && !dmMode && !activeGuestRoom) {
+      renderedHistoryRoomId = null;
+      safePost({ type: "history_get", roomId: rid, limit: HISTORY_PAGE_SIZE });
+    }
+  } catch (e) {
+    console.warn("retryPendingHistoryAfterUnlock failed:", e?.message || e);
+  }
 }
 
 /**
@@ -1323,9 +1331,9 @@ function __ensureCryptoLockOverlay() {
       try {
         const ok = await ensureCryptoReady({ interactive: true, reason: "Unlock chat" });
         if (!ok) return;
+        // The unlock announced itself ("ws_crypto_unlocked"), and the
+        // listener for that reads the open room or conversation again.
         __setCryptoUiLocked(false);
-        try { await retryPendingHistoryAfterUnlock?.(); } catch {}
-        try { await retryPendingDmAfterUnlock?.(); } catch {}
       } catch (e) {
         try { await __ui.alert("Crypto unlock failed: " + (e?.message || e)); } catch {}
       }
@@ -1377,6 +1385,11 @@ window.addEventListener("ws_crypto_locked", () => {
 });
 window.addEventListener("ws_crypto_unlocked", () => {
   __setCryptoUiLocked(false);
+  // Every way of unlocking ends here - the button on the overlay, and a
+  // password asked for by an action (My card, an invitation). Each leaves the
+  // open room or conversation as stale as the other, so each reads it again.
+  retryPendingHistoryAfterUnlock().catch(() => {});
+  retryPendingDmAfterUnlock().catch(() => {});
 });
 window.addEventListener("ws_crypto_lock_state", (ev) => {
   const locked = !!ev?.detail?.locked;

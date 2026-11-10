@@ -8,6 +8,15 @@ they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
 ## Unreleased
 
+### Read this first, if you run a server
+
+- **Guests from other islands are accepted as soon as `ISLAND_ID` is set** —
+  also on a server that had the island identity before this version, with
+  nothing to opt in to. `ISLAND_ACCEPT_GUESTS=0` in `.env` refuses them.
+- No schema change and no new required setting. The guest table is created on
+  first use, as the archive tables are: the database user must be allowed to
+  create tables (the database owner is, as in `docs/self-hosting.md`).
+
 ### Added — rooms across islands, server side
 
 Somebody from another island can now take part in a room here as a **guest**:
@@ -134,6 +143,22 @@ island - waited for somebody's browser extension.
   room owner re-shares it (Rooms → Manage → Members → *Re-share key*). Guests
   from other islands are the common case: their name is built from the display
   name on their card.
+- **A room on another server showed nothing in the extension.**
+  `guest-room-feed.js` handed the browser's `setTimeout` around as a method of
+  a plain object; Chrome refuses that ("Illegal invocation"), Node does not,
+  so every test passed while in the browser the wait for the room's socket
+  failed and no history was drawn. Messages sent afterwards still arrived.
+  Found by driving the extension in Chromium against two islands. Android
+  should not have been affected - React Native's timers are plain functions
+  that do not care how they are called - but that was not tried on a device.
+- **After unlocking, the open room stayed empty, or short of what arrived
+  while locked** (extension). A message that comes in while locked cannot be
+  decrypted and is dropped, and a history that comes back meanwhile clears the
+  chat without drawing it. Unlocking was meant to read the room again, but
+  called a function that never existed - since the first commit - inside a
+  `try/catch` that hid it, and only from the overlay's **Unlock** button.
+  Every unlock now reads the open room or conversation again, including one
+  asked for by an action (*My card*, an invitation).
 - **A server socket being closed for a revoked session or a ban swallowed
   its own cancellation.** Ten `return`s inside `finally` turned anything
   `ws.close()` raised - `asyncio.CancelledError` too, which is how a shutdown
@@ -168,6 +193,12 @@ island - waited for somebody's browser extension.
   local members. CI runs them against a `postgres:17` service. Each protection
   was checked by removing it: the allow-list, the `/ws-dm` refusal, the nonce
   spend and both signature checks each fail their own tests.
+- `extensionUnlockHistory.test.js` runs the real unlock path from `panel.js`
+  (the retry and the `ws_crypto_unlocked` listener): the room is read again,
+  only if it is still the one on screen, and not into a conversation or a
+  guest room. `guestRoomFeed.test.js` gained a run under timers that refuse to
+  be called as methods, as a browser's do. Each of the 7 guards, removed in
+  turn, fails a test; the timer test failed before the fix.
 - `server/tests/test_account.py` — turning 2FA off (either factor, never
   neither); a revoked session turned away by all three sockets when it
   connects and, on `/ws-dm`, mid-session by the socket's own check; and an
