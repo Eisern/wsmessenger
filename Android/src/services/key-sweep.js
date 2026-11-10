@@ -241,6 +241,7 @@
       }
       running = true;
       let anyFailure = false;
+      let deferred = false;
       try {
         let ready = false;
         try {
@@ -251,12 +252,20 @@
         if (ready && now() >= nextAllowed) {
           summary.ran = true;
           anyFailure = await passes(roomId, reason, summary);
+        } else if (ready) {
+          // Inside the interval: not now, but not never. Dropped here, the
+          // trigger leaves a member without the key until something else
+          // happens to ask - the first person a new room's owner invites
+          // accepts within a minute of the sweep that creating it started.
+          deferred = true;
         }
       } finally {
         running = false;
         if (summary.ran) {
           nextAllowed = Math.max(nextAllowed, now() + (anyFailure ? C.ERROR_BACKOFF_MS : C.MIN_INTERVAL_MS));
         }
+        // Locked is not deferred: unlocking is a trigger of its own.
+        if (deferred) schedule(reason || "deferred", { roomId: roomId, delayMs: Math.max(0, nextAllowed - now()) });
         // Triggers that arrived meanwhile are not dropped; the clock above
         // still decides when they actually run.
         if (rerun.size) {

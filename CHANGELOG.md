@@ -143,6 +143,30 @@ island - waited for somebody's browser extension.
   room owner re-shares it (Rooms → Manage → Members → *Re-share key*). Guests
   from other islands are the common case: their name is built from the display
   name on their card.
+- **`scripts/bootstrap.sh` did not work on a fresh server.** Its virtualenv
+  step ran as `sudo -iu wsapp -- bash -c "<several lines>"`; with `-i`, sudo
+  escapes newlines into line continuations, so the script ran as one line
+  (`set -e python3 -m venv ...`), created nothing and succeeded. The install
+  stopped two steps later (`.venv/bin/python: No such file or directory`),
+  after the database and `.env` were made. One command per sudo now, and the
+  script checks the venv exists. Verified by installing on Ubuntu 24.04.
+  With `WSAPP_SKIP_CERTBOT=1` it also writes `http://` entry points into the
+  island list, which a contact card then carries; it now says what to change
+  once TLS is in place.
+- **A new member got no room key if they accepted within a minute of the
+  owner's last key sweep** (both clients). That is the usual case - create a
+  room, invite someone, they accept - and the wake-up for it landed inside the
+  sweep's 60-second interval and was thrown away; the key came only when the
+  owner happened to do something that asks again. It now runs when the
+  interval ends. Found on a live server.
+- **Every invitation ended in "Invite OK, but key share failed"**
+  (extension). The panel handed the key to the invitee at once, which the
+  island refuses until they accept. The key goes over when they accept.
+- **Friend requests stopped arriving about four minutes after signing in**
+  (extension). A background poll asked for the three friends lists every
+  10-15 s; they share one island limit of 60 per user per 10 minutes, so
+  every panel ran into 429 and stayed there. They are asked about once a
+  minute now; the DM list and room invitations keep the short cycle.
 - **A room on another server showed nothing in the extension.**
   `guest-room-feed.js` handed the browser's `setTimeout` around as a method of
   a plain object; Chrome refuses that ("Illegal invocation"), Node does not,
@@ -193,6 +217,12 @@ island - waited for somebody's browser extension.
   local members. CI runs them against a `postgres:17` service. Each protection
   was checked by removing it: the allow-list, the `/ws-dm` refusal, the nonce
   spend and both signature checks each fail their own tests.
+- `keySweep.test.js`: a trigger inside the interval runs when it ends - on
+  one timer, at the end, not a timer that fires at once and sets another;
+  a locked client waits for the unlock. `extensionInviteKey.test.js` and
+  `extensionPollBudget.test.js` run the real code from `panel.js`; the poll
+  test reads the island's limit from `server/main.py`, so a change on either
+  side is checked against the other. Each fails without its fix.
 - `extensionUnlockHistory.test.js` runs the real unlock path from `panel.js`
   (the retry and the `ws_crypto_unlocked` listener): the room is read again,
   only if it is still the one on screen, and not into a conversation or a

@@ -292,4 +292,35 @@ describe('scheduling', () => {
     expect(H.sweep.nextAllowedAt).toBe(0);
     expect(H.timers).toHaveLength(0);
   });
+
+  // Found on a live server: the owner creates a room (a sweep runs), invites
+  // someone, they accept nine seconds later - and the wake-up for that landed
+  // inside the interval and was thrown away. They had no key until the owner
+  // happened to do something that asks again.
+  test('a trigger inside the interval runs when the interval ends, not never', async () => {
+    const H = harness();
+    await H.sweep.run({ reason: 'room_open' });
+    H.island.pages = [gaps([7, 'bob'])];
+    H.advance(9000);
+    H.sweep.schedule('notify', { roomId: 7 });
+    await H.fireDue();
+    expect(H.calls.share).toEqual([]);
+    // One timer, for the end of the interval - not one that fires at once,
+    // finds the interval still running and sets another, for a minute.
+    expect(H.timers).toHaveLength(1);
+    expect(H.timers[0].at).toBe(H.sweep.nextAllowedAt);
+    H.advance(L.MIN_INTERVAL_MS - 9000);
+    await H.fireDue();
+    expect(H.calls.share).toEqual(['7:bob']);
+    expect(H.timers).toHaveLength(0);
+  });
+
+  test('a locked client waits for the unlock, not for a timer', async () => {
+    const H = harness();
+    H.island.ready = false;
+    H.sweep.schedule('notify', { roomId: 7 });
+    await H.fireDue();
+    expect(H.calls.fetch).toEqual([]);
+    expect(H.timers).toHaveLength(0);
+  });
 });
