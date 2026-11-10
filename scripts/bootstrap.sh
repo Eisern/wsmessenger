@@ -184,12 +184,17 @@ fi
 # 4. Python virtualenv + dependencies
 # ---------------------------------------------------------------------------
 log "Setting up Python virtualenv"
-sudo -iu "${WSAPP_USER}" -- bash -c "
-    set -e
-    python3 -m venv '${VENV_DIR}'
-    '${VENV_DIR}/bin/pip' install --upgrade pip
-    '${VENV_DIR}/bin/pip' install -r '${WSAPP_INSTALL_DIR}/server/requirements.txt'
-"
+# One command per sudo, and no `sudo -i ... bash -c "<several lines>"`: with
+# -i, sudo escapes every newline in the arguments into a line continuation, so
+# such a script runs as the single line `set -e python3 -m venv ...` - which
+# sets positional parameters, succeeds, and creates nothing.
+sudo -u "${WSAPP_USER}" -H python3 -m venv "${VENV_DIR}"
+sudo -u "${WSAPP_USER}" -H "${VENV_DIR}/bin/pip" install --upgrade pip
+sudo -u "${WSAPP_USER}" -H "${VENV_DIR}/bin/pip" install -r "${WSAPP_INSTALL_DIR}/server/requirements.txt"
+if [[ ! -x "${VENV_DIR}/bin/python" || ! -x "${VENV_DIR}/bin/uvicorn" ]]; then
+    echo "error: the virtualenv in ${VENV_DIR} was not created" >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 5. PostgreSQL + schema + .env
