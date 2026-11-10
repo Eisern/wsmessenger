@@ -12,6 +12,17 @@ certificate.
 > island identity from §8.3) in one go on a
 > fresh Debian 12 or Ubuntu 22.04/24.04 host. Read the rest of this
 > file to understand what it does and to deploy manually if you prefer.
+> Point the domain's A record at the server first (the certificate needs
+> it), then, as a user with sudo:
+>
+> ```sh
+> curl -fsSLO https://raw.githubusercontent.com/Eisern/wsmessenger/main/scripts/bootstrap.sh
+> sudo WSAPP_DOMAIN=messenger.example.com \
+>      WSAPP_LETSENCRYPT_EMAIL=you@example.com \
+>      bash bootstrap.sh
+> ```
+>
+> It clones the repository itself. Re-running it later is how you update.
 
 > **What the server does, and what it does not.** The backend stores
 > user accounts, public keys, encrypted message ciphertext, and media

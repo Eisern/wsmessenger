@@ -461,6 +461,10 @@ if [[ "${WSAPP_SKIP_CERTBOT}" != "1" ]]; then
         --redirect
 else
     warn "WSAPP_SKIP_CERTBOT=1 — nginx is serving plain HTTP only. Clients require HTTPS."
+    warn "The island list names http:// entry points, and a contact card carries them."
+    warn "Once TLS is in place, change ISLAND_ENTRY_POINTS in ${ENV_FILE} to https:// and"
+    warn "wss://, raise ISLAND_LIST_VERSION by one, and restart: re-running this script"
+    warn "does not rewrite a list it finds there (docs/self-hosting.md §8.3)."
 fi
 
 # ---------------------------------------------------------------------------
