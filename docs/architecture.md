@@ -299,9 +299,13 @@ The legacy transport (`unlock_kek_set`) is disabled server-side in
 the worker and refuses any inbound message
 ([`background.js#L1732`](../chrome_extension/background.js#L1732)).
 
-The decrypted X25519 private key is **never held in the panel** —
-the panel calls the background via RPC whenever it needs a crypto
-operation.
+The panel then decrypts the EPK itself and imports the X25519 identity
+key as a non-extractable `CryptoKey` into `CryptoManager`, where it
+stays until lock or logout. The **service worker never holds it**:
+`background.js` loads no crypto code (it imports only `endpoints.js`),
+and keeps only `_masterKey`, `_unlockKekKey` and the handoff key pairs.
+Unwrapping, signing and message decryption all happen in the panel —
+the worker is a transport, not a crypto oracle.
 
 ---
 
@@ -329,13 +333,29 @@ checked on decrypt; a ciphertext produced under one `kid` cannot be
 verified against another
 ([`crypto-manager.js#L240`](../chrome_extension/crypto-manager.js#L240)).
 
+**Signature (since 0.5.0).** A room key proves membership and nothing
+more: without a signature, a message's author is whoever the server
+wrote in the row. So the plaintext is an envelope
+`{rs: 1, from, body, sig}`, where `sig` is the author's Ed25519
+signature over
+
+```
+ "ws-room-sig-v1" ‖ u32BE(room_id) ‖ u16BE(len(from)) ‖ from ‖ body
+```
+
+(`_roomSigMessage` in `crypto-utils.js`; the domain differs from the
+DM one, so a signature cannot be replayed between the two). Readers
+check it against the author's **pinned** Ed25519 key and report
+`sigValid` / `mismatch`. A message that is a plain string is history
+from before signatures and is shown as such.
+
 ---
 
 ## Room key wrapping format
 
-When a room key is shared with a user (on invite accept, on
-rotation, or to oneself at room creation), the key is wrapped
-as follows:
+When a room key is shared with a user (when they become a member, on
+rotation, or to oneself at room creation), the key is wrapped for
+their X25519 public key:
 
 ```
  shared   = X25519 ECDH( ephemeral_priv, recipient_pub )          (32 bytes)
@@ -356,6 +376,64 @@ different blobs.
 
 The server stores these blobs (and the corresponding `kid`) in the
 `chat_room_keys` / `chat_dm_keys` tables. It cannot read them.
+
+### Signed wraps (v3, since 0.5.0)
+
+A v2 wrap is anonymous — the ephemeral key says nothing about who made
+it — and the rows are written by the server. A dishonest server could
+therefore hand a member a room key it made up itself, and read
+everything that member then writes. A v3 wrap says who made it, inside
+the blob, where the server cannot drop it without breaking decryption:
+
+```
+ blob = 0x03 ‖ ephemeral_pub (32) ‖ iv (12) ‖ sig (64)
+        ‖ u8 len(signer) ‖ signer ‖ AES-GCM(ct ‖ tag)
+
+ sig  = Ed25519( "ws-keywrap-v1"
+                 ‖ u8 len(scope) ‖ scope ‖ u32BE(scope_id)      scope = "room" | "dm"
+                 ‖ u16BE len ‖ signer ‖ u16BE len ‖ recipient    both lower-cased
+                 ‖ u16BE len ‖ key_id
+                 ‖ ephemeral_pub ‖ iv ‖ ciphertext )
+```
+
+So a genuine wrap cannot be re-filed as another room's key or another
+member's copy. Readers decide in one place (`acceptWrappedKey` in
+`panel-crypto.js`, `_acceptWrappedKey` in Android's `CryptoService.js`)
+and **refuse** rather than flag:
+
+- a signed wrap must verify under the signer's **pinned** Ed25519 key,
+  and the signer must be entitled to hand the key out (the DM peer, or
+  a member of the room);
+- an unsigned wrap may only hand back a key the device already holds,
+  never introduce a new one.
+
+Writers throw rather than produce an unsigned wrap. The one exception is
+a new room's own key, before the room has an id; it is replaced by a
+signed one as soon as it does.
+
+## Room key delivery
+
+A new member gets the room key by somebody wrapping it for them —
+the server never holds it in the clear. Delivery is **pull-driven
+backfill**, so it does not depend on the owner being online at the
+moment someone joins:
+
+- `GET /crypto/rooms/key-gaps` lists accepted members who have no key
+  row, in the rooms the caller may serve (the owner and admins). The
+  state is derived, not stored.
+- `POST /crypto/room/{id}/share` with `if_absent: true` fills a gap
+  only; the server forces it for everyone but the owner, so only the
+  owner can replace an existing key (rotation depends on that).
+- `/ws-notify` sends `notify_key_gap` (just a room id) when someone
+  becomes a member, as a wake-up.
+- Both clients run the same sweep, `key-sweep.js` (byte-identical in
+  the extension and on Android): one run at a time, at least 60 s
+  apart, backing off after infrastructure trouble or a 429, a 10-minute
+  cooldown per failed member, and a 30-minute hold on a member whose
+  key changed until they are verified. It runs on start-up, unlock, the
+  wake-up, a membership change, a moderator opening the room, and the
+  manual **Send missing keys**. Locked means deferred; it never asks for
+  a password.
 
 ---
 
@@ -506,7 +584,44 @@ byte-identical to the Android copy.
 - **Delivery is the sealed-sender path above**, pointed at another
   island.
 
-Not covered yet: rooms, and attachments.
+Not covered yet: attachments. Rooms are, by guests (below).
+
+### Guests in rooms
+
+A room's owner or admin can invite one of their cross-island contacts
+into a room. The guest's client then talks to **the room's island**
+directly, as a guest there:
+
+- **Created from the card.** `POST /rooms/{id}/guests` takes the
+  contact card; the island checks it on its own (the kid is the hash of
+  the X25519 key, the card is signed by the Ed25519 key it carries) and
+  finds or creates a `users` row bound to that key, with a `!guest`
+  password marker, recorded in `chat_foreign_guests`.
+- **Signs in with the key, never a password.** The guest signs
+  `"ws-guest-session-v1"` + island id + kid + a one-time nonce
+  (`POST /foreign/guest/session`) and gets an access token only — no
+  refresh token, so the key is needed for every session.
+- **Reaches only its rooms.** Guest-ness is read from the database,
+  never from a token claim, and `guest_scope_middleware` holds a
+  guest's token to an allow-list (`_GUEST_ALLOWED`): a new endpoint is
+  closed to guests until it is added there. `/ws-dm` refuses guests
+  explicitly. `ISLAND_ACCEPT_GUESTS=0` turns all of it off.
+- **Neither island can swap a key.** The moderator pins the guest's
+  keys from the card under the name the island returns, before anything
+  else uses that name; the guest pins the inviter from the inviter's
+  card. Room keys and message signatures in a guest room go through the
+  same `acceptWrappedKey` / signature checks as at home, with pins kept
+  per island, never mixed with home.
+- **The invitation travels inside a cross-island DM** (`ROOMINV1::…`),
+  and is followed only to the inviter's island *as their card says*;
+  the island id in the invitation is a consistency check, never an
+  address.
+
+The protocol is `guest-rooms.js` and the feed ordering (socket before
+history, de-duplication, resync after a reconnect, serialized draws)
+`guest-room-feed.js`, each byte-identical between the two clients. Not
+in guest rooms yet: files, history beyond the last 100 messages,
+unread markers, and relays for guest traffic.
 
 ### Relays
 
@@ -554,7 +669,8 @@ username) — see
 | RN `AsyncStorage` (Android) | Rooms, pinned context, UI prefs, server config, *encrypted* message history | Until user clears |
 | `react-native-keychain` (Android) | Auth tokens, raw identity key for silent re-unlock, history-encryption keys, TOFU fingerprints | Android Keystore |
 | Server PostgreSQL | Public keys, wrapped room/DM keys, ciphertext, metadata, delivery secrets | Persistent |
-| Service worker RAM | `_masterKey`, `_unlockKekKey`, identity `CryptoKey`, room key `CryptoKey`s, JWT, DM delivery secrets | Until lock / logout / 10 min idle |
+| Side panel RAM (extension) | Identity `CryptoKey`, room / DM key `CryptoKey`s (non-extractable, in `CryptoManager`) | Until lock / logout |
+| Service worker RAM | `_masterKey`, `_unlockKekKey`, handoff key pairs, JWT, DM delivery secrets | Until lock / logout / 10 min idle |
 
 The server database contains **no identity private key material**
 and **no message plaintext**. Wrapped room/DM keys are not
@@ -601,6 +717,9 @@ Sees:
 - For each cross-island mailbox: its local owner and the other person's
   public keys (see
   [What each island learns](#what-each-island-learns-about-a-cross-island-conversation)).
+- For each guest from another island: the public keys and display name
+  from their contact card, and the rooms they are in — what it knows
+  about any member. Their own island learns nothing about it.
 
 Does not see:
 

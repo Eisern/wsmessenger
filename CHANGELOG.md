@@ -8,6 +8,15 @@ they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
 ## Unreleased
 
+### Read this first, if you run a server
+
+- **Guests from other islands are accepted as soon as `ISLAND_ID` is set** —
+  also on a server that had the island identity before this version, with
+  nothing to opt in to. `ISLAND_ACCEPT_GUESTS=0` in `.env` refuses them.
+- No schema change and no new required setting. The guest table is created on
+  first use, as the archive tables are: the database user must be allowed to
+  create tables (the database owner is, as in `docs/self-hosting.md`).
+
 ### Added — rooms across islands, server side
 
 Somebody from another island can now take part in a room here as a **guest**:
@@ -134,6 +143,46 @@ island - waited for somebody's browser extension.
   room owner re-shares it (Rooms → Manage → Members → *Re-share key*). Guests
   from other islands are the common case: their name is built from the display
   name on their card.
+- **`scripts/bootstrap.sh` did not work on a fresh server.** Its virtualenv
+  step ran as `sudo -iu wsapp -- bash -c "<several lines>"`; with `-i`, sudo
+  escapes newlines into line continuations, so the script ran as one line
+  (`set -e python3 -m venv ...`), created nothing and succeeded. The install
+  stopped two steps later (`.venv/bin/python: No such file or directory`),
+  after the database and `.env` were made. One command per sudo now, and the
+  script checks the venv exists. Verified by installing on Ubuntu 24.04.
+  With `WSAPP_SKIP_CERTBOT=1` it also writes `http://` entry points into the
+  island list, which a contact card then carries; it now says what to change
+  once TLS is in place.
+- **A new member got no room key if they accepted within a minute of the
+  owner's last key sweep** (both clients). That is the usual case - create a
+  room, invite someone, they accept - and the wake-up for it landed inside the
+  sweep's 60-second interval and was thrown away; the key came only when the
+  owner happened to do something that asks again. It now runs when the
+  interval ends. Found on a live server.
+- **Every invitation ended in "Invite OK, but key share failed"**
+  (extension). The panel handed the key to the invitee at once, which the
+  island refuses until they accept. The key goes over when they accept.
+- **Friend requests stopped arriving about four minutes after signing in**
+  (extension). A background poll asked for the three friends lists every
+  10-15 s; they share one island limit of 60 per user per 10 minutes, so
+  every panel ran into 429 and stayed there. They are asked about once a
+  minute now; the DM list and room invitations keep the short cycle.
+- **A room on another server showed nothing in the extension.**
+  `guest-room-feed.js` handed the browser's `setTimeout` around as a method of
+  a plain object; Chrome refuses that ("Illegal invocation"), Node does not,
+  so every test passed while in the browser the wait for the room's socket
+  failed and no history was drawn. Messages sent afterwards still arrived.
+  Found by driving the extension in Chromium against two islands. Android
+  should not have been affected - React Native's timers are plain functions
+  that do not care how they are called - but that was not tried on a device.
+- **After unlocking, the open room stayed empty, or short of what arrived
+  while locked** (extension). A message that comes in while locked cannot be
+  decrypted and is dropped, and a history that comes back meanwhile clears the
+  chat without drawing it. Unlocking was meant to read the room again, but
+  called a function that never existed - since the first commit - inside a
+  `try/catch` that hid it, and only from the overlay's **Unlock** button.
+  Every unlock now reads the open room or conversation again, including one
+  asked for by an action (*My card*, an invitation).
 - **A server socket being closed for a revoked session or a ban swallowed
   its own cancellation.** Ten `return`s inside `finally` turned anything
   `ws.close()` raised - `asyncio.CancelledError` too, which is how a shutdown
@@ -168,6 +217,18 @@ island - waited for somebody's browser extension.
   local members. CI runs them against a `postgres:17` service. Each protection
   was checked by removing it: the allow-list, the `/ws-dm` refusal, the nonce
   spend and both signature checks each fail their own tests.
+- `keySweep.test.js`: a trigger inside the interval runs when it ends - on
+  one timer, at the end, not a timer that fires at once and sets another;
+  a locked client waits for the unlock. `extensionInviteKey.test.js` and
+  `extensionPollBudget.test.js` run the real code from `panel.js`; the poll
+  test reads the island's limit from `server/main.py`, so a change on either
+  side is checked against the other. Each fails without its fix.
+- `extensionUnlockHistory.test.js` runs the real unlock path from `panel.js`
+  (the retry and the `ws_crypto_unlocked` listener): the room is read again,
+  only if it is still the one on screen, and not into a conversation or a
+  guest room. `guestRoomFeed.test.js` gained a run under timers that refuse to
+  be called as methods, as a browser's do. Each of the 7 guards, removed in
+  turn, fails a test; the timer test failed before the fix.
 - `server/tests/test_account.py` — turning 2FA off (either factor, never
   neither); a revoked session turned away by all three sockets when it
   connects and, on `/ws-dm`, mid-session by the socket's own check; and an

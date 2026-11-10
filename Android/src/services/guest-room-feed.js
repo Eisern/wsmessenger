@@ -77,7 +77,14 @@
    * @param {function} [o.log]
    */
   function createFeed(o) {
-    const T = o.timers || { setTimeout, clearTimeout, setInterval, clearInterval };
+    // Wrapped, not passed bare: a browser's setTimeout throws "Illegal
+    // invocation" when called as a method of anything but the window.
+    const T = o.timers || {
+      setTimeout: (fn, ms) => setTimeout(fn, ms),
+      clearTimeout: (h) => clearTimeout(h),
+      setInterval: (fn, ms) => setInterval(fn, ms),
+      clearInterval: (h) => clearInterval(h),
+    };
     const now = o.now || (() => Date.now());
     const log = o.log || (() => {});
 

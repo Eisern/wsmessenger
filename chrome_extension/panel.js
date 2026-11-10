@@ -207,8 +207,16 @@ async function retryPendingHistoryAfterUnlock() {
       return;
     }
 
-    try { requestRoomHistory?.(rid); } catch {}
-  } catch {}
+    // Read the page again: whatever arrived while locked was dropped, and a
+    // history that came back meanwhile cleared the chat without drawing it.
+    // Only if the room is still the one on screen; otherwise opening it reads it.
+    if (Number(activeRoomId) === Number(rid) && !dmMode && !activeGuestRoom) {
+      renderedHistoryRoomId = null;
+      safePost({ type: "history_get", roomId: rid, limit: HISTORY_PAGE_SIZE });
+    }
+  } catch (e) {
+    console.warn("retryPendingHistoryAfterUnlock failed:", e?.message || e);
+  }
 }
 
 /**
@@ -1323,9 +1331,9 @@ function __ensureCryptoLockOverlay() {
       try {
         const ok = await ensureCryptoReady({ interactive: true, reason: "Unlock chat" });
         if (!ok) return;
+        // The unlock announced itself ("ws_crypto_unlocked"), and the
+        // listener for that reads the open room or conversation again.
         __setCryptoUiLocked(false);
-        try { await retryPendingHistoryAfterUnlock?.(); } catch {}
-        try { await retryPendingDmAfterUnlock?.(); } catch {}
       } catch (e) {
         try { await __ui.alert("Crypto unlock failed: " + (e?.message || e)); } catch {}
       }
@@ -1377,6 +1385,11 @@ window.addEventListener("ws_crypto_locked", () => {
 });
 window.addEventListener("ws_crypto_unlocked", () => {
   __setCryptoUiLocked(false);
+  // Every way of unlocking ends here - the button on the overlay, and a
+  // password asked for by an action (My card, an invitation). Each leaves the
+  // open room or conversation as stale as the other, so each reads it again.
+  retryPendingHistoryAfterUnlock().catch(() => {});
+  retryPendingDmAfterUnlock().catch(() => {});
 });
 window.addEventListener("ws_crypto_lock_state", (ev) => {
   const locked = !!ev?.detail?.locked;
@@ -2247,19 +2260,13 @@ if (msg.type === "rooms_invite") {
 
       await __ui.alert(`Invited: ${uname}`);
 
-      try {
-        if (!rid) throw new Error("No roomId");
-        const isOwner = !!roomOwnerById[String(rid)];
-        if (!isOwner) return;
-
-        await shareRoomKeyToUser(rid, uname);
-        console.log("Room key shared to", uname);
-      } catch (e) {
-        console.warn("Key share failed:", e?.message || e);
-        await __ui.alert("Invite OK, but key share failed: " + (e?.message || e));
-      } finally {
-        requestMyRooms();
-      }
+      // The key follows when they accept: the island wakes the sweep then
+      // (notify_key_gap). Handed over now it could only be refused - the
+      // island gives keys to members, and an invitee is not one yet - and
+      // every invitation ended in "key share failed". A sweep here still
+      // covers someone who was a member without a key all along.
+      if (rid) scheduleRoomKeySweep("invite", { roomId: rid });
+      requestMyRooms();
     } else {
       await __ui.alert(msg.message || "Invite failed");
     }
@@ -3095,11 +3102,22 @@ function __startPortLoopOnce() {
 
   // Periodic notification poll: friend requests, room invites, DM unread badges.
   // Uses randomised delay (10–15 s) so requests don't form a detectable fixed-interval pattern.
+  //
+  // The three friends lists share one island rate limit (RL_FRIENDS_LIST_*:
+  // 60 per user and 120 per address per 10 min). Asked every cycle, one idle
+  // panel spent it in about four minutes and got 429 from then on, so friend
+  // requests stopped arriving. They are asked every FRIENDS_POLL_EVERY cycles
+  // - at most half the limit - and the DM list and room invitations, which
+  // have no such limit, keep the short cycle.
+  const FRIENDS_POLL_EVERY = 6;
+  let __notifPollCycle = 0;
   (function __scheduleNotifPoll() {
     const delay = 10000 + Math.random() * 5000;
     setTimeout(() => {
       if (isLoggedIn) {
-        try { requestFriendsAll(); } catch {}
+        if (__notifPollCycle++ % FRIENDS_POLL_EVERY === 0) {
+          try { requestFriendsAll(); } catch {}
+        }
         try { safePost({ type: "dm_list" }); } catch {}
         // requestGroupInvites() is triggered automatically by dm_list_res handler
       }

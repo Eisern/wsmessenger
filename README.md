@@ -68,11 +68,14 @@ Both clients can be pointed at your own server at runtime, with no
 rebuild and no source edit:
 
 - **Chrome extension** — on the login screen, open **"Connect to another
-  server"**, enter your API base, and save. The extension asks for host
-  permission for that origin and stores the choice; the author's hosts
-  remain only as defaults.
-- **Android** — Login screen → **"Connect to another server"**. Saved
-  per device.
+  server"**, remove the author's default from the list (×), add your API
+  base, and save. The extension asks for host permission for that origin and
+  stores the choice; the author's hosts remain only as defaults.
+- **Android** — Login screen → **"Connect to another server"**, the same
+  way. Saved per device.
+
+Remove the default first: an address added next to it becomes its second
+entry point, and the client keeps using the first while it answers.
 
 Your server must be reachable over **HTTPS**. The extension's content
 security policy allows `https:` and `wss:` only, and its optional host
@@ -87,7 +90,9 @@ delivers into a mailbox on the other's server — the servers never
 connect to each other and do not have to trust each other. A server
 needs an *island identity* for this; `scripts/bootstrap.sh` sets it up,
 and [`docs/self-hosting.md` §8.3](docs/self-hosting.md#83-talking-to-other-servers-islands)
-covers doing it by hand. Rooms and attachments do not cross servers yet.
+covers doing it by hand. A room's owner or admin can also bring someone
+from another server into a room, as a **guest** who signs in with the key
+on their card; attachments do not cross servers yet.
 The design, and what each server learns, is in
 [`docs/architecture.md`](docs/architecture.md#islands-several-addresses-several-servers).
 
