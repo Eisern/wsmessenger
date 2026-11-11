@@ -2415,8 +2415,11 @@ function clearChat(opts = {}) {
   const resetKeyAlerts = opts.resetKeyAlerts !== false;
   if (chat) chat.innerHTML = "";
   lastMsgAuthor = "";
-  // The room signature notices went with the DOM; let them be drawn again.
+  // The signature notices went with the DOM; let them be drawn again. A history
+  // drawn twice (once on open, again once the key is in) used to lose every
+  // once-per-sender note on the second pass.
   try { if (typeof _roomSigNoticeShown !== "undefined") _roomSigNoticeShown.clear(); } catch {}
+  try { if (typeof _sigUnverifiedShown !== "undefined") _sigUnverifiedShown.clear(); } catch {}
   try { updatePinnedBar?.(); } catch {}
   // Reset only when switching context, not while appending older history.
   if (resetKeyAlerts) {

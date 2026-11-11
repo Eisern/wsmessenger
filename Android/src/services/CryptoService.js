@@ -1118,14 +1118,26 @@ const CryptoService = {
       try {
         const inner = JSON.parse(decrypted);
         if (inner?.ss === 1 && inner.body !== undefined) {
-          const from = inner.from || null;
+          const from = inner.from ? String(inner.from) : null;
           const sig  = inner.sig  || null;
 
-          // Verify Ed25519 signature when present.
-          // sigValid: true = verified OK, false = bad sig (forgery), null = not checked.
+          // sigValid: true = verified OK, false = forged, null = signed but no
+          // key to check it; `unsigned` when there was no signature at all
+          // (the extension's decryptDm says the same). Every writer signs,
+          // puts its name in `from` and a string in `body`: an envelope
+          // without those, or with a signature that cannot be read, was made
+          // up - false, not "unknown".
+          const forged = { text: String(inner.body), from, sigValid: false, chain: null };
+          if (!from || typeof inner.body !== 'string') return forged;
+          let sigBytes = null;
+          if (sig) {
+            try { sigBytes = new Uint8Array(CryptoUtils.base64ToArrayBuffer(String(sig))); } catch (_e) { sigBytes = null; }
+            if (!sigBytes || sigBytes.length !== 64) return forged;
+          }
+
           let sigValid = null;
           let sigMsgBytes = null;
-          if (sig && from) {
+          if (sigBytes) {
             try {
               // Resolved, not read off NetworkService: after a fresh sign-in
               // that field is empty (the login response carries no name), and
@@ -1164,13 +1176,18 @@ const CryptoService = {
                 if (foreign && mine && foreign.outbox?.threadId) tids.push(foreign.outbox.threadId);
                 tids.push(threadId);
 
-                const sigBytes = new Uint8Array(CryptoUtils.base64ToArrayBuffer(sig));
                 let sigMsg = null;
                 for (const tid of tids) {
                   sigMsg = chained
                     ? CryptoUtils._dmSigMessageV2(tid, inner.sq, inner.pv, from, String(inner.body))
                     : CryptoUtils._dmSigMessage(tid, from, String(inner.body));
-                  sigValid = CryptoUtils.ed25519Verify(peerPubKey, sigBytes, sigMsg);
+                  // A check that throws on these bytes is a signature that
+                  // does not hold - not "could not be checked".
+                  try {
+                    sigValid = !!CryptoUtils.ed25519Verify(peerPubKey, sigBytes, sigMsg);
+                  } catch (_e) {
+                    sigValid = false;
+                  }
                   if (sigValid === true) break;
                 }
                 sigMsgBytes = chained ? sigMsg : null;
@@ -1179,7 +1196,9 @@ const CryptoService = {
                 }
               }
             } catch (verifyErr) {
-              if (__DEV__) console.warn('[CryptoService] Ed25519 verify error:', verifyErr?.message);
+              // Finding the key failed; the signature was readable and
+              // verifying is handled above. "Could not be checked": null.
+              if (__DEV__) console.warn('[CryptoService] no signing key to check against:', verifyErr?.message);
             }
           }
 
@@ -1199,13 +1218,14 @@ const CryptoService = {
               } catch (_e) { /* leave link null; the run reports it as unchained */ }
             }
           }
-          return { text: String(inner.body), from, sigValid, chain };
+          return { text: String(inner.body), from, sigValid, chain, ...(sigBytes ? {} : { unsigned: true }) };
         }
       } catch (_e) {}
 
-      // Non-sealed messages should not appear in DMs — treat as opaque text
+      // Non-sealed messages should not appear in DMs. Nothing says who wrote
+      // one, and it used to be shown as if from the peer with no mark at all.
       if (__DEV__) console.warn('[decryptDm] message lacks sealed sender envelope');
-      return { text: decrypted, from: null, sigValid: null };
+      return { text: decrypted, from: null, sigValid: null, unsigned: true };
     } catch (_e) {
       if (__DEV__) console.warn('[decryptDm] outer catch:', _e?.message);
       return null;

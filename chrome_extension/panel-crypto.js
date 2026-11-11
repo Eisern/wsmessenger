@@ -2239,16 +2239,45 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
   const decrypted = await CM().decryptMessage(rid, parsed);
 
   // Sealed Sender: try to unwrap {ss:1, from, body, sig?} envelope
+  //
+  // What comes back says what the envelope proves, the same way a room
+  // message does (openRoomEnvelope): sigValid true / false / null, and
+  // `unsigned` when there was no signature to check. Every writer signs, puts
+  // its own name in `from` and a string in `body`; an envelope without those,
+  // with a signature that cannot be read, or naming somebody who is not in
+  // this conversation, was made up - false, not "unknown".
   try {
     if (typeof decrypted === "string" && decrypted.startsWith("{")) {
       const inner = JSON.parse(decrypted);
       if (inner && inner.ss === 1 && inner.body !== undefined) {
-        const from = inner.from || null;
-        const fromLower = from ? String(from).trim().toLowerCase() : "";
+        const from = inner.from ? String(inner.from) : null;
+        const fromLower = from ? from.trim().toLowerCase() : "";
         let sigValid = null;
         let chainInfo = null;
+        let unsignedEnvelope = false;
+        const forged = (extra = {}) => ({
+          text: String(inner.body), sealedFrom: from, sealed: true, sigValid: false, chain: null, ...extra,
+        });
 
-        if (inner.sig && from) {
+        if (!from || typeof inner.body !== "string") return forged();
+
+        // Two people are in a direct conversation. A name that is neither of
+        // them is somebody holding the thread key writing as a third party -
+        // shown under that name, it would only have earned a quiet note. Not
+        // across islands, where the contact's card key decides who wrote it.
+        const meLower = String(getMeUsername() || "").trim().toLowerCase();
+        const peerLower = String(peerUsername || "").trim().toLowerCase();
+        if (!__foreignThread && meLower && peerLower && fromLower !== meLower && fromLower !== peerLower) {
+          return forged({ notParticipant: true });
+        }
+
+        let sigBytes = null;
+        if (inner.sig) {
+          try { sigBytes = new Uint8Array(CU().base64ToArrayBuffer(String(inner.sig))); } catch { sigBytes = null; }
+          if (!sigBytes || sigBytes.length !== 64) return forged();
+        }
+
+        if (sigBytes) {
           try {
             // A cross-island contact has no entry in this island's key store,
             // and should not need one: their signing key came from the contact
@@ -2294,13 +2323,18 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
               }
               __ownTids.push(threadId);
 
-              const sigBytes = new Uint8Array(cu.base64ToArrayBuffer(inner.sig));
               let sigMsg = null;
               for (const tid of __ownTids) {
                 sigMsg = chained
                   ? cu._dmSigMessageV2(tid, inner.sq, inner.pv, from, inner.body)
                   : cu._dmSigMessage(tid, from, inner.body);
-                sigValid = await cu.ed25519Verify(peerPub, sigBytes, sigMsg);
+                // A check that throws on these bytes is a signature that does
+                // not hold - not "could not be checked".
+                try {
+                  sigValid = !!(await cu.ed25519Verify(peerPub, sigBytes, sigMsg));
+                } catch {
+                  sigValid = false;
+                }
                 if (sigValid === true) break;
               }
               if (chained) {
@@ -2328,13 +2362,13 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
               // sigValid = null (already the default)
             }
           } catch (e) {
-            console.warn("DM Ed25519 verify error:", e?.message || e);
-            // Crypto-level error (e.g., malformed key, bad sig format).
-            // Leave sigValid=null — we can't prove forgery if the check
-            // itself failed to run.
-            // sigValid = null (already the default)
+            console.warn("DM: no signing key to check against:", e?.message || e);
+            // Finding the key failed (a malformed card key, storage). The
+            // signature itself was readable and verifying is handled above,
+            // so this is "could not be checked": sigValid stays null.
           }
         } else if (fromLower) {
+          unsignedEnvelope = true;
           // No signature on the envelope. Flag as forgery ONLY if this
           // message postdates the earliest signed message we've locally
           // observed from this peer (time-aware TOFU). Pre-rollout
@@ -2348,12 +2382,30 @@ async function decryptDm(threadId, text, peerUsername, msgTs) {
           // else: leave sigValid === null (legacy / first-seen, allowed but warned)
         }
 
-        return { text: inner.body, sealedFrom: from, sealed: true, sigValid, chain: chainInfo };
+        return {
+          text: inner.body, sealedFrom: from, sealed: true, sigValid, chain: chainInfo,
+          ...(unsignedEnvelope ? { unsigned: true } : {}),
+        };
       }
     }
   } catch {}
 
-  // Legacy (non-sealed) message — return plain string
+  // No envelope at all: nothing says who wrote it, and it used to be shown
+  // under the peer's name with no mark - a way around the rule above that an
+  // unsigned message is forged once its sender is known to sign. Now it is
+  // what it is: unsigned, forged on the same terms, under the peer's name
+  // (the caller falls back to it, as before). `sealed` routes it through the
+  // caller's verdict branch.
+  if (typeof decrypted === "string") {
+    let sigValid = null;
+    const peerLower = String(peerUsername || "").trim().toLowerCase();
+    if (peerLower && !__foreignThread) {
+      try {
+        if (await _shouldFlagUnsignedAsForged(peerLower, msgTs)) sigValid = false;
+      } catch { /* stays null */ }
+    }
+    return { text: decrypted, sealedFrom: null, sealed: true, sigValid, chain: null, unsigned: true };
+  }
   return decrypted;
 }
 

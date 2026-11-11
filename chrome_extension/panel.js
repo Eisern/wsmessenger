@@ -2509,8 +2509,7 @@ if (msg.type === "dm_open_ok") {
   try { __clearDmUnread(threadId); } catch {}
 
   setModeDm(threadId, peer);
-  clearChat();
-  _sigUnverifiedShown.clear(); // reset per-thread unverified banner dedup
+  clearChat();   // also resets the once-per-sender signature notes
   __resetDmHistoryPaging(threadId);
   __dmHistoryLimitByThread.set(threadId, HISTORY_PAGE_SIZE);
 
@@ -2622,7 +2621,6 @@ if (msg.type === "dm_history_res") {
           const { text: _t, reply: _r } = parseV2Payload(dec.text);
           text = _t; msgReply = _r;
           if (!user && dec.sealedFrom) user = dec.sealedFrom;
-          const meNameLower = String(meName || "").trim().toLowerCase();
           const senderLower = String(dec.sealedFrom || "").trim().toLowerCase();
           if (dec.chain) {
             // Collected now, checked once the whole page is decrypted: per
@@ -2635,14 +2633,7 @@ if (msg.type === "dm_history_res") {
               link: dec.chain.link,
             });
           }
-          if (dec.sigValid === false && typeof addSigFailWarning === "function") {
-            addSigFailWarning(dec.sealedFrom || user);
-          } else if (dec.sigValid === null && dec.sealedFrom && senderLower !== meNameLower
-              && !_sigUnverifiedShown.has(senderLower)
-              && typeof addSigUnverifiedWarning === "function") {
-            _sigUnverifiedShown.add(senderLower);
-            addSigUnverifiedWarning(dec.sealedFrom);
-          }
+          __warnAboutDmSignature(dec, user || historyPeer);
         } else {
           const raw = typeof dec === "string" ? dec : text;
           const { text: _t, reply: _r } = parseV2Payload(raw);
@@ -2719,16 +2710,7 @@ if (msg.type === "dm_message") {
           const { text: _t, reply: _r } = parseV2Payload(dec.text);
           t = _t; liveReply = _r;
           if (!user && dec.sealedFrom) user = dec.sealedFrom;
-          const _meL = String(meName || "").trim().toLowerCase();
-          const _sndrL = String(dec.sealedFrom || "").trim().toLowerCase();
-          if (dec.sigValid === false && typeof addSigFailWarning === "function") {
-            addSigFailWarning(dec.sealedFrom || user);
-          } else if (dec.sigValid === null && dec.sealedFrom && _sndrL !== _meL
-              && !_sigUnverifiedShown.has(_sndrL)
-              && typeof addSigUnverifiedWarning === "function") {
-            _sigUnverifiedShown.add(_sndrL);
-            addSigUnverifiedWarning(dec.sealedFrom);
-          }
+          __warnAboutDmSignature(dec, user || livePeer);
         } else {
           const raw = typeof dec === "string" ? dec : t;
           const { text: _t, reply: _r } = parseV2Payload(raw);
@@ -3638,6 +3620,37 @@ function __appendTextWithLinks(containerEl, text) {
  * words in their mouth.
  */
 const _roomSigNoticeShown = new Set();
+
+/**
+ * The same for a direct message (decryptDm's verdict). A forged one is shown
+ * every time; one with no signature, or no key to check it, once per sender
+ * per conversation (_sigUnverifiedShown, cleared when a thread opens) - our
+ * own name included: we always sign, so an unsigned message under our name is
+ * somebody holding the thread key writing as us.
+ *
+ * @param {object} dec       decryptDm's result (sealed)
+ * @param {string} fallback  who the message is shown under when the envelope
+ *                           names nobody (the peer)
+ */
+function __warnAboutDmSignature(dec, fallback) {
+  if (!dec || typeof dec !== "object") return;
+  try {
+    const who = dec.sealedFrom || fallback || "unknown";
+    if (dec.sigValid === false) {
+      if (typeof addSigFailWarning === "function") addSigFailWarning(who);
+      return;
+    }
+    if (dec.sigValid !== null) return;
+    const key = String(who).trim().toLowerCase();
+    if (!key || _sigUnverifiedShown.has(key)) return;
+    _sigUnverifiedShown.add(key);
+    if (typeof addSigUnverifiedWarning === "function") {
+      addSigUnverifiedWarning(who, dec.unsigned ? "unsigned" : "nokey");
+    }
+  } catch (e) {
+    console.warn("DM signature warning failed:", e?.message || e);
+  }
+}
 
 function __warnAboutRoomSignature(dec, claimedAuthor) {
   if (!dec || typeof dec !== "object") return;

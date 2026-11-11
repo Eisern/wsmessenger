@@ -872,8 +872,11 @@ export default function DMChatScreen({ navigation, route }) {
           return { ...base, _decrypted: messageText, ...replyProp, author: from, username: from, _sealedSenderMismatch: true };
         }
         const resolvedFrom = from || (msg.text && _sentBySelfCiphertexts.has(msg.text) ? _sentBySelfCiphertexts.get(msg.text).author : null);
-        // sigValid===null with known sender means no Ed25519 sig (absent or unverifiable) — flag for UI.
-        const sigUnverified = sigValid === null && from !== null && from.toLowerCase() !== meLower;
+        // sigValid===null: no signature, or no key to check it - flagged, our
+        // own name included (we always sign, so an unsigned message under our
+        // name is somebody holding the thread key writing as us), and so is a
+        // message with no envelope at all (result.unsigned, no name in it).
+        const sigUnverified = sigValid === null && (from !== null || !!result?.unsigned);
         // Chain position rides along untouched. It is checked over a sorted run
         // once the screen has its messages, never per message: history arrives
         // in pages, and checking one at a time invents a gap on every load.

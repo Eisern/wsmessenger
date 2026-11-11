@@ -156,8 +156,12 @@ describe('what the room shows', () => {
       window: {},
     };
     vm.createContext(sandbox);
+    const panel = source('panel.js');
+    // The set is declared at top level beside the function; the test needs both.
+    expect(panel).toContain('const _roomSigNoticeShown = new Set();');
     vm.runInContext(
-      block(source('panel.js'), 'const _roomSigNoticeShown = new Set();', '}')
+      'const _roomSigNoticeShown = new Set();\n'
+      + block(panel, 'function __warnAboutRoomSignature(', '}')
       + block(source('panel-ui.js'), 'function clearChat(opts = {}) {', '}'),
       sandbox, { filename: 'panel.js+panel-ui.js' },
     );
