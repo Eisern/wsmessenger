@@ -1,0 +1,57 @@
+name: deploy
+
+# Puts what CI just passed on main onto the production island, or - by hand,
+# from the Actions tab - whatever main holds now. The server decides what that
+# means (scripts/deploy/wsapp-deploy): it only goes forward along origin/main,
+# fetches the code itself, restarts only when server/ changed, backs up first,
+# and rolls back if /health does not come up.
+#
+# Setup: docs/self-hosting.md, "Automatic deploys from GitHub". Without the
+# three DEPLOY_* secrets this does nothing, so forks stay quiet.
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # A pull request from a fork whose branch happens to be called main also
+    # completes a ci run "on main". Only a push to this repository deploys.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    steps:
+      - name: Deploy
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          if [ -z "$DEPLOY_SSH_KEY" ] || [ -z "$DEPLOY_KNOWN_HOSTS" ] || [ -z "$DEPLOY_HOST" ]; then
+            echo "::notice::DEPLOY_* secrets are not set; nothing deployed."
+            exit 0
+          fi
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          # The key's forced command on the server runs wsapp-deploy with
+          # this commit id as its only argument; nothing else can be run.
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes -o ConnectTimeout=20 \
+              "wsdeploy@$DEPLOY_HOST" "$SHA"

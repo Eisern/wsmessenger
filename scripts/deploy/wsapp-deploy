@@ -1,0 +1,151 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# This file is part of WS Messenger. See LICENSE for terms.
+#
+# Deploy one commit of origin/main to this island. Run as root; the only
+# argument is the full 40-character commit id.
+#
+# Installed as /usr/local/sbin/wsapp-deploy and reached from GitHub Actions
+# (.github/workflows/deploy.yml) through an SSH key that can run nothing else
+# - see docs/self-hosting.md, "Automatic deploys from GitHub". It can also be
+# run by hand: sudo wsapp-deploy "$(git rev-parse origin/main)".
+#
+# What it will and will not do:
+#   - The code comes from origin (GitHub), never from whoever calls this. The
+#     caller only names a commit, and that commit must already be on
+#     origin/main - so a stolen deploy key can at most redeploy what the
+#     repository already holds.
+#   - It only moves forward. A commit that is older than the running one (two
+#     CI runs finishing out of order) is skipped, not deployed.
+#   - When nothing under server/ changed, the checkout is moved and the
+#     service is left alone.
+#   - Otherwise: backup first (if wsapp-backup.service exists), then the new
+#     code, dependencies if requirements.txt changed, restart, and /health.
+#     If /health does not answer, it goes back to the previous commit and
+#     fails loudly.
+#   - It never re-runs bootstrap.sh, which rewrites the nginx config.
+#   - It does not apply schema changes; it warns when server/schema.sql moved.
+#
+# Whatever the caller sees may end up in a public CI log, so only short
+# status lines go to stdout. Command output and the service journal on a
+# failure go to /var/log/wsapp-deploy.log.
+
+set -eu
+umask 022
+
+# Edit these if your install differs from scripts/bootstrap.sh's defaults.
+REPO=/home/wsapp/wsmessenger
+APP_USER=wsapp
+SERVICE=wsapp
+BACKUP_UNIT=wsapp-backup.service
+HEALTH_URL=http://127.0.0.1:8000/health
+BRANCH=main
+LOG=/var/log/wsapp-deploy.log
+LOCK=/run/wsapp-deploy.lock
+
+exec 3>&1
+exec >>"$LOG" 2>&1
+
+say() {
+    printf '%s\n' "$*" >&3
+    printf '%s %s\n' "$(date -Is)" "$*"
+}
+die() {
+    say "error: $*"
+    exit 1
+}
+short() { printf '%.12s' "$1"; }
+
+want=${1:-}
+case "$want" in
+    "" | *[!0-9a-f]*) die "expected a full commit id (40 hex characters)" ;;
+esac
+[ "${#want}" -eq 40 ] || die "expected a full commit id (40 hex characters)"
+
+# One deploy at a time; a second one waits for the first.
+exec 9>"$LOCK"
+flock 9
+
+cd /
+as_app() { runuser -u "$APP_USER" -- "$@"; }
+git_app() { as_app git -C "$REPO" "$@"; }
+
+say "deploy $(short "$want") requested"
+git_app fetch --quiet origin "$BRANCH" || die "could not fetch origin/$BRANCH"
+git_app cat-file -e "$want^{commit}" 2>/dev/null || die "$(short "$want") is not in the repository"
+git_app merge-base --is-ancestor "$want" "origin/$BRANCH" || die "$(short "$want") is not on origin/$BRANCH"
+
+old=$(git_app rev-parse HEAD)
+if [ "$old" = "$want" ]; then
+    say "already running $(short "$want")"
+    exit 0
+fi
+if ! git_app merge-base --is-ancestor "$old" "$want"; then
+    say "$(short "$want") is older than the running $(short "$old"); not going back"
+    exit 0
+fi
+[ "$(git_app symbolic-ref --quiet --short HEAD || true)" = "$BRANCH" ] || die "$REPO is not on branch $BRANCH"
+[ -z "$(git_app status --porcelain --untracked-files=no)" ] || die "$REPO has local changes; not overwriting them"
+
+changed() { ! git_app diff --quiet "$old" "$want" -- "$@"; }
+switch_to() { git_app reset --quiet --hard "$1"; }
+install_reqs() {
+    as_app "$REPO/.venv/bin/pip" install --quiet --disable-pip-version-check -r "$REPO/server/requirements.txt"
+}
+healthy() {
+    i=0
+    while [ "$i" -lt 30 ]; do
+        if curl -fsS -m 3 -o /dev/null "$HEALTH_URL"; then
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    return 1
+}
+
+if ! changed server/; then
+    switch_to "$want"
+    say "now at $(short "$want"); nothing under server/ changed, $SERVICE left running"
+    exit 0
+fi
+
+if changed server/schema.sql; then
+    say "warning: server/schema.sql changed between $(short "$old") and $(short "$want") - review it and migrate by hand"
+fi
+
+if systemctl cat "$BACKUP_UNIT" >/dev/null 2>&1; then
+    say "backing up first"
+    systemctl start "$BACKUP_UNIT" || die "backup failed; nothing deployed"
+fi
+
+reqs=no
+if changed server/requirements.txt; then reqs=yes; fi
+
+switch_to "$want"
+if [ "$reqs" = yes ]; then
+    say "installing dependencies"
+    if ! install_reqs; then
+        switch_to "$old"
+        install_reqs || true
+        die "dependencies failed to install; still on $(short "$old"), service not restarted"
+    fi
+fi
+
+# Whether it came up is /health's call, not restart's exit code - and a
+# failing restart must still reach the rollback below.
+systemctl restart "$SERVICE" || true
+if healthy; then
+    say "deployed $(short "$want") (was $(short "$old"))"
+    exit 0
+fi
+
+say "$(short "$want") did not come up; going back to $(short "$old")"
+journalctl -u "$SERVICE" -n 50 --no-pager || true
+switch_to "$old"
+if [ "$reqs" = yes ]; then install_reqs || true; fi
+systemctl restart "$SERVICE" || true
+if healthy; then
+    die "rolled back to $(short "$old"); $(short "$want") is NOT deployed (details in $LOG)"
+fi
+die "rollback to $(short "$old") did not come up either - $SERVICE is DOWN (details in $LOG)"

@@ -20,6 +20,8 @@ Requires PostgreSQL 13+ (tested on 17). Runtime dependencies are pinned in [`ser
 
 For a full self-hosting walkthrough (VPS, systemd, nginx + TLS, first admin, updates), see [`docs/self-hosting.md`](docs/self-hosting.md).
 
+Deploys: `.github/workflows/deploy.yml` runs after a green `ci` on a push to `main` and SSHes in with a forced-command key that can only run `scripts/deploy/wsapp-deploy <commit>` (installed as `/usr/local/sbin/wsapp-deploy`). The script fetches from origin itself, only moves forward along `origin/main`, restarts only when `server/` changed (backup first, `/health` after, rollback on failure) and never re-runs `bootstrap.sh`. Its tests (`scripts/deploy/test-wsapp-deploy.sh`) run in CI as `test-deploy`. Setup: `docs/self-hosting.md` §11.1.
+
 Schema lives in [`server/schema.sql`](server/schema.sql) — apply once with `psql -d <db> -f server/schema.sql` before starting the server. The server itself creates only a few tables on first use — the archives (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`) and, with `ISLAND_ID` set, the cross-island ones (`chat_dm_foreign_boxes`, `chat_foreign_challenges`, `chat_foreign_guests`), so the DB user must be allowed to create tables; base tables must exist before the first request.
 
 Configuration is via environment variables — copy `server/config.example.env` to `server/.env` and fill in values.

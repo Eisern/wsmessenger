@@ -706,6 +706,70 @@ it pulls the code, refreshes dependencies, the systemd unit and nginx, and adds
 whatever a newer version needs in `.env` (today: the island identity of §8.3)
 without touching the values already there.
 
+### 11.1 Automatic deploys from GitHub (optional)
+
+If your island runs a fork of this repository on GitHub, every push to `main`
+that passes CI can deploy itself. `.github/workflows/deploy.yml` connects over
+SSH with a key that can do exactly one thing: run
+[`scripts/deploy/wsapp-deploy`](../scripts/deploy/wsapp-deploy) with the commit
+id CI just tested. That script, on your server, decides the rest:
+
+- it fetches the code from `origin` itself and deploys the commit only if it is
+  already on `origin/main` - a stolen deploy key can at most redeploy what the
+  repository holds;
+- it only moves forward; an older commit (two CI runs finishing out of order)
+  is skipped;
+- if nothing under `server/` changed, it moves the checkout and leaves the
+  service running;
+- otherwise it runs `wsapp-backup.service` first if you have one, installs
+  dependencies if `server/requirements.txt` changed, restarts `wsapp` and waits
+  for `/health` - and if that does not answer, goes back to the previous commit
+  and fails the workflow;
+- it never re-runs `bootstrap.sh` (which rewrites the nginx config) and never
+  applies schema changes - it warns when `server/schema.sql` moved.
+
+Only short status lines go back to GitHub, because Actions logs of a public
+repository are public; details, and the service journal after a failed start,
+are in `/var/log/wsapp-deploy.log`.
+
+**On the server** (as root). The paths at the top of `wsapp-deploy` match
+`bootstrap.sh`'s defaults; edit them if yours differ.
+
+```sh
+# A key pair only for this, on your own machine:
+ssh-keygen -t ed25519 -N "" -C wsapp-deploy@github-actions -f deploy_key
+
+# On the server:
+useradd --system --create-home --home-dir /var/lib/wsdeploy --shell /bin/sh wsdeploy
+usermod -p '*' wsdeploy        # no password, but not "locked" for sshd
+install -d -m 700 -o wsdeploy -g wsdeploy /var/lib/wsdeploy/.ssh
+echo 'restrict,command="sudo -n /usr/local/sbin/wsapp-deploy \"$SSH_ORIGINAL_COMMAND\"" <contents of deploy_key.pub>' \
+    > /var/lib/wsdeploy/.ssh/authorized_keys
+chown wsdeploy:wsdeploy /var/lib/wsdeploy/.ssh/authorized_keys
+chmod 600 /var/lib/wsdeploy/.ssh/authorized_keys
+install -m 755 scripts/deploy/wsapp-deploy /usr/local/sbin/wsapp-deploy
+echo 'wsdeploy ALL=(root) NOPASSWD: /usr/local/sbin/wsapp-deploy *' > /etc/sudoers.d/91-wsapp-deploy
+chmod 440 /etc/sudoers.d/91-wsapp-deploy && visudo -cf /etc/sudoers.d/91-wsapp-deploy
+```
+
+`restrict` turns off the terminal and every kind of forwarding; the forced
+command means the key cannot run anything but the deploy, whatever the client
+asks for.
+
+**On GitHub**, under *Settings → Secrets and variables → Actions*, add:
+
+| Secret | Value |
+|---|---|
+| `DEPLOY_SSH_KEY` | the whole private key file `deploy_key` |
+| `DEPLOY_HOST` | your server's name, e.g. `messenger.example.com` |
+| `DEPLOY_KNOWN_HOSTS` | the server's host key: `ssh-keyscan -t ed25519 messenger.example.com` - check its fingerprint (`ssh-keygen -lf`) against the one you already trust before pasting |
+
+Without these secrets the workflow does nothing. To deploy by hand, run
+*deploy* from the Actions tab, or on the server
+`sudo wsapp-deploy "$(sudo -u wsapp git -C /home/wsapp/wsmessenger rev-parse origin/main)"`
+after a `git fetch`. Updating `wsapp-deploy` itself is a manual
+`install` like the one above - a deploy never replaces its own script.
+
 ---
 
 ## 12. Troubleshooting

@@ -80,3 +80,14 @@ jobs:
       # not have.
       - run: npm run test:screens
       - run: npm run lint
+
+  test-deploy:
+    # scripts/deploy/wsapp-deploy runs as root on the production island, and
+    # deploy.yml only runs after this whole workflow passed - so a deploy
+    # script that stopped refusing what it must refuse, or stopped rolling
+    # back, never gets to deploy itself. Real git, runuser and flock in a
+    # throwaway Ubuntu 24.04 container; systemctl, curl and pip are stubs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD/scripts/deploy:/src:ro" buildpack-deps:noble-scm sh /src/test-wsapp-deploy.sh
