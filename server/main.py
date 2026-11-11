@@ -451,6 +451,34 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": detail}
     )
 
+
+from fastapi.exception_handlers import http_exception_handler as _default_http_exception_handler
+from fastapi.responses import RedirectResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+
+@app.exception_handler(StarletteHTTPException)
+async def admin_login_redirect_handler(request: Request, exc: StarletteHTTPException):
+    """A browser opening an admin page with no session gets the login form.
+
+    Admin sessions live in memory, so every restart - every deploy that touches
+    server/ - ends them, and the panel used to answer the next click with
+    {"detail":"Admin auth required"}. Only a GET for an HTML page is redirected;
+    form POSTs, API clients and every 401 outside /admin answer as before, and
+    everything else goes to FastAPI's own handler unchanged.
+    """
+    path = request.url.path
+    if (
+        exc.status_code == 401
+        and request.method == "GET"
+        and (path == "/admin" or path.startswith("/admin/"))
+        and path != "/admin/login"
+        and "text/html" in request.headers.get("accept", "")
+    ):
+        return RedirectResponse("/admin/login", status_code=303)
+    return await _default_http_exception_handler(request, exc)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
