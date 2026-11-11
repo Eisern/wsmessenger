@@ -609,6 +609,27 @@ inserting a row into `admin_users`.
 >     proxy_set_header X-Forwarded-Proto $scheme;
 > }
 > ```
+>
+> **If your address keeps changing, close it entirely and use an SSH tunnel.**
+> nginx serves `/admin` to nobody; you reach the app itself through SSH,
+> so your SSH key is the gate and your IP does not matter:
+>
+> ```nginx
+> # in the server { listen 443 ... } block, before "location /":
+> location = /admin   { return 404; }
+> location ^~ /admin/ { return 404; }
+> ```
+>
+> ```sh
+> ssh -N -L 18000:127.0.0.1:8000 you@messenger.example.com
+> # then open http://localhost:18000/admin/ while that runs
+> ```
+>
+> This works despite the `Secure` cookie above: browsers treat
+> `http://localhost` as a secure origin and keep the cookie (checked in
+> Chromium against a server started like the systemd unit, `ENV=prod`).
+> Re-running `bootstrap.sh` rewrites the nginx config, so put these two
+> lines back afterwards.
 
 ---
 
