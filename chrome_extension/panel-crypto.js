@@ -28,35 +28,6 @@ async function promptPassword({ reason = "" } = {}) {
   return (typeof p === "string") ? p : "";
 }
 
-async function takeStashedUnlockKek() {
-  try {
-    const got = await chrome.storage.session.get(["__tmp_unlock_kek", "__tmp_unlock_ts"]);
-    const kekB64 = String(got.__tmp_unlock_kek || "").trim();
-    const ts = Number(got.__tmp_unlock_ts || 0);
-
-    if (!kekB64) return "";
-    if (ts && (Date.now() - ts > 2 * 60 * 1000)) {
-      
-      await chrome.storage.session.remove(["__tmp_unlock_kek", "__tmp_unlock_ts"]);
-      return "";
-    }
-
-    try {
-      await sendUnlockKekToBackground(kekB64, ts || Date.now());
-    } catch (e) {
-      console.warn("sendUnlockKekToBackground failed:", e);
-     
-    }
-
-    await chrome.storage.session.remove(["__tmp_unlock_kek", "__tmp_unlock_ts"]);
-
-    return kekB64;
-  } catch (e) {
-    console.warn("takeStashedUnlockKek failed:", e);
-    return "";
-  }
-}
-
 function getCryptoManager() {
   return globalThis.__wsCrypto?.manager || null;
 }
@@ -722,73 +693,21 @@ function lockCryptoSession() {
   console.warn("Crypto session locked");
 }
 
-async function deriveUnlockKekB64FromPassword(password, encryptedPrivateKeyObj) {
-  const saltB64 = encryptedPrivateKeyObj?.salt || "";
-  const kdf = encryptedPrivateKeyObj?.kdf || {};
-  if (!saltB64) throw new Error("No salt for KEK derivation");
-  const derived = await CU().deriveRawKeyFromPassword(password, saltB64, {
-    name: kdf.name,
-    iterations: kdf.iterations,
-    hash: kdf.hash,
-    time_cost: kdf.time_cost,
-    memory_kib: kdf.memory_kib,
-    parallelism: kdf.parallelism,
-    version: kdf.version,
-    preferArgon2: true,
-  });
-  return CU().arrayBufferToBase64(derived.raw);
-}
+// The recovery phrase of a registration that was never confirmed - the window
+// closed on it - is shown again at the next unlock.
+//
+// login.js does this at the next login with the password. A session that
+// survived needs no login: the user goes straight to the panel and unlocks
+// there, and this is the only place left to show it. It opens the key
+// container with the key the unlock just used, so the password is not kept
+// for it. A flag left by another account is dropped. Called without await:
+// the phrase stays over the panel until confirmed, and the unlock carries on.
+let _mnemonicSurfacing = false;
 
-async function interactiveUnlockAndSendKek({ reason = "" } = {}) {
-  // 1) ask password
-  let password = await promptPassword({ reason: reason || "Unlock E2EE" });
-  if (!password) return false;
-
-  // 2) read local encrypted identity key
-  const username = await resolveActiveUsername();
-  if (!username) throw new Error("No active username");
-  const localIdentity = await loadLocalIdentity(username);
-  if (!localIdentity?.encrypted_private_key) throw new Error("No local encrypted private key on this device");
-
-  // 2a) Refuse to derive if the EPK's KDF name doesn't match this device's pin.
-  assertEpkKdfMatchesPin(localIdentity, localIdentity.encrypted_private_key);
-
-  // 3) derive kek
-  let kekB64 = "";
-  try {
-    kekB64 = await deriveUnlockKekB64FromPassword(password, localIdentity.encrypted_private_key);
-  } catch (e) {
-    markUnlockFailure();
-    throw e;
-  }
-
-  // 4) send to background, then drop the local password reference.
-  try {
-    await sendUnlockKekToBackground(kekB64, Date.now());
-    markUnlockSuccess();
-    // Pin the KDF name on first successful unlock (best-effort).
-    await pinEpkKdfNameIfNeeded(username, localIdentity, localIdentity.encrypted_private_key);
-    // Crash-recovery surfacing: if the user registered but never ack'd the
-    // mnemonic, login.js may have been unable to surface it (auth_state
-    // path with no fresh password). Now that we have the password in hand,
-    // re-derive and show before continuing.
-    await _surfacePendingMnemonicIfNeeded(username, password, localIdentity.encrypted_private_key);
-  } finally {
-    // Note: JS strings are immutable, so there is no real "wipe" available
-    // for `password`. The previous `password.fill?.(0)` was a no-op
-    // (String.prototype has no `fill`). Dropping the reference is the
-    // strongest action we can take from JS — the actual lifetime of the
-    // bytes on the heap is governed by the garbage collector.
-    password = "";
-  }
-
-  bumpCryptoIdleTimer();
-  return true;
-}
-
-// Show the recovery phrase modal if the register flow was interrupted before
-// the user acknowledged it. Stale flags (different username) are cleared.
-async function _surfacePendingMnemonicIfNeeded(username, password, epk) {
+async function _surfacePendingMnemonicIfNeeded(username, kek, epk) {
+  if (_mnemonicSurfacing) return;
+  _mnemonicSurfacing = true;
+  let shown = false;
   try {
     const pending = await getPendingMnemonicAck();
     if (!pending) return;
@@ -797,8 +716,8 @@ async function _surfacePendingMnemonicIfNeeded(username, password, epk) {
       await clearPendingMnemonicAck();
       return;
     }
-    if (!epk || !password) return;
-    const pkcs8B64 = await CU().decryptPrivateKeyToPkcs8B64(epk, password, { expectedUsername: u });
+    if (!epk || !kek) return;
+    const pkcs8B64 = await CU().decryptPrivateKeyToPkcs8B64WithAesKey(epk, kek, { expectedUsername: u });
     const pkcs8Bytes = new Uint8Array(CU().base64ToArrayBuffer(pkcs8B64));
     const rawKey = CU().extractRawKeyFromPkcs8(pkcs8Bytes);
     let mnemonic = "";
@@ -808,14 +727,16 @@ async function _surfacePendingMnemonicIfNeeded(username, password, epk) {
       try { rawKey.fill(0); } catch {}
       try { pkcs8Bytes.fill(0); } catch {}
     }
-    await new Promise((resolve) => {
-      _showMnemonicOverlay(mnemonic, async () => {
-        await clearPendingMnemonicAck();
-        resolve();
-      });
+    _showMnemonicOverlay(mnemonic, async () => {
+      await clearPendingMnemonicAck();
+      _mnemonicSurfacing = false;
     });
+    shown = true;
   } catch (e) {
     console.warn("_surfacePendingMnemonicIfNeeded failed:", e?.message || e);
+  } finally {
+    // Still on screen: stays claimed until confirmed. Otherwise free again.
+    if (!shown) _mnemonicSurfacing = false;
   }
 }
 
@@ -1175,6 +1096,9 @@ async function initializeCrypto({ interactive = false, reason = "", kekKey = nul
       }
       masterB64ForWorker = "";
     }
+
+    // 6. A recovery phrase the user never confirmed is shown now (not awaited).
+    void _surfacePendingMnemonicIfNeeded(username, effectiveKek, encryptedPrivateKey);
 
     // Pin the KDF name on first successful unlock (only meaningful when we
     // actually exercised the KDF — auto-unlock with kekKey skips it).

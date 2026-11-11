@@ -771,6 +771,31 @@ const CryptoUtils = {
   },
 
   /**
+   * decryptPrivateKeyToPkcs8B64, opened with the key an unlock already derived
+   * instead of the password - so showing the recovery phrase after an unlock
+   * (panel-crypto.js, _surfacePendingMnemonicIfNeeded) does not need the
+   * password kept around, or a second run of the KDF.
+   */
+  async decryptPrivateKeyToPkcs8B64WithAesKey(encrypted, aesKey, opts = {}) {
+    if (Number(encrypted?.v || 0) !== 3) {
+      throw new Error("Legacy private key container is not supported (expected v3)");
+    }
+    const expectedUsername = String(opts?.expectedUsername || "").trim().toLowerCase();
+    if (expectedUsername) {
+      const actualUsername = String(encrypted?.username || "").trim().toLowerCase();
+      if (!actualUsername || actualUsername !== expectedUsername) {
+        throw new Error("Encrypted private key container username mismatch");
+      }
+    }
+    const iv = this.base64ToArrayBuffer(encrypted.iv);
+    const encryptedData = this.base64ToArrayBuffer(encrypted.data);
+    const decryptedBuffer = await crypto.subtle.decrypt(
+      this.buildPrivateKeyContainerGcmParams(encrypted, iv), aesKey, encryptedData
+    );
+    return new TextDecoder().decode(decryptedBuffer);
+  },
+
+  /**
    * Encrypt a PKCS8 private key (base64) with a password → v3 EPK container.
    * Mirrors login.js encryptPrivateKey for use in background.js password change.
    */

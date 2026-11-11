@@ -75,11 +75,12 @@ A wrap can also say **who made it** (prefix `0x03`, behind `KEY_WRAP_SIG_WRITE_E
 
 ### Unlock Flow
 
-On login (`login.js`) and on panel re-unlock (`panel-crypto.js` `interactiveUnlockAndSendKek`):
+On login (`login.js`) and on panel re-unlock with the password (`panel-crypto.js` `initializeCrypto`, which hands the KEK back as `master_b64` only after step 4 succeeded):
 1. Load EPK from `chrome.storage.local` via `loadLocalIdentity(username)` (key `e2ee_local_identity_v2:<username>`; value is a JSON blob with `v`, `username`, `salt`, `iv`, `data`, `kdf`)
 2. `Argon2id` (or PBKDF2 fallback) of password with `epk.salt` → KEK
 3. Panel and background perform a **secure handoff** (per-request ephemeral P-256 ECDH + HKDF-SHA-256, `info = "wsapp-unlock-handoff-v1"`, 30 s TTL via `UNLOCK_HANDOFF_TTL_MS`); the master bytes and a fresh session KEK are AES-GCM-encrypted on the wire between contexts. The legacy direct `unlock_kek_set` message is refused server-side in the worker.
 4. The panel decrypts the EPK and imports the X25519 identity key as a non-extractable `CryptoKey` into `CryptoManager`, where it stays until lock/logout.
+5. A recovery phrase never confirmed at registration (flag `e2ee_pending_mnemonic_v1`) is shown again: by `login.js` at a password login, and by the panel after any unlock (`_surfacePendingMnemonicIfNeeded`, opening the container with the unlock's KEK — the password is not kept for it).
 
 The **panel** holds the identity private key, not the service worker. `crypto-utils.js` and `crypto-manager.js` are loaded only by `panel.html` and `login.html`; `background.js` imports only `endpoints.js` (the entry-point selector) and never sees an X25519 key. What background keeps is the password-derived `_masterKey` (for `storage_encrypt`/`storage_decrypt`), the one-shot `_unlockKekKey` session key, and the ephemeral P-256 key pair used for the handoff in step 3 — each on the 10-minute idle TTL. Room-key wrapping and message decryption therefore happen in the panel; the worker is a transport, not a crypto oracle.
 

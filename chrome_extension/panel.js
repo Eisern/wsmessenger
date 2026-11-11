@@ -401,13 +401,6 @@ let pendingNewRoomMeta = null; // { description: string|null, logoFile: File|nul
 let pendingPinFromSelection = null; // {url, text} | null
 
 
-// Its only callers (interactiveUnlockAndSendKek and takeStashedUnlockKek in
-// panel-crypto.js) are never called themselves, and the worker never reads
-// the slot this fills.
-function sendUnlockKekToBackground(kekB64, ts = Date.now()) {
-  return _unlockHandoffToBackground({ kekB64, ts });
-}
-
 /**
  * Give the worker back the password-derived key after this panel unlocked
  * with the password (panel-crypto.js, initializeCrypto).
