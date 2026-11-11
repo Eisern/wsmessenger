@@ -3629,17 +3629,34 @@ function __appendTextWithLinks(containerEl, text) {
 /**
  * Say so when a room message does not stand behind its author.
  *
- * Unsigned messages say nothing at all: that is the whole history written
- * before signing existed, and warning about each of them would teach everyone
- * to ignore the warning that matters.
+ * A signature that fails, or an envelope naming somebody other than the
+ * server's author, is shown every time: that is a forgery or the server
+ * moving words. A message with no signature, or one there was no key to check,
+ * is shown once per sender until the chat is redrawn - quieter, but never
+ * silent: every client signs since 0.5.0, so an unsigned message under
+ * somebody's name is exactly how a member and the server together would put
+ * words in their mouth.
  */
+const _roomSigNoticeShown = new Set();
+
 function __warnAboutRoomSignature(dec, claimedAuthor) {
   if (!dec || typeof dec !== "object") return;
   try {
-    if (dec.sigValid === false && typeof addSigFailWarning === "function") {
-      addSigFailWarning(dec.from || claimedAuthor);
-    } else if (dec.mismatch && typeof addSigFailWarning === "function") {
-      addSigFailWarning(dec.from || claimedAuthor);
+    const who = dec.from || claimedAuthor;
+    if (dec.sigValid === false || dec.mismatch) {
+      if (typeof addSigFailWarning === "function") addSigFailWarning(who);
+      return;
+    }
+    if (dec.sigValid !== null) return;
+    // "No key to check it" always names its signer. Without a name and without
+    // `unsigned` it is no verdict at all - a guest-room feed item made from a
+    // placeholder such as "key not available" - and says nothing.
+    if (!dec.unsigned && !dec.from) return;
+    const key = String(who || "").trim().toLowerCase();
+    if (!key || _roomSigNoticeShown.has(key)) return;
+    _roomSigNoticeShown.add(key);
+    if (typeof addSigUnverifiedWarning === "function") {
+      addSigUnverifiedWarning(who, dec.unsigned ? "unsigned" : "nokey");
     }
   } catch (e) {
     console.warn("room signature warning failed:", e?.message || e);

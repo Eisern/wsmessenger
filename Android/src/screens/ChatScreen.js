@@ -37,6 +37,7 @@ import { Colors, Spacing, Radii, Typography } from '../theme';
 import FileCard from '../components/FileCard';
 import RoomLogo from '../components/RoomLogo';
 import { parseFileMarker, makeFileMarker } from '../utils/fileMarker';
+import { roomSigVerdict } from '../utils/roomSig';
 import { pick as pickDocument, types as pickerTypes } from '@react-native-documents/picker';
 
 // Deterministic username color (ported from panel.js colorForUsername)
@@ -226,6 +227,15 @@ function MessageBubble({ msg, myUsername, isSearchHit, isSearchActive, onReply }
           <Text style={styles.sigWarnText}>
             ⚠ Signed by {msg._signedBy || 'somebody else'}, not by {author}
           </Text>
+        )}
+        {/* Quieter, but never silent: every client signs since 0.5.0, so an
+            unsigned message under somebody's name is how a member and the
+            server together would put words in their mouth. */}
+        {msg._roomUnsigned && (
+          <Text style={styles.sigNoteText}>not signed - may not be from {author}</Text>
+        )}
+        {msg._roomSigUnknown && (
+          <Text style={styles.sigNoteText}>unverified - no signing key known for {author}</Text>
         )}
         {timeStr ? <Text style={styles.timeText}>{timeStr}</Text> : null}
       </View>
@@ -698,13 +708,10 @@ export default function ChatScreen({ navigation, route }) {
       const claimedAuthor = msg.author || msg.username || msg.from || null;
       const result = await CryptoService.decryptMessage(roomId, body, claimedAuthor);
       if (result !== null) {
-        // A plain string is a message written before room signatures existed;
-        // an object carries what its signature proved, or failed to.
+        // An object carries what its signature proved, or failed to; a string
+        // is a placeholder (no key, could not decrypt) with no verdict at all.
         const text = typeof result === 'string' ? result : result.text;
-        const verdict = typeof result === 'string' ? {} : {
-          ...(result.sigValid === false ? { _roomSigFailed: true } : {}),
-          ...(result.mismatch ? { _roomSigMismatch: true, _signedBy: result.from } : {}),
-        };
+        const verdict = typeof result === 'string' ? {} : roomSigVerdict(result);
         // Strip stale failure/needs-decrypt flags — render logic hides text if _decryptFailed
         // is set, so a successful re-decryption must clear it.
         const { _decryptFailed: _f, _needsDecrypt: _n, ...rest } = msg;
@@ -2088,6 +2095,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   sigWarnText: { fontSize: Typography.xs, color: '#fbbf24', fontStyle: 'italic', marginTop: 2 },
+  sigNoteText: { fontSize: Typography.xs, color: '#9ca3af', fontStyle: 'italic', marginTop: 2 },
   decryptFailedText: {
     fontSize: Typography.sm,
     color: '#f87171',

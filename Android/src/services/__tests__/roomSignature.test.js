@@ -31,6 +31,9 @@ const b64 = (u8) => CryptoUtils.arrayBufferToBase64(u8);
 
 let roomKeyB64;
 let bob;
+// How the island fails to answer /keys/*: false (it answers), '503', or
+// 'empty' - a 200 with nothing readable in it. Neither says anything about anybody.
+let keysDown = false;
 
 /** What a signing client puts on the wire, built the way the writer builds it. */
 async function roomMessage({ from, body, signWith, claimBody = null }) {
@@ -52,6 +55,13 @@ beforeAll(async () => {
 
   // The island's key store, as far as this client can see it.
   global.fetch = jest.fn(async (url) => {
+    if (keysDown && String(url).includes('/keys/')) {
+      const empty = keysDown === 'empty';
+      return {
+        ok: empty, status: empty ? 200 : 503, headers: { get: () => 'text/plain' },
+        async json() { throw new Error('not json'); }, async text() { return empty ? '' : 'unavailable'; },
+      };
+    }
     const body = String(url).includes('/keys/bob')
       ? { username: 'bob', public_key: b64(x25519.getPublicKey(bob.priv)), ed25519_public_key: bob.edPubB64 }
       : {};
@@ -124,26 +134,85 @@ describe('reading a signed room message', () => {
     expect(out.sigValid).toBe(true);   // the signature is bob's and holds
   });
 
-  test('an envelope with no signature reads as unverified, not as forged', async () => {
+  test('an envelope with no signature is one no client writes: it reads as forged', async () => {
+    // Every writer signs. An envelope without a signature was made up to look
+    // like one, and "unknown" would have let it pass quietly.
     const wire = await roomMessage({ from: 'bob', body: 'unsigned', signWith: null });
     const out = await CryptoService.decryptMessage(ROOM, wire, 'bob');
     expect(out.text).toBe('unsigned');
+    expect(out.sigValid).toBe(false);
+  });
+
+  test('so does a signature that cannot even be read', async () => {
+    for (const sig of ['not base64 at all!!', b64(new Uint8Array(10))]) {
+      const wire = await cryptoManager.encryptMessage(ROOM, JSON.stringify({ rs: 1, from: 'bob', body: 'x', sig }));
+      const out = await CryptoService.decryptMessage(ROOM, wire, 'bob');
+      expect(out.sigValid).toBe(false);
+    }
+  });
+
+  test('a signer with no key known anywhere is unverified, not forged', async () => {
+    const dave = CryptoUtils.deriveEd25519Seed(x25519.utils.randomSecretKey());
+    const wire = await roomMessage({ from: 'dave', body: 'hi', signWith: dave });
+    const out = await CryptoService.decryptMessage(ROOM, wire, 'dave');
+    expect(out).toEqual({ text: 'hi', from: 'dave', sigValid: null, mismatch: false });
+  });
+});
+
+describe('an island that stops answering for a pinned peer', () => {
+  // A fresh session: nothing cached, but bob's signing key stays pinned.
+  async function freshSession() {
+    CryptoService.lockSession();
+    await CryptoService.ensureReady({ interactive: false });
+    await cryptoManager.loadRoomKey(ROOM, roomKeyB64);
+  }
+
+  afterEach(() => { keysDown = false; });
+
+  test.each(['503', 'empty'])('does not switch the check off (%s): the pinned key still decides', async (how) => {
+    // Pinned on first sight.
+    const first = await CryptoService.decryptMessage(
+      ROOM, await roomMessage({ from: 'bob', body: 'pin me', signWith: bob.edSeed }), 'bob');
+    expect(first.sigValid).toBe(true);
+
+    await freshSession();
+    keysDown = how;
+
+    const genuine = await CryptoService.decryptMessage(
+      ROOM, await roomMessage({ from: 'bob', body: 'still bob', signWith: bob.edSeed }), 'bob');
+    expect(genuine.sigValid).toBe(true);
+
+    // The point: a forgery under bob's name is caught, not waved through as
+    // "could not be checked" because the island went quiet about bob.
+    const impostor = CryptoUtils.deriveEd25519Seed(x25519.utils.randomSecretKey());
+    const forged = await CryptoService.decryptMessage(
+      ROOM, await roomMessage({ from: 'bob', body: 'send money', signWith: impostor }), 'bob');
+    expect(forged.sigValid).toBe(false);
+  });
+
+  test('and a name never pinned stays unverified - silence pins nothing', async () => {
+    await freshSession();
+    keysDown = '503';
+    const erin = CryptoUtils.deriveEd25519Seed(x25519.utils.randomSecretKey());
+    const out = await CryptoService.decryptMessage(
+      ROOM, await roomMessage({ from: 'erin', body: 'hello', signWith: erin }), 'erin');
     expect(out.sigValid).toBeNull();
   });
 });
 
 describe('what came before signing existed', () => {
-  test('a plain message is returned untouched, with nothing to warn about', async () => {
+  test('a message with no envelope comes back marked unsigned, its text intact', async () => {
     const wire = await cryptoManager.encryptMessage(ROOM, 'just text');
     const out = await CryptoService.decryptMessage(ROOM, wire, 'bob');
-    expect(out).toBe('just text');
+    expect(out).toEqual({ text: 'just text', from: null, sigValid: null, mismatch: false, unsigned: true });
   });
 
-  test('a reply payload is still a plain string to the caller', async () => {
+  test('so is a reply payload without one, the payload untouched', async () => {
     const payload = JSON.stringify({ v: 2, t: 'hi', reply: { author: 'bob', text: 'yo' } });
     const wire = await cryptoManager.encryptMessage(ROOM, payload);
     const out = await CryptoService.decryptMessage(ROOM, wire, 'bob');
-    expect(out).toBe(payload);
+    expect(out.unsigned).toBe(true);
+    expect(out.text).toBe(payload);
   });
 });
 

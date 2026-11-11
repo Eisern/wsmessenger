@@ -1605,16 +1605,23 @@ const CryptoService = {
       if (Date.now() - cached.ts < _ED25519_ABSENT_TTL_MS) return null;
     }
 
+    // When the island does not answer, the key already pinned for this name is
+    // still the key: the island is the party these signatures keep honest, and
+    // returning "no key" on any failed request let it switch every check off
+    // for a pinned peer just by not answering - a forged room message then read
+    // as "could not be checked" instead of "forged". Not cached, so the next
+    // check asks again; and never a new pin, since nothing was served.
+    const pinnedOnly = () => _pinnedEd25519(username, null).catch(() => null);
     try {
       const data = await NetworkService.fetchPeerKey(username);
-      if (!data) return null;                     // a failed request is not an answer
+      if (!data) return await pinnedOnly();       // a failed request is not an answer
       const b64 = data.ed25519_public_key;
       const bytes = b64 ? new Uint8Array(CryptoUtils.base64ToArrayBuffer(b64)) : null;
       const pubKey = await _pinnedEd25519(username, bytes && bytes.length === 32 ? bytes : null);
       _ed25519PubKeyCache.set(lower, { key: pubKey, ts: Date.now() });
       return pubKey;
     } catch (_e) {
-      return null;
+      return await pinnedOnly();
     }
   },
 
@@ -1714,19 +1721,29 @@ function _deriveSigningSeed() {
 /**
  * Unwrap a room message and say what its signature proves.
  *
- * Unsigned messages stay exactly what they were - a string - because that is
- * every message written before this existed, and a reader that turned them into
- * "unverified" noise would cry wolf over the whole history.
+ * Every client signs since 0.5.0, so the three outcomes mean different things
+ * and the caller is told which one it got (the extension's openRoomEnvelope
+ * says the same):
+ *   - sigValid true / false: the signature holds, or it does not. An envelope
+ *     with no signature, no author, or a signature that cannot even be read is
+ *     false, not "unknown": no client writes one, so somebody made it up.
+ *   - sigValid null: signed, but there is no key to check it against.
+ *   - unsigned: true: no envelope at all - written before signing, or by
+ *     somebody who left the signature off so that the server's choice of
+ *     author stands unchallenged. The text is still returned.
+ * Anything that is not a string comes back as it is.
  */
 async function _openRoomEnvelope(roomId, plain, claimedAuthor, ctx = null) {
-  if (typeof plain !== 'string' || !plain.startsWith('{')) return plain;
+  if (typeof plain !== 'string') return plain;
+  const unsigned = { text: plain, from: null, sigValid: null, mismatch: false, unsigned: true };
+  if (!plain.startsWith('{')) return unsigned;
   let inner;
   try {
     inner = JSON.parse(plain);
   } catch (_e) {
-    return plain;
+    return unsigned;
   }
-  if (!inner || inner.rs !== 1 || inner.body === undefined) return plain;
+  if (!inner || inner.rs !== 1 || inner.body === undefined) return unsigned;
 
   const from = String(inner.from || '');
   const body = String(inner.body);
@@ -1735,25 +1752,32 @@ async function _openRoomEnvelope(roomId, plain, claimedAuthor, ctx = null) {
   // move this signature exists to expose.
   const mismatch = !!claimed && !!from && claimed !== from.toLowerCase();
 
-  let sigValid = null;
-  if (inner.sig && from) {
-    try {
-      // ctx: a room on another island, where our name and everybody's keys
-      // are that island's (GuestRoomService). Without it, this island's.
-      const me = ctx ? String(ctx.me || '').trim().toLowerCase() : await _resolveUsername();
-      const pub = (me && from.toLowerCase() === me)
-        ? CryptoService.ed25519PublicKey()
-        : ctx ? await ctx.edKeyOf(from) : await CryptoService._fetchPeerEd25519PubKey(from);
-      if (pub) {
-        sigValid = CryptoUtils.ed25519Verify(
-          pub,
-          new Uint8Array(CryptoUtils.base64ToArrayBuffer(inner.sig)),
-          CryptoUtils._roomSigMessage(roomId, from, body),
-        );
-      }
-    } catch (e) {
-      if (__DEV__) console.warn('[room] signature check failed to run:', e?.message);
-    }
+  let sig = null;
+  try {
+    sig = inner.sig ? new Uint8Array(CryptoUtils.base64ToArrayBuffer(String(inner.sig))) : null;
+  } catch (_e) {
+    sig = null;
+  }
+  if (!from || !sig || sig.length !== 64) return { text: body, from, sigValid: false, mismatch };
+
+  let pub = null;
+  try {
+    // ctx: a room on another island, where our name and everybody's keys
+    // are that island's (GuestRoomService). Without it, this island's.
+    const me = ctx ? String(ctx.me || '').trim().toLowerCase() : await _resolveUsername();
+    pub = (me && from.toLowerCase() === me)
+      ? CryptoService.ed25519PublicKey()
+      : ctx ? await ctx.edKeyOf(from) : await CryptoService._fetchPeerEd25519PubKey(from);
+  } catch (e) {
+    if (__DEV__) console.warn('[room] no signing key to check against:', e?.message);
+  }
+  if (!pub) return { text: body, from, sigValid: null, mismatch };
+
+  let sigValid = false;
+  try {
+    sigValid = !!CryptoUtils.ed25519Verify(pub, sig, CryptoUtils._roomSigMessage(roomId, from, body));
+  } catch (e) {
+    if (__DEV__) console.warn('[room] signature did not verify:', e?.message);
   }
   return { text: body, from, sigValid, mismatch };
 }

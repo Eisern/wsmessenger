@@ -254,7 +254,30 @@ describe('the feed', () => {
     await F.feed.idle();
     expect(items[0]).toEqual({
       key: 'mine', user: 'me', text: 'mine', ts: 5, mine: true, from: 'me', sigValid: true, mismatch: false,
+      unsigned: false,
     });
+  });
+
+  test('an unsigned message says so; a placeholder carries no verdict at all', async () => {
+    // Views warn about the first and must stay quiet about the second, and the
+    // item is all they get: "unsigned" has to survive the trip.
+    const items = [];
+    const F = make({
+      onAppend: (it) => items.push(it),
+      decrypt: async (ct) => (ct === 'plain'
+        ? { text: 'plain', from: null, sigValid: null, mismatch: false, unsigned: true }
+        : '[Encrypted message - key not available]'),
+    });
+    const started = F.feed.start();
+    F.up();
+    await started;
+    F.sockets[0].h.onMessage({ text: 'plain', from: 'bob', ts: 6 });
+    F.sockets[0].h.onMessage({ text: 'nokey', from: 'bob', ts: 7 });
+    await F.feed.idle();
+    expect(items.map((it) => [it.text, it.unsigned, it.sigValid, it.from])).toEqual([
+      ['plain', true, null, null],
+      ['[Encrypted message - key not available]', false, null, null],
+    ]);
   });
 });
 

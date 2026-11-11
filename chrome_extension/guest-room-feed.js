@@ -66,7 +66,7 @@
    * @param {function} o.openSocket   ({onMessage, onStatus}) => { send(text), close(), online }
    * @param {function} o.loadKey      async () => {ok, notFound?, refused?, denied?, unreachable?, locked?}
    * @param {function} o.fetchHistory async () => {messages:[{username, text, ts}]}; throws with .status
-   * @param {function} o.decrypt      async (ciphertext, claimedAuthor) => string | {text, from, sigValid, mismatch} | null
+   * @param {function} o.decrypt      async (ciphertext, claimedAuthor) => string | {text, from, sigValid, mismatch, unsigned?} | null
    * @param {function} o.isMe         (username) => boolean
    * @param {function} o.onReset      (items) => void   - replace everything shown
    * @param {function} o.onAppend     (item) => void    - one more, at the end
@@ -131,6 +131,7 @@
         from: isObj ? (dec.from || null) : null,
         sigValid: isObj && dec.sigValid !== undefined ? dec.sigValid : null,
         mismatch: isObj ? !!dec.mismatch : false,
+        unsigned: isObj ? !!dec.unsigned : false,
       };
     }
 

@@ -2415,6 +2415,8 @@ function clearChat(opts = {}) {
   const resetKeyAlerts = opts.resetKeyAlerts !== false;
   if (chat) chat.innerHTML = "";
   lastMsgAuthor = "";
+  // The room signature notices went with the DOM; let them be drawn again.
+  try { if (typeof _roomSigNoticeShown !== "undefined") _roomSigNoticeShown.clear(); } catch {}
   try { updatePinnedBar?.(); } catch {}
   // Reset only when switching context, not while appending older history.
   if (resetKeyAlerts) {
@@ -2629,7 +2631,9 @@ function addSigFailWarning(fromUser) {
 
 // Shown when sigValid===null and sender is known — signature absent (older client or
 // legacy message), not a forgery proof but worth flagging to the user.
-function addSigUnverifiedWarning(fromUser) {
+// `reason` is for room messages (__warnAboutRoomSignature): "unsigned" - no
+// signature at all; "nokey" - signed, but no signing key is known to check it.
+function addSigUnverifiedWarning(fromUser, reason = "") {
   if (!chat) return;
   lastMsgAuthor = "";
   const banner = document.createElement("div");
@@ -2651,7 +2655,13 @@ function addSigUnverifiedWarning(fromUser) {
   icon.style.cssText = "font-size: 13px; flex-shrink: 0;";
   banner.appendChild(icon);
   const textWrap = document.createElement("div");
-  textWrap.textContent = `Unverified sender — "${fromUser || "unknown"}" sent without an Ed25519 signature. Verify identity via Safety Number.`;
+  const who = fromUser || "unknown";
+  textWrap.textContent =
+    reason === "unsigned"
+      ? `Not signed — messages shown as "${who}" carry no signature, so they may not be from them.`
+      : reason === "nokey"
+        ? `Unverified — no signing key is known for "${who}" yet, so their messages could not be checked.`
+        : `Unverified sender — "${who}" sent without an Ed25519 signature. Verify identity via Safety Number.`;
   banner.appendChild(textWrap);
   chat.appendChild(banner);
 }
@@ -6599,7 +6609,7 @@ function closeGuestRoomView() {
 function __drawGuestItem(it) {
   const { text, reply } = parseV2Payload(it.text || "");
   addMsg(it.user, text, it.mine, it.ts, reply);
-  __warnAboutRoomSignature({ from: it.from, sigValid: it.sigValid, mismatch: it.mismatch }, it.user);
+  __warnAboutRoomSignature({ from: it.from, sigValid: it.sigValid, mismatch: it.mismatch, unsigned: it.unsigned }, it.user);
 }
 
 /**

@@ -388,8 +388,15 @@ async function fetchPeerEd25519PubKey(username) {
     if (cached.key) return cached.key;
     if (Date.now() - cached.ts < ED25519_ABSENT_TTL_MS) return null;
   }
+  // When the island does not answer, the key already pinned for this name is
+  // still the key: the island is the party these signatures keep honest, and
+  // returning "no key" on any failed request let it switch every check off
+  // for a pinned peer just by not answering - a forged room message then read
+  // as "could not be checked" instead of "forged". Not cached, so the next
+  // check asks again; and never a new pin, since nothing was served.
+  const pinnedOnly = () => _pinnedEd25519(username, null).catch(() => null);
   const token = await requestToken().catch(() => null);
-  if (!token) return null;
+  if (!token) return pinnedOnly();
   try {
     const r = await fetch(API_BASE + `/keys/${encodeURIComponent(username)}`, {
       headers: { "Authorization": "Bearer " + token },
@@ -398,16 +405,16 @@ async function fetchPeerEd25519PubKey(username) {
     // so one bad response disabled DM signature verification for the rest of
     // the session — degrading the check silently, and precisely when the
     // network was unreliable.
-    if (!r.ok) return null;
+    if (!r.ok) return pinnedOnly();
     const body = await r.json().catch(() => null);
-    if (!body) return null;
+    if (!body) return pinnedOnly();
     const b64 = String(body.ed25519_public_key || "").trim();
     const served = b64 ? new Uint8Array(CU().base64ToArrayBuffer(b64)) : null;
     const pubKey = await _pinnedEd25519(username, served && served.length === 32 ? served : null);
     _ed25519PubKeyCache.set(username, { key: pubKey, ts: Date.now() });
     return pubKey;
   } catch {
-    return null;
+    return pinnedOnly();
   }
 }
 
@@ -2414,26 +2421,36 @@ async function encryptMessageForRoom(roomId, plaintext) {
 /**
  * Unwrap a room message and say what its signature proves.
  *
- * A message with no envelope stays exactly what it was - a string - because
- * that is every message written before this existed, and turning those into
- * "unverified" would cry wolf over the whole history.
+ * Every client signs since 0.5.0, so the three outcomes mean different things
+ * and the caller is told which one it got:
+ *   - sigValid true / false: the signature holds, or it does not. An envelope
+ *     with no signature, no author, or a signature that cannot even be read is
+ *     false, not "unknown": no client writes one, so somebody made it up.
+ *   - sigValid null: signed, but there is no key to check it against.
+ *   - unsigned: true: no envelope at all - written before signing, or by
+ *     somebody who left the signature off on purpose so that the server's
+ *     choice of author stands unchallenged. The text is still returned.
+ * Whether to warn, and how loudly, is the UI's call (__warnAboutRoomSignature).
  *
  * @param {number} rid  the room id as signed - the id on the room's own island
  * @param {string} plain
  * @param {string|null} claimedAuthor who the SERVER says wrote it
  * @param {object} [ctx]  { me, edKeyOf(name) } for a room on another island;
  *   see acceptWrappedKey
- * @returns {Promise<string|{text:string, from:string, sigValid:boolean|null, mismatch:boolean}>}
+ * @returns {Promise<*|{text:string, from:string|null, sigValid:boolean|null,
+ *   mismatch:boolean, unsigned?:true}>}  anything that is not a string comes back as is
  */
 async function openRoomEnvelope(rid, plain, claimedAuthor, ctx = null) {
-  if (typeof plain !== "string" || !plain.startsWith("{")) return plain;
+  if (typeof plain !== "string") return plain;
+  const unsigned = { text: plain, from: null, sigValid: null, mismatch: false, unsigned: true };
+  if (!plain.startsWith("{")) return unsigned;
   let inner;
   try {
     inner = JSON.parse(plain);
   } catch {
-    return plain;
+    return unsigned;
   }
-  if (!inner || inner.rs !== 1 || inner.body === undefined) return plain;
+  if (!inner || inner.rs !== 1 || inner.body === undefined) return unsigned;
 
   const from = String(inner.from || "");
   const body = String(inner.body);
@@ -2442,23 +2459,30 @@ async function openRoomEnvelope(rid, plain, claimedAuthor, ctx = null) {
   // move this signature exists to expose.
   const mismatch = !!claimed && !!from && claimed !== from.toLowerCase();
 
-  let sigValid = null;
-  if (inner.sig && from) {
-    try {
-      const me = String((ctx ? ctx.me : getMeUsername()) || "").trim().toLowerCase();
-      const pub = (me && from.toLowerCase() === me && CM()?.ed25519Seed)
-        ? await CU().ed25519GetPublicKey(CM().ed25519Seed)
-        : ctx ? await ctx.edKeyOf(from) : await fetchPeerEd25519PubKey(from);
-      if (pub) {
-        sigValid = await CU().ed25519Verify(
-          pub,
-          new Uint8Array(CU().base64ToArrayBuffer(inner.sig)),
-          CU()._roomSigMessage(rid, from, body),
-        );
-      }
-    } catch (e) {
-      console.warn("[room] signature check failed to run:", e?.message || e);
-    }
+  let sig = null;
+  try {
+    sig = inner.sig ? new Uint8Array(CU().base64ToArrayBuffer(String(inner.sig))) : null;
+  } catch {
+    sig = null;
+  }
+  if (!from || !sig || sig.length !== 64) return { text: body, from, sigValid: false, mismatch };
+
+  let pub = null;
+  try {
+    const me = String((ctx ? ctx.me : getMeUsername()) || "").trim().toLowerCase();
+    pub = (me && from.toLowerCase() === me && CM()?.ed25519Seed)
+      ? await CU().ed25519GetPublicKey(CM().ed25519Seed)
+      : ctx ? await ctx.edKeyOf(from) : await fetchPeerEd25519PubKey(from);
+  } catch (e) {
+    console.warn("[room] no signing key to check against:", e?.message || e);
+  }
+  if (!pub) return { text: body, from, sigValid: null, mismatch };
+
+  let sigValid = false;
+  try {
+    sigValid = !!(await CU().ed25519Verify(pub, sig, CU()._roomSigMessage(rid, from, body)));
+  } catch (e) {
+    console.warn("[room] signature did not verify:", e?.message || e);
   }
   return { text: body, from, sigValid, mismatch };
 }

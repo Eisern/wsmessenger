@@ -26,6 +26,7 @@ import CryptoService from '../services/CryptoService';
 import GuestRoomService from '../services/GuestRoomService';
 import RoomLogo from '../components/RoomLogo';
 import { MessageBubble, chatStyles as styles } from './ChatScreen';
+import { roomSigVerdict } from '../utils/roomSig';
 import { parseFileMarker } from '../utils/fileMarker';
 import { Colors, Spacing, Typography } from '../theme';
 
@@ -62,9 +63,7 @@ function toBubble(it) {
     _decrypted: parseFileMarker(text) ? FILE_ELSEWHERE : text,
     ...(reply ? { _reply: reply } : {}),
     ts: msOf(it.ts),
-    _roomSigFailed: it.sigValid === false,
-    _roomSigMismatch: !!it.mismatch,
-    _signedBy: it.from || null,
+    ...roomSigVerdict(it),
   };
 }
 
