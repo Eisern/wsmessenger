@@ -59,8 +59,12 @@ function hasMasterKey(maxAgeMs = 10 * 60 * 1000) {
 // stops holding the key. Without this the age was only ever set when the key
 // arrived, and nothing consulted it - the worker keeps itself alive, so the key
 // lived as long as the browser did.
+//
+// A touch only extends a key that is still alive. The key is not dropped the
+// moment its time runs out - only checked - so without this a late touch would
+// bring back a key that had already stopped answering.
 function touchMasterKey() {
-  if (_masterKey) _masterKeyTs = Date.now();
+  if (hasMasterKey()) _masterKeyTs = Date.now();
 }
 
 async function setMasterKeyFromB64(master_b64) {
@@ -2009,6 +2013,16 @@ if (msg.type === "unlock_master_clear") {
   try {
     clearMasterKey();
   } catch {}
+  return;
+}
+
+// An unlocked panel saying it is still in use (panel-crypto.js,
+// touchWorkerMasterKey). Encrypting and decrypting are the only other things
+// that count as use, and a session can go far longer than the TTL without
+// either - the key then vanished under an unlocked panel, and every room
+// password and key archive after that was quietly not saved.
+if (msg.type === "master_touch") {
+  touchMasterKey();
   return;
 }
 

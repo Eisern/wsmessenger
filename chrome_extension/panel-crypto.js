@@ -705,6 +705,7 @@ function lockCryptoSession() {
     clearTimeout(cryptoLockTimer);
     cryptoLockTimer = null;
   }
+  stopMasterKeyTouch();
   _ed25519PubKeyCache.clear();
   // Tokens for rooms on other islands were signed for with the key that is
   // being put away; they go with it.
@@ -865,6 +866,9 @@ function bumpCryptoIdleTimer() {
   if (!cryptoUnlocked) return;
   if (cryptoLockTimer) clearTimeout(cryptoLockTimer);
   cryptoLockTimer = setTimeout(lockCryptoSession, cryptoIdleLockMs);
+  // Every unlock path ends here, so this is where the worker starts hearing
+  // that the panel is in use (see touchWorkerMasterKey).
+  startMasterKeyTouch();
 }
 
 // treat any user activity as "still active"
@@ -873,6 +877,32 @@ if (!window.__cryptoIdleBound) {
   document.addEventListener("click", bumpCryptoIdleTimer, true);
   document.addEventListener("keydown", bumpCryptoIdleTimer, true);
   document.addEventListener("mousemove", bumpCryptoIdleTimer, true);
+}
+
+// The worker forgets the password-derived key after ten idle minutes, and the
+// only use it sees is encrypting or decrypting with it. A session goes much
+// longer than that without saving a room password, and this panel's own lock
+// can be set to 15 or 30 minutes - so the key used to vanish under an unlocked
+// panel, and the room passwords and key archives after that were quietly not
+// saved. While this panel is unlocked it says so once a minute; once it locks
+// or closes, the worker's ten minutes run out as before.
+const MASTER_KEY_TOUCH_MS = 60 * 1000;
+let masterKeyTouchTimer = null;
+
+function touchWorkerMasterKey() {
+  if (!cryptoUnlocked || !isCryptoUsable()) return;
+  try { safePost?.({ type: "master_touch" }); } catch {}
+}
+
+function startMasterKeyTouch() {
+  if (masterKeyTouchTimer) return;
+  masterKeyTouchTimer = setInterval(touchWorkerMasterKey, MASTER_KEY_TOUCH_MS);
+}
+
+function stopMasterKeyTouch() {
+  if (!masterKeyTouchTimer) return;
+  clearInterval(masterKeyTouchTimer);
+  masterKeyTouchTimer = null;
 }
 
 window.__setCryptoIdleLockMs = setCryptoIdleLockMs;
@@ -1006,6 +1036,9 @@ async function initializeCrypto({ interactive = false, reason = "", kekKey = nul
 
     // 2. Obtain KEK (either provided, or derive from password)
     let effectiveKek = kekKey;
+    // The same key, as bytes, for the worker - set only when it was derived
+    // here from the password, and dropped once handed over (step 5).
+    let masterB64ForWorker = "";
 
     if (!effectiveKek) {
       if (!interactive) {
@@ -1020,9 +1053,11 @@ async function initializeCrypto({ interactive = false, reason = "", kekKey = nul
         return false;
       }
 
-      // Derive KEK from password + salt (PBKDF2, ~620k iterations)
-      // After this line, only the non-extractable CryptoKey exists, no password string
-      effectiveKek = await CU().deriveKeyFromPassword(password, encryptedPrivateKey.salt, {
+      // Derive the KEK from password + salt, exactly as login.js does
+      // (deriveUnlockKekBase64) - the worker must end up with the same key a
+      // login gives it, or what it encrypted before stops opening. The bytes
+      // are kept as base64 only until the private key has opened with them.
+      const derived = await CU().deriveRawKeyFromPassword(password, encryptedPrivateKey.salt, {
         name: encryptedPrivateKey.kdf?.name,
         iterations: encryptedPrivateKey.kdf?.iterations,
         hash: encryptedPrivateKey.kdf?.hash,
@@ -1033,6 +1068,14 @@ async function initializeCrypto({ interactive = false, reason = "", kekKey = nul
         preferArgon2: true,
       });
       password = "";  // discard password string immediately
+      try {
+        effectiveKek = await crypto.subtle.importKey(
+          "raw", derived.raw, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+        );
+        masterB64ForWorker = CU().arrayBufferToBase64(derived.raw);
+      } finally {
+        try { derived.raw.fill(0); } catch {}
+      }
     }
 
     // One-shot migration: legacy v2 container -> v3 with AAD, then persist.
@@ -1118,6 +1161,21 @@ async function initializeCrypto({ interactive = false, reason = "", kekKey = nul
 
     console.log("User key initialized");
     markUnlockSuccess();
+
+    // 5. The worker's copy of the key may be gone - it forgets it after ten
+    // idle minutes - and without it room passwords and key archives are not
+    // saved. Only now, with the private key open, is it known to be right.
+    if (masterB64ForWorker) {
+      try {
+        if (typeof sendMasterKeyToBackground === "function") {
+          await sendMasterKeyToBackground(masterB64ForWorker, username);
+        }
+      } catch (e) {
+        console.warn("Could not hand the storage key back to the worker:", e?.message || e);
+      }
+      masterB64ForWorker = "";
+    }
+
     // Pin the KDF name on first successful unlock (only meaningful when we
     // actually exercised the KDF — auto-unlock with kekKey skips it).
     if (!kekKey) {

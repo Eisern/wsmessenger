@@ -104,9 +104,17 @@ pieces of state that the panel wants to cache at rest, e.g. room
 passwords (see the `storage_encrypt` / `storage_decrypt` handlers
 at [`background.js#L1687`](../chrome_extension/background.js#L1687)).
 
-Lifetime: cleared after 10 minutes of inactivity
-([`background.js#L39`](../chrome_extension/background.js#L39),
-`hasMasterKey(maxAgeMs = 10 * 60 * 1000)`), on lock, and on logout.
+Lifetime: forgotten after 10 minutes without use
+(`hasMasterKey(maxAgeMs = 10 * 60 * 1000)`) and on logout. Use is
+encrypting or decrypting with it, or an unlocked panel saying it is
+still open: while unlocked, the panel sends `master_touch` once a
+minute (`touchWorkerMasterKey` in `panel-crypto.js`), and a touch never
+revives a key that has already run out. Locking the panel stops the
+touches, so the key goes ten minutes later. A panel unlocked with the
+password hands the key back (`sendMasterKeyToBackground` in
+`panel.js`); before that only a full login did, and after ten quiet
+minutes room passwords and key archives were silently not saved until
+the next login.
 
 ### Unlock KEK (handoff / session)
 
@@ -260,11 +268,11 @@ The current default is 620 000 iterations.
 `CryptoKey` objects; raw bytes used during derivation are zeroed
 and nulled as soon as the import completes
 ([`crypto-manager.js`](../chrome_extension/crypto-manager.js)).
-The service worker's `_masterKey` has a 10-minute inactivity TTL
-([`background.js#L39`](../chrome_extension/background.js#L39)).
+The service worker's `_masterKey` has a 10-minute inactivity TTL,
+kept alive while a panel is unlocked (see *Master key* above).
 The Chrome panel's configurable idle auto-lock defaults to
-5 minutes and can be raised to 15 minutes
-([`panel-crypto.js#L336`](../chrome_extension/panel-crypto.js#L336)).
+5 minutes and can be set to 1, 5, 15 or 30 minutes
+(`CRYPTO_IDLE_LOCK_ALLOWED_MS` in `panel-crypto.js`).
 
 ---
 
@@ -291,6 +299,11 @@ an unauthenticated `chrome.runtime` message.
    sends it through the port.
 6. Background decrypts the payload, imports `master_b64` as the
    `_masterKey` and `kek_b64` as the session `_unlockKekKey`.
+
+A re-unlock in the panel derives the KEK the same way login does,
+opens the private key with it, and only then sends `master_b64`
+alone, bound to the username (`initializeCrypto` in
+`panel-crypto.js`); a wrong password sends nothing.
 
 The handoff token is strictly one-shot with a 30 s expiry
 (`UNLOCK_HANDOFF_TTL_MS` at

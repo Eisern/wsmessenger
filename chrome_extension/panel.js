@@ -401,9 +401,33 @@ let pendingNewRoomMeta = null; // { description: string|null, logoFile: File|nul
 let pendingPinFromSelection = null; // {url, text} | null
 
 
+// Its only callers (interactiveUnlockAndSendKek and takeStashedUnlockKek in
+// panel-crypto.js) are never called themselves, and the worker never reads
+// the slot this fills.
 function sendUnlockKekToBackground(kekB64, ts = Date.now()) {
-  const b64 = String(kekB64 || "").trim();
-  if (!b64) return;
+  return _unlockHandoffToBackground({ kekB64, ts });
+}
+
+/**
+ * Give the worker back the password-derived key after this panel unlocked
+ * with the password (panel-crypto.js, initializeCrypto).
+ *
+ * The worker uses it to encrypt room passwords and key archives at rest, and
+ * forgets it after ten idle minutes. Only a full login used to hand it over,
+ * so once it had gone, unlocking the panel again brought the identity key
+ * back but not this one, and nothing was saved until the next login.
+ * Bound to the username, so another account's panel cannot take it.
+ */
+/* exported sendMasterKeyToBackground -- called from panel-crypto.js */
+function sendMasterKeyToBackground(masterB64, username) {
+  return _unlockHandoffToBackground({ masterB64, username });
+}
+
+function _unlockHandoffToBackground({ masterB64 = "", kekB64 = "", username = "", ts = Date.now() } = {}) {
+  let master = String(masterB64 || "").trim();
+  let b64 = String(kekB64 || "").trim();
+  if (!master && !b64) return;
+  const user = String(username || "").trim().toLowerCase();
 
   const p = port;
   if (!p?.postMessage) throw new Error("No port");
@@ -427,7 +451,7 @@ function sendUnlockKekToBackground(kekB64, ts = Date.now()) {
     v: Number(meta?.v || 1),
     purpose: "unlock_handoff",
     req_id: String(meta?.req_id || ""),
-    username: "",
+    username: user,
     ts: Number(meta?.ts || 0),
   });
 
@@ -455,7 +479,7 @@ function sendUnlockKekToBackground(kekB64, ts = Date.now()) {
 
   const run = async () => {
     const beginWait = wait((msg) => msg?.type === "unlock_handoff_begin_res" && msg?.reqId === reqId);
-    p.postMessage({ type: "unlock_handoff_begin", reqId, username: "", ts: Date.now() });
+    p.postMessage({ type: "unlock_handoff_begin", reqId, username: user, ts: Date.now() });
     const beginRes = await beginWait;
     if (!beginRes?.ok) throw new Error(beginRes?.error || "unlock_handoff_begin failed");
 
@@ -489,15 +513,15 @@ function sendUnlockKekToBackground(kekB64, ts = Date.now()) {
     );
 
     const tsNow = Number(ts || Date.now());
-    const aad = { v: 1, req_id: reqId, username: "", ts: tsNow };
+    const aad = { v: 1, req_id: reqId, username: user, ts: tsNow };
     const aadBytes = te.encode(aadString(aad));
     const payload = {
       v: 1,
       req_id: reqId,
-      username: "",
+      username: user,
       ts: tsNow,
       exp: tsNow + 30_000,
-      master_b64: "",
+      master_b64: master,
       kek_b64: b64,
     };
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -521,7 +545,7 @@ function sendUnlockKekToBackground(kekB64, ts = Date.now()) {
     if (!commitRes?.ok) throw new Error(commitRes?.error || "unlock_handoff_commit failed");
   };
 
-  return run().finally(() => { kekB64 = ""; });
+  return run().finally(() => { master = ""; b64 = ""; });
 }
 
 // ===== UI modal helpers (replace alert/confirm/prompt) =====
