@@ -4,7 +4,12 @@
 
 // @ts-nocheck
 /**
- * FileCard.js — renders a file attachment card (download button) for FILE2:: markers.
+ * FileCard.js — a file in a conversation, with a download button.
+ *
+ * `file` is parseFileMarker's result. An encrypted file (FILE3) is decrypted on
+ * the way down and saved only if all of it checked out; one sent before files
+ * were encrypted (FILE2, `key` null) is saved as the island returns it, and
+ * says so.
  */
 
 import React, { useState } from 'react';
@@ -13,9 +18,10 @@ import {
 } from 'react-native';
 import { Colors, Spacing, Radii, Typography } from '../theme';
 import { formatFileSize } from '../utils/fileMarker';
-import NetworkService from '../services/NetworkService';
+import { fetchFileTo } from '../services/FileTransferService';
 
-export default function FileCard({ token, filename, sizeBytes }) {
+export default function FileCard({ file }) {
+  const { filename, sizeBytes } = file;
   const [downloading, setDownloading] = useState(false);
 
   async function handleDownload() {
@@ -35,24 +41,13 @@ export default function FileCard({ token, filename, sizeBytes }) {
       }
 
       const RNFS = require('react-native-fs');
-      const url = NetworkService.getFileUrl(token);
-      const headers = NetworkService.getFileHeaders();
       const destDir = RNFS.DownloadDirectoryPath || RNFS.DocumentDirectoryPath;
       // Defense-in-depth: strip path separators and traversal sequences from filename
       const safeName = (filename || 'file').replace(/[\/\\]/g, '_').replace(/\.\./g, '_') || 'file';
       const destPath = `${destDir}/${safeName}`;
 
-      const res = await RNFS.downloadFile({
-        fromUrl: url,
-        toFile: destPath,
-        headers,
-      }).promise;
-
-      if (res.statusCode === 200) {
-        Alert.alert('Downloaded', `Saved to:\n${destPath}`);
-      } else {
-        Alert.alert('Download failed', `Server returned status ${res.statusCode}`);
-      }
+      await fetchFileTo(file, destPath);
+      Alert.alert('Downloaded', `Saved to:\n${destPath}`);
     } catch (e) {
       Alert.alert('Download error', e?.message || 'Unknown error');
     } finally {
@@ -60,7 +55,8 @@ export default function FileCard({ token, filename, sizeBytes }) {
     }
   }
 
-  const sizeStr = formatFileSize(sizeBytes);
+  // A file from before files were encrypted: the server could read it.
+  const sizeStr = [formatFileSize(sizeBytes), file.key ? '' : 'sent unencrypted'].filter(Boolean).join(' · ');
 
   return (
     <TouchableOpacity style={styles.card} onPress={handleDownload} disabled={downloading}>

@@ -73,7 +73,7 @@ jest.mock('../../services/GuestRoomService', () => ({
 
 import GuestRoomScreen from '../GuestRoomScreen';
 import GuestRoomService from '../../services/GuestRoomService';
-import { makeFileMarker } from '../../utils/fileMarker';
+import FC from '../../services/file-crypt';
 
 const ROOM = { islandId: 'island-r.test', roomId: 42, roomName: 'Book club', guestName: 'Alice@g~ab' };
 
@@ -138,7 +138,7 @@ test('draws oldest at the top, in the order the feed hands things over', async (
 
 test('a file is not offered as something this app could open; a reply shows its text', async () => {
   const tree = await render();
-  const file = makeFileMarker('tok', 'a.pdf', 10);
+  const file = FC.makeMarker({ token: 'tok', key: new Uint8Array(32), name: 'a.pdf', mime: '', size: 10 });
   await act(async () => {
     mockFeed.handlers.onReset([
       item(file),

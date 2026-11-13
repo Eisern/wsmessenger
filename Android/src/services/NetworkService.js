@@ -692,7 +692,7 @@ class NetworkService {
     if (resp.status === 401 && !_retried && !noAuth) {
       const refreshed = await this._doRefresh();
       if (refreshed) {
-        return this._fetch(path, { method, body, headers, noAuth, formData, _retried: true });
+        return this._fetch(path, { method, body, headers, noAuth, formData, _retried: true, timeoutMs });
       }
       // Before declaring the session dead, rule out having just rotated onto a
       // server that is not this island at all.
@@ -1870,8 +1870,10 @@ class NetworkService {
   // Files
   // ============================
 
-  static MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
   static MAX_LOGO_SIZE = 5 * 1024 * 1024;  // 5 MB
+  // A file is tens of megabytes over a phone's uplink; the default 30 s would
+  // abort it and report the entry point as dead.
+  static UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
 
   async _validateFileSize(uri, maxBytes) {
     try {
@@ -1886,26 +1888,31 @@ class NetworkService {
     }
   }
 
-  async uploadFile(roomId, { filename, mimeType, fileBlob }) {
-    await this._validateFileSize(fileBlob, NetworkService.MAX_FILE_SIZE);
+  // Both take the blob FileTransferService.sendEncryptedFile made, and nothing
+  // about the file itself: its name and type go in the encrypted message that
+  // announces it, never in the upload. The island refuses anything else.
+  _blobForm(sealedFileUri) {
     const form = new FormData();
-    form.append('file', { uri: fileBlob, name: filename, type: mimeType });
-    return this._fetch(`/rooms/${encodeURIComponent(roomId)}/files`, {
-      method: 'POST',
-      formData: form,
-    });
-    // → { token, filename, size_bytes }
+    form.append('file', { uri: sealedFileUri, name: 'blob', type: 'application/octet-stream' });
+    return form;
   }
 
-  async uploadDmFile(threadId, { filename, mimeType, fileBlob }) {
-    await this._validateFileSize(fileBlob, NetworkService.MAX_FILE_SIZE);
-    const form = new FormData();
-    form.append('file', { uri: fileBlob, name: filename, type: mimeType });
+  async uploadFile(roomId, sealedFileUri) {
+    return this._fetch(`/rooms/${encodeURIComponent(roomId)}/files`, {
+      method: 'POST',
+      formData: this._blobForm(sealedFileUri),
+      timeoutMs: NetworkService.UPLOAD_TIMEOUT_MS,
+    });
+    // → { token, size_bytes }
+  }
+
+  async uploadDmFile(threadId, sealedFileUri) {
     return this._fetch(`/dm/${encodeURIComponent(threadId)}/files`, {
       method: 'POST',
-      formData: form,
+      formData: this._blobForm(sealedFileUri),
+      timeoutMs: NetworkService.UPLOAD_TIMEOUT_MS,
     });
-    // → { token, filename, size_bytes, url }
+    // → { token, size_bytes }
   }
 
   async uploadRoomLogo(roomId, { filename, mimeType, fileBlob }) {

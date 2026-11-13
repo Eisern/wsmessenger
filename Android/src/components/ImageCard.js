@@ -7,8 +7,10 @@
  * ImageCard.js — inline thumbnail for image attachments (jpg/jpeg/png/webp/gif).
  *
  * Security notes:
- * - Images are fetched with a Bearer token — same auth as all other file downloads.
- * - Cached to RNFS.CachesDirectoryPath (app-private, not accessible by other apps).
+ * - Fetched and decrypted by FileTransferService.fetchFileTo — the same path as
+ *   every other file download; what the island holds is an opaque blob.
+ * - The decrypted image is cached in RNFS.CachesDirectoryPath (app-private, not
+ *   accessible by other apps).
  * - Cache key is the file token (validated to [A-Za-z0-9_-] by parseFileMarker).
  * - On download error falls back to a plain FileCard (no silent failure).
  */
@@ -20,12 +22,13 @@ import {
 } from 'react-native';
 import { Colors, Spacing, Radii, Typography } from '../theme';
 import { formatFileSize } from '../utils/fileMarker';
-import NetworkService from '../services/NetworkService';
+import { fetchFileTo } from '../services/FileTransferService';
 import FileCard from './FileCard';
 
 const THUMB_HEIGHT = 180;
 
-export default function ImageCard({ token, filename, sizeBytes }) {
+export default function ImageCard({ file }) {
+  const { token, filename, sizeBytes } = file;
   const [localUri, setLocalUri] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -43,31 +46,31 @@ export default function ImageCard({ token, filename, sizeBytes }) {
           if (!cancelled) setLocalUri(`file://${cachePath}`);
           return;
         }
-        const url = NetworkService.getFileUrl(token);
-        const headers = NetworkService.getFileHeaders();
-        const result = await RNFS.downloadFile({ fromUrl: url, toFile: cachePath, headers }).promise;
-        if (result.statusCode === 200) {
-          // Validate magic bytes to confirm the server returned actual image data.
-          // Defends against a compromised server returning non-image content in a trusted filename.
+        // Throws on anything but a whole, authentic file, and leaves nothing
+        // at cachePath when it does (the catch below falls back to FileCard).
+        await fetchFileTo(file, cachePath);
+
+        // Validate magic bytes: the name says "image", the content must too.
+        // A sender can call anything photo.png.
+        let isValidImage = false;
+        try {
           const headerB64 = await RNFS.read(cachePath, 12, 0, 'base64');
           const b = Uint8Array.from(atob(headerB64), c => c.charCodeAt(0));
-          const isValidImage =
+          isValidImage =
             (b[0] === 0xFF && b[1] === 0xD8 && b[2] === 0xFF) ||           // JPEG
             (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) || // PNG
             (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) ||           // GIF
             (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&  // WEBP (RIFF....WEBP)
              b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50);
-          if (!isValidImage) {
-            await RNFS.unlink(cachePath).catch(() => {});
-            if (!cancelled) setLoadError(true);
-            return;
-          }
-          if (!cancelled) setLocalUri(`file://${cachePath}`);
-        } else {
-          // Remove the empty/partial file so the next mount doesn't find a corrupt cache entry.
+        } catch (_e) {
+          isValidImage = false;   // too short to be an image, or unreadable
+        }
+        if (!isValidImage) {
           await RNFS.unlink(cachePath).catch(() => {});
           if (!cancelled) setLoadError(true);
+          return;
         }
+        if (!cancelled) setLocalUri(`file://${cachePath}`);
       } catch (_e) {
         if (!cancelled) setLoadError(true);
       } finally {
@@ -80,7 +83,7 @@ export default function ImageCard({ token, filename, sizeBytes }) {
 
   // Fall back to regular FileCard on any download/render error
   if (loadError) {
-    return <FileCard token={token} filename={filename} sizeBytes={sizeBytes} />;
+    return <FileCard file={file} />;
   }
 
   const screenWidth = Dimensions.get('window').width;

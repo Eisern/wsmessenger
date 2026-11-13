@@ -38,7 +38,6 @@ const SENSITIVE_PORT_TYPES = new Set([
   "storage_encrypt",
   "storage_decrypt",
   "dm_delete",
-  "file_upload",
   "room_logo_upload",
 ]);
 
@@ -3826,119 +3825,6 @@ if (msg.type === "room_logo_upload") {
       roomId: Number(msg.roomId) || 0,
       message: "Logo upload failed: " + (e?.message || e),
     });
-  }
-  return;
-}
-
-// --- file_upload ---
-// payload: {roomId, filename, mime, bytes (ArrayBuffer or ArrayBufferView)}
-if (msg.type === "file_upload") {
-  const MAX_FILE = 100 * 1024 * 1024;
-
-  await ensureAuthLoaded();
-  try {
-    if (!wsState.token) throw new Error("Not logged in");
-
-    const roomId = Number(msg.roomId);
-    const filename = (msg.filename || "").trim();
-    const mime = msg.mime || "application/octet-stream";
-
-    if (!roomId) throw new Error("Missing roomId");
-    if (!filename) throw new Error("Missing filename");
-
-    let ab = null;
-
-    // Prefer msg.bytes, then msg.bytes_u8
-    let b = null;
-    if (msg.bytes instanceof ArrayBuffer || ArrayBuffer.isView(msg.bytes) || Array.isArray(msg.bytes)) {
-      b = msg.bytes;
-    } else if (msg.bytes_u8 && (ArrayBuffer.isView(msg.bytes_u8) || Array.isArray(msg.bytes_u8))) {
-      b = msg.bytes_u8;
-    } else if (msg.bytes_u8 && typeof msg.bytes_u8 === "object") {
-      b = msg.bytes_u8;
-    } else if (msg.bytes && typeof msg.bytes === "object") {
-      b = msg.bytes;
-    }
-
-    if (b instanceof ArrayBuffer) {
-      ab = b;
-    } else if (ArrayBuffer.isView(b) && b.buffer instanceof ArrayBuffer) {
-      // slice so we don't send the entire underlying buffer
-      if (b.byteLength > MAX_FILE) throw new Error("File too large (max 100MB)");
-      ab = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-    } else if (b && b.buffer instanceof ArrayBuffer) {
-      // Some buffer-like object; slice if it exposes offsets
-      if (typeof b.byteOffset === "number" && typeof b.byteLength === "number") {
-        if (b.byteLength > MAX_FILE) throw new Error("File too large (max 100MB)");
-        ab = b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-      } else {
-        ab = b.buffer;
-      }
-    } else if (Array.isArray(b)) {
-      // plain array of bytes
-      if (b.length > MAX_FILE) throw new Error("File too large (max 100MB)");
-      ab = new Uint8Array(b).buffer;
-    } else if (b && Array.isArray(b.data)) {
-      // Buffer-like: { type:"Buffer", data:[...] }
-      if (b.data.length > MAX_FILE) throw new Error("File too large (max 100MB)");
-      ab = new Uint8Array(b.data).buffer;
-    } else if (typeof msg.bytes_len === "number" && b && typeof b === "object") {
-      // Worst case: plain object with numeric keys, no view/length
-      const n = msg.bytes_len >>> 0;
-
-      // ✅ EARLY CAP BEFORE ALLOCATION (DoS fix)
-      if (n > MAX_FILE) throw new Error("File too large (max 100MB)");
-
-      if (n > 0) {
-        const out = new Uint8Array(n);
-        for (let i = 0; i < n; i++) out[i] = (b[i] ?? 0) & 255;
-        ab = out.buffer;
-      }
-    } else if (b && typeof b.length === "number") {
-      // array-like: {0:...,1:...,length:N}
-      const n = (b.length >>> 0);
-
-      // ✅ EARLY CAP BEFORE ALLOCATION (DoS fix)
-      if (n > MAX_FILE) throw new Error("File too large (max 100MB)");
-
-      if (n > 0) {
-        const out = new Uint8Array(n);
-        for (let i = 0; i < n; i++) out[i] = (b[i] ?? 0) & 255;
-        ab = out.buffer;
-      }
-    }
-
-    if (!ab || ab.byteLength <= 0) throw new Error("Missing bytes");
-
-    // Final guard
-    if (ab.byteLength > MAX_FILE) throw new Error("File too large (max 100MB)");
-
-    const blob = new Blob([ab], { type: mime });
-    const form = new FormData();
-    form.append("file", blob, filename);
-
-    const r = await fetch(API_BASE + `/rooms/${encodeURIComponent(roomId)}/files`, {
-      method: "POST",
-      headers: { "Authorization": "Bearer " + wsState.token },
-      body: form
-    });
-
-    const body = await readBody(r);
-    if (!r.ok) {
-      const detail = (body && typeof body === "object" && body.detail) ? body.detail : String(body || "");
-      throw new Error(detail || `Upload failed (${r.status})`);
-    }
-
-    post({
-      type: "file_uploaded",
-      ok: true,
-      filename: body.filename,
-      size_bytes: body.size_bytes,
-      url: body.url,
-      url_full: API_BASE + body.url
-    });
-  } catch (e) {
-    post({ type: "file_uploaded", ok: false, message: "File upload failed: " + (e?.message || e) });
   }
   return;
 }

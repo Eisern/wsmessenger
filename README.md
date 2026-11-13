@@ -28,7 +28,9 @@ WS Messenger consists of three components in this repository:
 
 All three speak the same WebSocket protocol and share the same E2EE
 scheme. The server never holds plaintext message content, room keys, or
-identity private key material.
+identity private key material. Attachments are encrypted on the device
+too: the server stores an opaque padded blob, with no file name and no
+type.
 
 ## Cryptography at a glance
 

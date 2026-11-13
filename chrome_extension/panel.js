@@ -1107,24 +1107,6 @@ function ensureFileInput() {
   return fileInputEl;
 }
 
-function makeFileMarker(token, filename, sizeBytes) {
-  const safeName = String(filename || "file").replaceAll("\n", " ").trim().slice(0, 220);
-  const safeSize = Number.isFinite(sizeBytes) ? Number(sizeBytes) : null;
-  const payload = {
-    v: 2,
-    t: String(token || "").trim(),
-    n: safeName || "file",
-    s: (safeSize != null && safeSize >= 0) ? safeSize : null,
-    ts: Date.now(),
-  };
-  const json = JSON.stringify(payload);
-  const bytes = new TextEncoder().encode(json);
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-  const b64 = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  return `FILE2::${b64}`;
-}
-
 function isReadOnlyRoomForMember(roomId = activeRoomId) {
   const rid = roomId != null ? String(roomId) : "";
   if (!rid) return false;
@@ -1140,6 +1122,73 @@ function canPostToActiveRoom() {
 }
 
 window.__canPostToActiveRoom = canPostToActiveRoom;
+
+/**
+ * Send a file: encrypt it here, hand the island an opaque blob, and tell the
+ * conversation - in an encrypted message - what it is and how to open it.
+ *
+ * The island gets no name, no type and no readable byte (file-crypt.js). The
+ * FILE3 marker holds the file's key, so it goes out only through
+ * encryptMessageForRoom / encryptDm; a room marker used to be posted as plain
+ * text, token and name included.
+ *
+ * @param {File|Blob} f
+ * @param {{roomId:number}|{threadId:number, peer:string}} dest
+ */
+async function uploadEncryptedFile(f, dest) {
+  const FC = globalThis.WSFileCrypt;
+  const inDm = dest.threadId != null;
+  if (inDm ? !dest.threadId : !dest.roomId) throw new Error("No conversation to send the file to");
+
+  if (f.size > MAX_UPLOAD_BYTES) {
+    await __ui.alert("File is too big. Maximum size is 100 MB.");
+    return;
+  }
+
+  const jwt = await requestToken();
+  if (!jwt) {
+    await __ui.alert("No token (not logged in?)");
+    return;
+  }
+
+  const parts = [];
+  const sealed = await FC.seal({
+    read: async (offset, length) => new Uint8Array(await f.slice(offset, offset + length).arrayBuffer()),
+    write: async (bytes) => { parts.push(bytes); },
+    crypto: globalThis.crypto,
+  });
+
+  const form = new FormData();
+  form.append("file", new Blob(parts, { type: "application/octet-stream" }), "blob");
+
+  const uploadUrl = inDm
+    ? (API_BASE + `/dm/${encodeURIComponent(dest.threadId)}/files`)
+    : (API_BASE + `/rooms/${encodeURIComponent(dest.roomId)}/files`);
+  const r = await fetch(uploadUrl, {
+    method: "POST",
+    headers: { "Authorization": "Bearer " + jwt },
+    body: form
+  });
+
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body?.detail || `Upload failed (${r.status})`);
+
+  const marker = FC.makeMarker({
+    token: String(body.token || ""),
+    key: sealed.key,
+    name: f.name,
+    mime: f.type,
+    size: sealed.size,
+  });
+  if (inDm) {
+    const enc = await encryptDm(dest.threadId, marker, dest.peer);
+    safePost({ type: "dm_send", thread_id: dest.threadId, text: enc });
+    try { __markDmSeen?.(dest.threadId); } catch {}
+  } else {
+    const enc = await encryptMessageForRoom(dest.roomId, marker);
+    safePost({ type: "send", room_id: dest.roomId, text: enc });
+  }
+}
 
 async function pickAndUploadFile() {
   if (__syncCryptoUiLockFromRuntime()) {
@@ -1174,49 +1223,18 @@ async function pickAndUploadFile() {
   const inp = ensureFileInput();
   inp.value = "";
 
+  // Where the file goes is settled now, while the conversation it was picked
+  // for is on screen: the upload takes a while, and a file must not follow the
+  // user into whatever they opened meanwhile - least of all its key.
+  const dest = inDm
+    ? { threadId: Number(activeDmThreadId || 0), peer: activeDmPeer }
+    : { roomId: Number(activeRoomId || 0) };
+
   inp.onchange = async () => {
     try {
       const f = inp.files && inp.files[0];
       if (!f) return;
-
-      if (f.size > MAX_UPLOAD_BYTES) {
-        await __ui.alert("File is too big. Maximum size-100MB.");
-        return;
-      }
-
-      const jwt = await requestToken();
-      if (!jwt) {
-        await __ui.alert("No token (not logged in?)");
-        return;
-      }
-
-      const form = new FormData();
-      form.append("file", f, f.name);
-
-      const uploadUrl = inDm
-        ? (API_BASE + `/dm/${encodeURIComponent(activeDmThreadId)}/files`)
-        : (API_BASE + `/rooms/${encodeURIComponent(activeRoomId)}/files`);
-      const r = await fetch(uploadUrl, {
-        method: "POST",
-        headers: { "Authorization": "Bearer " + jwt },
-        body: form
-      });
-
-      const body = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(body?.detail || `Upload failed (${r.status})`);
-
-      const marker = makeFileMarker(body.token, body.filename || f.name, body.size_bytes ?? f.size);
-      if (inDm) {
-        const sendPeer = activeDmPeer;
-        const threadId = Number(activeDmThreadId || 0);
-        if (!threadId) throw new Error("DM thread is not selected");
-        const enc = await encryptDm(threadId, marker, sendPeer);
-        safePost({ type: "dm_send", thread_id: threadId, text: enc });
-        try { __markDmSeen?.(threadId); } catch {}
-      } else {
-        safePost({ type: "send", room_id: Number(activeRoomId || 0), text: marker });
-      }
-
+      await uploadEncryptedFile(f, dest);
     } catch (e) {
       await __ui.alert("File upload failed: " + (e?.message || e));
     } finally {
@@ -3272,45 +3290,27 @@ async function send() {
   msgInput.value = "";
 }
 
+// A file in a conversation: FILE3 (encrypted, key inside) or FILE2 (sent before
+// files were encrypted - `key` is null and the blob is the file itself).
 function parseFileMarker(text) {
-  if (typeof text !== "string") return null;
-  if (!text.startsWith("FILE2::")) return null; // legacy FILE:: format is intentionally unsupported in beta
-
-  const b64url = String(text.slice("FILE2::".length) || "").trim();
-  if (!b64url) return null;
-
-  try {
-    let b64 = b64url.replace(/-/g, "+").replace(/_/g, "/");
-    b64 += "=".repeat((4 - (b64.length % 4)) % 4);
-    const bin = atob(b64);
-    const u8 = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-    const raw = new TextDecoder().decode(u8);
-    const p = JSON.parse(raw);
-
-    if (Number(p?.v) !== 2) return null;
-    const token = String(p?.t || "").trim();
-    const filename = String(p?.n || "file").replaceAll("\n", " ").trim().slice(0, 220);
-    const sizeNum = (p?.s == null) ? null : Number(p.s);
-    const sizeBytes = Number.isFinite(sizeNum) && sizeNum >= 0 ? sizeNum : null;
-
-    // token should be url-safe token from backend
-    if (!token || token.length > 256 || /[^A-Za-z0-9_-]/.test(token)) return null;
-
-    return { token, filename: filename || "file", sizeBytes };
-  } catch {
-    return null;
-  }
+  return globalThis.WSFileCrypt.parseMarker(text);
 }
 
-async function downloadFileByToken(token, filename) {
+/**
+ * Fetch a file and save it. An encrypted one is decrypted first, and saved
+ * only if every chunk of it checked out - a blob the island cut short, swapped
+ * or altered throws and nothing is saved.
+ *
+ * @param {{token:string, filename:string, sizeBytes:number|null, key:Uint8Array|null}} file
+ */
+async function downloadFile(file) {
   const jwt = await requestToken();
   if (!jwt) {
     await __ui.alert("No token (not logged in?)");
     return;
   }
 
-  const r = await fetch(API_BASE + `/files/${encodeURIComponent(token)}`, {
+  const r = await fetch(API_BASE + `/files/${encodeURIComponent(file.token)}`, {
     method: "GET",
     headers: { "Authorization": "Bearer " + jwt }
   });
@@ -3320,7 +3320,21 @@ async function downloadFileByToken(token, filename) {
     throw new Error(body?.detail || `Download failed (${r.status})`);
   }
 
-  const blob = await r.blob();
+  let blob = await r.blob();
+  if (file.key) {
+    const sealed = blob;
+    const parts = [];
+    await globalThis.WSFileCrypt.open({
+      key: file.key,
+      size: file.sizeBytes,
+      sealedSize: sealed.size,
+      read: async (offset, length) => new Uint8Array(await sealed.slice(offset, offset + length).arrayBuffer()),
+      write: async (bytes) => { parts.push(bytes); },
+      crypto: globalThis.crypto,
+    });
+    blob = new Blob(parts, { type: "application/octet-stream" });
+  }
+  const filename = file.filename;
   const url = URL.createObjectURL(blob);
 
   const a = document.createElement("a");
@@ -3333,7 +3347,8 @@ async function downloadFileByToken(token, filename) {
   setTimeout(() => URL.revokeObjectURL(url), 30000);
 }
 
-function buildFileCard({ token, filename, sizeBytes }, me) {
+function buildFileCard(file, me) {
+  const { filename, sizeBytes } = file;
   const wrap = document.createElement("div");
   wrap.className = "msg file" + (me ? " me" : "");
 
@@ -3349,6 +3364,8 @@ function buildFileCard({ token, filename, sizeBytes }, me) {
   sizeEl.textContent = (sizeBytes != null && Number.isFinite(sizeBytes))
     ? humanSize(sizeBytes)
     : "";
+  // A file from before files were encrypted: the server could read it.
+  if (!file.key) sizeEl.textContent = [sizeEl.textContent, "sent unencrypted"].filter(Boolean).join(" · ");
 
   left.appendChild(nameEl);
   if (sizeEl.textContent) left.appendChild(sizeEl);
@@ -3362,7 +3379,7 @@ function buildFileCard({ token, filename, sizeBytes }, me) {
     const prev = btn.textContent;
     btn.textContent = "Downloading...";
     try {
-      await downloadFileByToken(token, filename);
+      await downloadFile(file);
     } catch (e) {
       await __ui.alert(e?.message || e);
     } finally {
@@ -3707,7 +3724,9 @@ function addMsg(user, text, me = false, ts = null, reply = null) {
 
   if (fileInfo) {
     const card = buildFileCard(fileInfo, me);
-    card.oncontextmenu = (e) => { e.preventDefault(); __showMsgCtxMenu(e, user, text); };
+    // The name, not the marker: the marker holds the file's key, and has no
+    // business in a quote or on the clipboard.
+    card.oncontextmenu = (e) => { e.preventDefault(); __showMsgCtxMenu(e, user, fileInfo.filename); };
     chat.appendChild(card);
   } else {
     const div = document.createElement("div");

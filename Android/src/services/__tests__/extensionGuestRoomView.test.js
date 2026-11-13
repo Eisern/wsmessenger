@@ -22,6 +22,7 @@ const vm = require('vm');
 const PANEL_UI = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'panel-ui.js');
 const FEED = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-room-feed.js');
 const MARKER = '// Rooms on other servers, as a guest';
+const FC = require('../file-crypt');
 
 function deferred() {
   let resolve;
@@ -60,6 +61,7 @@ function makeView() {
     renderCurrentRoom: () => {},
     highlightActiveRoom: () => {},
     parseV2Payload: (t) => ({ text: t, reply: null }),
+    parseFileMarker: (t) => FC.parseMarker(t),
     addMsg: (user, text) => { log.push(text); },
     __warnAboutRoomSignature: () => {},
     formatMsgTime: () => '',
@@ -130,6 +132,20 @@ describe('a guest room being opened', () => {
     await opened;
     await flush();
     expect(V.screen()).toEqual(['h1', 'h2', 'm3']);
+  });
+
+  test('a file is shown as a note, not as a card that would ask the wrong island for it', async () => {
+    // The download path knows only this island and this island's session; a
+    // card here would send the token of a file on another island to ours.
+    const V = makeView();
+    const file = FC.makeMarker({ token: 'tok', key: new Uint8Array(32), name: 'plan.pdf', mime: '', size: 10 });
+    V.island.history = ['before', file];
+    const opened = V.open(ROOM);
+    await flush();
+    V.sockets[0].up();
+    await opened;
+    await flush();
+    expect(V.screen()).toEqual(['before', '[A file. Files in rooms on other servers cannot be opened from here yet.]']);
   });
 
   test('draws a message that is both in the history and on the socket once', async () => {

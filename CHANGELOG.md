@@ -10,6 +10,12 @@ they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 
 ### Read this first, if you run a server
 
+- **The server takes only encrypted files, so update the clients with it.** A
+  client from before this version still uploads a file as it is, and now gets
+  a 400 telling its user to update; reading and sending messages is unaffected.
+  Files uploaded earlier stay downloadable until they expire (`FILE_TTL_DAYS`,
+  7 by default) and stay in whatever backups already hold them - in the clear,
+  with their names.
 - **Guests from other islands are accepted as soon as `ISLAND_ID` is set** —
   also on a server that had the island identity before this version, with
   nothing to opt in to. `ISLAND_ACCEPT_GUESTS=0` in `.env` refuses them.
@@ -193,6 +199,25 @@ island - waited for somebody's browser extension.
 
 ### Fixed — security
 
+- **Attachments were not encrypted.** Neither client encrypted a file: the
+  server received its bytes, its name and its type, kept all three, and every
+  backup of the upload directory carried them - while this README said the
+  server held no plaintext content. In a room the extension also announced the
+  file with a message sent in the clear. Now a file is encrypted on the device
+  under a key made for it alone (AES-256-GCM in 1 MiB chunks, each bound to its
+  place, padded to a size class), the server is handed one opaque blob called
+  `blob`, and the key, the name, the type and the size travel only inside the
+  encrypted message that announces the file (`FILE3`). The server refuses
+  anything else, stores no name and no type, and no longer repeats the ones it
+  kept for older files. A reader saves nothing unless the whole blob verified,
+  so a file the server altered, cut short or swapped is an error, not a
+  download. Format: `file-crypt.js`, one file shared by both clients.
+- **An expired file was deleted only if somebody tried to download it.** One
+  nobody asked for again stayed on disk for good. Expired files are now purged
+  on every upload.
+- **A file could follow the user into another conversation.** The extension
+  read where to send the file after the upload finished; it is now settled
+  when the file is picked.
 - **A guest's sign-in handed out a refresh token.** Valid for a week, it was a
   way in as the guest that needed no key - the one thing a guest session is
   meant to require - and it put a row in `refresh_tokens`, which nothing ever
@@ -211,6 +236,18 @@ island - waited for somebody's browser extension.
 
 ### Added — tests
 
+- Attachments: `fileCrypt.test.js` (the shared format, both copies: known
+  blobs, padding, every way to drop, repeat, reorder or cut a chunk, the
+  marker and what a name may contain), `extensionFileTransfer.test.js` (the
+  real send and fetch code from `panel.js` against an island that keeps
+  everything it is handed - none of the file, its name or its key is in it),
+  `fileTransferService.test.js` (Android, through a file system in memory) and
+  `server/tests/test_files.py` (the real server: plain uploads refused, no
+  name or type kept, the largest allowed file fits, expired files purged).
+  20 protections, each removed in turn, fail a test; three that did not at
+  first got the tests they lacked. Driven by hand in a browser as well: files
+  in a room and in a conversation come back byte for byte, and a blob edited
+  on the server's disk is refused.
 - `server/tests` — the first tests of the server: the real `uvicorn main:app`
   against a real PostgreSQL (`TEST_DATABASE_URL`, or `pgserver` locally), 35 of
   them for guests, the claim nonce and the invitation flow they share with

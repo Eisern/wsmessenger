@@ -61,6 +61,7 @@ Unlike the Chrome Extension (two contexts via `chrome.runtime` ports), the Andro
 | `src/services/GuestRoomService.js` | Rooms on other islands as a guest: sessions, invitations (both sides), keys and signatures with that island's names, the room socket — the Android half of panel-crypto.js's "Rooms on other islands" |
 | `src/services/guest-rooms.js`, `guest-room-feed.js` | Guest-room protocol and feed ordering — **byte-identical** to the extension's copies |
 | `src/services/KeySweepService.js` | Hands the room key to accepted members who have none (owners/admins), on unlock, `notify_key_gap`, membership changes and "Send missing keys" — the Android half of the extension's sweep; rules in `key-sweep.js` (**byte-identical** to the extension's) |
+| `src/services/FileTransferService.js` | Attachments: encrypts a picked file chunk by chunk through the app's cache, uploads the opaque blob, returns the `FILE3` marker to send encrypted; fetches and decrypts on the way down (`sendEncryptedFile` / `fetchFileTo`). Format in `file-crypt.js` (**byte-identical** to the extension's) |
 | `src/screens/GuestRoomScreen.js` | A guest room: draws what the feed hands it, with ChatScreen's `MessageBubble` |
 | `src/services/endpoints.js` | Entry-point list, failure classification, rotation — **byte-identical** to the extension's copy |
 | `src/services/island-list.js`, `outbox.js`, `thread-chain.js` | Signed island list, durable send queue, hash chains — all byte-identical duplicates |
@@ -285,7 +286,7 @@ The `+` button in DMChatScreen shows a two-option menu (via `Alert.alert`):
 **Camera security model:**
 - Uses Android `ACTION_IMAGE_CAPTURE` intent — the OS camera app handles capture; this app has no direct hardware access while the camera is active
 - `saveToPhotos: false` — photo lives only in the app's temp cache until upload completes, never saved to gallery
-- Photo is E2EE-encrypted (DM key) before upload — same path as any file attachment
+- Photo is encrypted on the phone before upload, under a key made for that file alone (`FileTransferService.sendEncryptedFile`) — same path as any file attachment; that key reaches the peer inside the DM-encrypted `FILE3` marker
 - `CAMERA` permission is a runtime "dangerous" permission — Android shows an explicit OS dialog on first use
 - `<uses-feature android:required="false">` in manifest — app is installable on devices without a camera (camera option shows "No camera available" alert)
 - Max resolution 1920×1920, quality 0.85 — prevents sending unnecessarily large files
@@ -295,9 +296,9 @@ The `+` button in DMChatScreen shows a two-option menu (via `Alert.alert`):
 `ImageCard.js` — renders inline thumbnails for image attachments (jpg/jpeg/png/webp/gif).
 
 - **Detection**: `isImageFile(filename)` in `fileMarker.js` — extension check, same sanitization path as all filenames
-- **Fetch**: downloads via `RNFS.downloadFile` with `Authorization: Bearer` — same auth as all file downloads
-- **Cache**: stored in `RNFS.CachesDirectoryPath/ws_img_{token}` — app-private, not accessible by other apps. Token is pre-validated to `[A-Za-z0-9_-]` by `parseFileMarker` — no path traversal possible
-- **Corrupt cache**: on non-200 response the partial file is deleted immediately (`RNFS.unlink`) — prevents stale cache causing repeated failed loads
+- **Fetch**: `FileTransferService.fetchFileTo` — downloads the blob with `Authorization: Bearer`, decrypts it, and writes the image only if every chunk verified; same path as all file downloads
+- **Cache**: the decrypted image is stored in `RNFS.CachesDirectoryPath/ws_img_{token}` — app-private, not accessible by other apps. Token is pre-validated to `[A-Za-z0-9_-]` by `parseFileMarker` — no path traversal possible
+- **Corrupt cache**: a failed download or decryption leaves nothing at the cache path, and a file whose magic bytes are not an image's is deleted (`RNFS.unlink`) — prevents stale cache causing repeated failed loads
 - **Fallback**: any download or render error falls back to the regular `FileCard` (no silent failure)
 - **Fullscreen**: tap thumbnail → `Modal` with `resizeMode="contain"`, tap to close. `onRequestClose` handles Android back button
 

@@ -226,7 +226,16 @@ if ADMIN_STATIC_DIR.is_dir():
 
 DEBUG = (os.getenv("DEBUG", "0").strip().lower() in ("1", "true", "yes", "on"))
 
-MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100MB
+# 100 MiB of file. What arrives is the client's encrypted blob, which is the
+# file padded to a size class plus a header and a tag per chunk - hence the
+# allowance on top.
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024 + 64 * 1024
+# Every upload is a blob the client encrypted (chrome_extension/file-crypt.js):
+# these four bytes open it. The name and the type of the file are inside the
+# encrypted message that announces it, never here.
+FILE_BLOB_MAGIC = b"WSF3"
+STORED_FILE_NAME = "blob"
+STORED_FILE_TYPE = "application/octet-stream"
 UPLOAD_DIR = Path(os.getenv("UPLOAD_DIR", "./uploads")).resolve()
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1432,6 +1441,69 @@ async def _purge_orphan_dm_thread_files(session: AsyncSession) -> int:
         except Exception:
             pass
     return deleted
+
+async def _purge_expired_files(session: AsyncSession, limit: int = 200) -> int:
+    """
+    Delete files past their time, rows and bytes.
+
+    A download used to be the only thing that removed an expired file, so one
+    nobody asked for again stayed on disk for good. Runs with every upload.
+    """
+    res = await session.execute(text("""
+        DELETE FROM chat_files
+        WHERE id IN (
+            SELECT id FROM chat_files
+            WHERE expires_at < NOW()
+            ORDER BY expires_at
+            LIMIT :lim
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING storage_path
+    """), {"lim": int(limit)})
+    deleted = 0
+    for row in res.mappings().all():
+        deleted += 1
+        path = (row.get("storage_path") or "").strip()
+        if not path:
+            continue
+        try:
+            p = Path(path).resolve()
+            _assert_within_dir(p, UPLOAD_DIR)
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    return deleted
+
+
+async def _receive_encrypted_upload(file: UploadFile, tmp_path: Path) -> int:
+    """
+    Write an upload to tmp_path and return its size.
+
+    Only a blob the client encrypted is taken. The server cannot tell that the
+    bytes really are ciphertext - what this refusal is for is a client from
+    before files were encrypted, which would otherwise hand over the file as it
+    is and never know.
+    """
+    size = 0
+    with open(tmp_path, "wb") as out:  # noqa: ASYNC230 - local disk, 1 MB writes; the await is the upload read
+        while True:
+            chunk = await file.read(1024 * 1024)  # 1MB
+            if not chunk:
+                break
+            if size == 0 and not chunk.startswith(FILE_BLOB_MAGIC):
+                raise HTTPException(
+                    status_code=400,
+                    detail="This server takes only files encrypted by the app. Update the app to send files.",
+                )
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="File too large (max 100MB)")
+            out.write(chunk)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="File required")
+    return size
+
 
 async def _delete_dm_files_for_thread(session: AsyncSession, thread_id: int) -> int:
     await _ensure_chat_files_dm_support(session)
@@ -5285,12 +5357,8 @@ async def upload_file(
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=FILE_TTL_DAYS)
 
-    safe_name = os.path.basename(file.filename)
-
     final_path = (UPLOAD_DIR / token).resolve()
     tmp_path = (UPLOAD_DIR / f"{token}.part").resolve()
-
-    size = 0
 
     async with SessionLocal() as session:
         await _ensure_chat_files_dm_support(session)
@@ -5312,17 +5380,7 @@ async def upload_file(
                 raise HTTPException(status_code=403, detail="Room is read-only: only owner/admin can upload files")
 
     try:
-
-        with open(tmp_path, "wb") as out:  # noqa: ASYNC230 - local disk, 1 MB writes; the await is the upload read
-            while True:
-                chunk = await file.read(1024 * 1024)  # 1MB
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail="File too large (max 100MB)")
-                out.write(chunk)
-
+        size = await _receive_encrypted_upload(file, tmp_path)
         os.replace(tmp_path, final_path)
 
         async with SessionLocal() as session:
@@ -5352,12 +5410,13 @@ async def upload_file(
                 "token": token,
                 "room_id": room_id,
                 "uid": u["user_id"],
-                "oname": safe_name,
-                "ctype": file.content_type or "application/octet-stream",
+                "oname": STORED_FILE_NAME,
+                "ctype": STORED_FILE_TYPE,
                 "size": size,
                 "spath": str(final_path),
                 "exp": expires_at,
             })
+            await _purge_expired_files(session)
             await session.commit()
 
     except HTTPException:
@@ -5388,8 +5447,8 @@ async def upload_file(
 
     return {
         "token": token,
-        "filename": safe_name,
-        "content_type": file.content_type,
+        "filename": STORED_FILE_NAME,
+        "content_type": STORED_FILE_TYPE,
         "size_bytes": size,
         "expires_at": expires_at.isoformat(),
         "url": f"/files/{token}",
@@ -5418,25 +5477,15 @@ async def upload_dm_file(
     token = secrets.token_urlsafe(18)
     now = datetime.now(UTC)
     expires_at = now + timedelta(days=FILE_TTL_DAYS)
-    safe_name = os.path.basename(file.filename)
     final_path = (UPLOAD_DIR / token).resolve()
     tmp_path = (UPLOAD_DIR / f"{token}.part").resolve()
-    size = 0
 
     async with SessionLocal() as session:
         await _ensure_chat_files_dm_support(session)
         await require_dm_access(session, thread_id, u["user_id"])
 
     try:
-        with open(tmp_path, "wb") as out:  # noqa: ASYNC230 - local disk, 1 MB writes; the await is the upload read
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail="File too large (max 100MB)")
-                out.write(chunk)
+        size = await _receive_encrypted_upload(file, tmp_path)
         os.replace(tmp_path, final_path)
 
         async with SessionLocal() as session:
@@ -5451,12 +5500,13 @@ async def upload_dm_file(
                 "token": token,
                 "thread_id": int(thread_id),
                 "uid": u["user_id"],
-                "oname": safe_name,
-                "ctype": file.content_type or "application/octet-stream",
+                "oname": STORED_FILE_NAME,
+                "ctype": STORED_FILE_TYPE,
                 "size": size,
                 "spath": str(final_path),
                 "exp": expires_at,
             })
+            await _purge_expired_files(session)
             await session.commit()
     except HTTPException:
         for p in (tmp_path, final_path):
@@ -5485,8 +5535,8 @@ async def upload_dm_file(
 
     return {
         "token": token,
-        "filename": safe_name,
-        "content_type": file.content_type,
+        "filename": STORED_FILE_NAME,
+        "content_type": STORED_FILE_TYPE,
         "size_bytes": size,
         "expires_at": expires_at.isoformat(),
         "url": f"/files/{token}",
@@ -5499,7 +5549,7 @@ async def download_file(token: str, authorization: str | None = Header(default=N
     async with SessionLocal() as session:
         await _ensure_chat_files_dm_support(session)
         res = await session.execute(text("""
-            SELECT f.token, f.room_id, f.thread_id, f.original_name, f.content_type, f.size_bytes,
+            SELECT f.token, f.room_id, f.thread_id, f.size_bytes,
                    f.storage_path, f.expires_at
             FROM chat_files f
             WHERE f.token = :t
@@ -5533,11 +5583,10 @@ async def download_file(token: str, authorization: str | None = Header(default=N
         if not path or not os.path.exists(path):
             raise HTTPException(status_code=404, detail="File missing on storage")
 
-        return FileResponse(
-            path,
-            media_type=row["content_type"] or "application/octet-stream",
-            filename=row["original_name"],
-        )
+        # Never the stored name or type: a file from before encryption still
+        # has its real ones in the row, and neither client needs them back -
+        # both name the file from the message that announced it.
+        return FileResponse(path, media_type=STORED_FILE_TYPE, filename=STORED_FILE_NAME)
 
 from fastapi import Header, HTTPException
 

@@ -4,81 +4,23 @@
 
 // @ts-nocheck
 /**
- * fileMarker.js — FILE2:: marker encoding/decoding
+ * fileMarker.js — how a file shows up in a conversation.
  *
- * Format: FILE2::<base64url(JSON{v:2, t:token, n:filename, s:sizeBytes, ts:Date.now()})>
- * Matches the Chrome Extension's panel.js makeFileMarker / parseFileMarker.
+ * The marker format is services/file-crypt.js, shared with the extension byte
+ * for byte: FILE3 (an encrypted file - the marker holds its key, name, type
+ * and size) and FILE2 (a file sent before files were encrypted). Markers are
+ * written by FileTransferService.sendEncryptedFile; this file only reads them.
  */
 
-/**
- * Sanitize filename: strip path separators, traversal sequences, null bytes, and
- * other dangerous characters. Returns basename only (no directory components).
- */
-function _sanitizeFilename(name) {
-  let s = String(name || 'file')
-    .replace(/\0/g, '')               // null bytes
-    .replace(/\.\./g, '_')            // traversal sequences
-    .replace(/[\/\\]/g, '_')          // path separators
-    .replace(/[:*?"<>|]/g, '_')       // Windows-invalid chars
-    .replace(/\n/g, ' ')
-    .trim()
-    .slice(0, 220);
-  return s || 'file';
-}
+import FC from '../services/file-crypt';
 
 /**
- * Create a FILE2:: marker string from upload response data.
- * @param {string} token  File download token from server
- * @param {string} filename  Original filename
- * @param {number|null} sizeBytes  File size in bytes (or null)
- * @returns {string}
- */
-export function makeFileMarker(token, filename, sizeBytes) {
-  const safeName = _sanitizeFilename(filename);
-  const safeSize = Number.isFinite(sizeBytes) ? Number(sizeBytes) : null;
-  const payload = {
-    v: 2,
-    t: String(token || '').trim(),
-    n: safeName || 'file',
-    s: (safeSize != null && safeSize >= 0) ? safeSize : null,
-    ts: Date.now(),
-  };
-  const json = JSON.stringify(payload);
-  // base64url encode
-  const b64 = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-  return `FILE2::${b64}`;
-}
-
-/**
- * Parse a FILE2:: marker string back to {token, filename, sizeBytes} or null.
- * @param {string} text
- * @returns {{token: string, filename: string, sizeBytes: number|null}|null}
+ * @param {string} text  a decrypted message
+ * @returns {null | {v:number, token:string, key:Uint8Array|null, filename:string,
+ *   mime:string, sizeBytes:number|null}}  `key` null: sent unencrypted (FILE2)
  */
 export function parseFileMarker(text) {
-  if (typeof text !== 'string') return null;
-  if (!text.startsWith('FILE2::')) return null;
-
-  const b64url = String(text.slice('FILE2::'.length) || '').trim();
-  if (!b64url) return null;
-
-  try {
-    let b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
-    b64 += '='.repeat((4 - (b64.length % 4)) % 4);
-    const raw = atob(b64);
-    const p = JSON.parse(raw);
-
-    if (Number(p?.v) !== 2) return null;
-    const token = String(p?.t || '').trim();
-    const filename = _sanitizeFilename(p?.n);
-    const sizeNum = (p?.s == null) ? null : Number(p.s);
-    const sizeBytes = Number.isFinite(sizeNum) && sizeNum >= 0 ? sizeNum : null;
-
-    if (!token || token.length > 256 || /[^A-Za-z0-9_\-]/.test(token)) return null;
-
-    return { token, filename: filename || 'file', sizeBytes };
-  } catch (_e) {
-    return null;
-  }
+  return FC.parseMarker(text);
 }
 
 /**

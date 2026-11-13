@@ -36,7 +36,8 @@ import { useApp } from '../contexts/AppContext';
 import { Colors, Spacing, Radii, Typography } from '../theme';
 import FileCard from '../components/FileCard';
 import ImageCard from '../components/ImageCard';
-import { parseFileMarker, makeFileMarker, isImageFile } from '../utils/fileMarker';
+import { parseFileMarker, isImageFile } from '../utils/fileMarker';
+import { sendEncryptedFile } from '../services/FileTransferService';
 import { pick as pickDocument, types as pickerTypes } from '@react-native-documents/picker';
 import { launchCamera } from 'react-native-image-picker';
 
@@ -909,16 +910,14 @@ export default function DMChatScreen({ navigation, route }) {
       }
 
       setSending(true);
-      const upload = await NetworkService.uploadDmFile(threadId, {
-        filename: res.name || 'file',
-        mimeType: res.type || 'application/octet-stream',
-        fileBlob: res.uri,
+      // Encrypted on the phone; the island gets an opaque blob, and the marker
+      // - which holds the file's key and its name - goes out encrypted below.
+      const marker = await sendEncryptedFile({
+        uri: res.uri,
+        name: res.name || 'file',
+        mime: res.type,
+        upload: (sealedFileUri) => NetworkService.uploadDmFile(threadId, sealedFileUri),
       });
-
-      if (!upload?.token) throw new Error('Upload failed — no token');
-
-      // Build file marker (FILE2:: format, matches extension)
-      const marker = makeFileMarker(upload.token, upload.filename || res.name, upload.size_bytes || 0);
       const encrypted = await CryptoService.encryptDm(threadId, marker, peer, myUsername);
       if (!encrypted) throw new Error('Could not encrypt file marker');
 
@@ -974,7 +973,9 @@ export default function DMChatScreen({ navigation, route }) {
     //   handles the capture. This app has no direct camera hardware access.
     // - saveToPhotos: false — photo is NOT saved to the gallery; it lives only in
     //   the app's temp cache until the upload completes.
-    // - The photo is encrypted with the DM key before leaving the device.
+    // - The photo is encrypted on the phone, under a key of its own, before it
+    //   leaves the device (FileTransferService); that key goes to the peer
+    //   inside the DM-encrypted message.
     // - CAMERA permission is a runtime "dangerous" permission — Android shows an
     //   explicit permission dialog before first use.
 
@@ -1024,15 +1025,12 @@ export default function DMChatScreen({ navigation, route }) {
 
     setSending(true);
     try {
-      const upload = await NetworkService.uploadDmFile(threadId, {
-        filename: asset.fileName || `photo_${Date.now()}.jpg`,
-        mimeType: asset.type || 'image/jpeg',
-        fileBlob: asset.uri,
+      const marker = await sendEncryptedFile({
+        uri: asset.uri,
+        name: asset.fileName || `photo_${Date.now()}.jpg`,
+        mime: asset.type || 'image/jpeg',
+        upload: (sealedFileUri) => NetworkService.uploadDmFile(threadId, sealedFileUri),
       });
-
-      if (!upload?.token) throw new Error('Upload failed — no token');
-
-      const marker = makeFileMarker(upload.token, upload.filename || asset.fileName, upload.size_bytes || 0);
       const encrypted = await CryptoService.encryptDm(threadId, marker, peer, myUsername);
       if (!encrypted) throw new Error('Could not encrypt photo');
 
@@ -1372,8 +1370,11 @@ export default function DMChatScreen({ navigation, route }) {
         activeOpacity={0.8}
         onLongPress={() => {
           const actions = [];
-          if (text) actions.push({ text: 'Reply', onPress: () => setReplyTo({ id: item.id ?? null, author: item.author || item.username || 'Unknown', text: text.slice(0, 120) }) });
-          if (text) actions.push({ text: 'Copy', onPress: () => _copyMessage(text) });
+          // A file is quoted and copied by its name: the marker holds the
+          // file's key, and has no business in a quote or on the clipboard.
+          const plainText = fileInfo ? fileInfo.filename : text;
+          if (plainText) actions.push({ text: 'Reply', onPress: () => setReplyTo({ id: item.id ?? null, author: item.author || item.username || 'Unknown', text: plainText.slice(0, 120) }) });
+          if (plainText) actions.push({ text: 'Copy', onPress: () => _copyMessage(plainText) });
           actions.push({ text: 'Cancel', style: 'cancel' });
           Alert.alert('Message', null, actions);
         }}
@@ -1417,9 +1418,9 @@ export default function DMChatScreen({ navigation, route }) {
             </View>
           ) : fileInfo ? (
             isImageFile(fileInfo.filename) ? (
-              <ImageCard token={fileInfo.token} filename={fileInfo.filename} sizeBytes={fileInfo.sizeBytes} />
+              <ImageCard file={fileInfo} />
             ) : (
-              <FileCard token={fileInfo.token} filename={fileInfo.filename} sizeBytes={fileInfo.sizeBytes} />
+              <FileCard file={fileInfo} />
             )
           ) : (
             <MessageText text={text} isMe={isMe} />

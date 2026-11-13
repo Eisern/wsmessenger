@@ -69,6 +69,16 @@ Wrapped room keys use X25519 ECDH + HKDF-SHA256 (info: `"ws-e2ee-wrap-v2"`, salt
 
 A wrap can also say **who made it** (prefix `0x03`, behind `KEY_WRAP_SIG_WRITE_ENABLED`, on since 0.5.0 for local rooms and DMs; cross-island wraps stay v2; a client older than 0.4.0 cannot open a v3 wrap at all): `[0x03] [ephemeral_pubkey(32)] [IV(12)] [sig(64)] [signer_len(1)] [signer] [ciphertext+tag]`. The signature covers `"ws-keywrap-v1"`, the scope (`room`/`dm`) and its id, the signer, the recipient, the key id and the ciphertext — so a genuine wrap cannot be re-filed as another room's key or another member's copy. The v2 wrap is anonymous (ephemeral ECDH) and the rows are written by the server, which is what lets a dishonest server hand you a key it made itself; `inspectWrappedKey` + the caller's check is what answers that. Readers decide in one place (`acceptWrappedKey` in `panel-crypto.js`, `_acceptWrappedKey` in `CryptoService.js`), and refuse rather than flag: a signed wrap must verify under the signer's **pinned** Ed25519 key and come from someone entitled to hand the key out (the DM peer, or a member of the room per `/rooms/{id}/members`); an **unsigned** wrap may only hand back a key the device already holds, never introduce a new one. Writers throw instead of producing an unsigned wrap (`wrapSignOpts` / `_wrapSignOpts`); the one wrap that must go up unsigned — a new room's key, before the room has an id — is replaced by `signCreatedRoomKey` once it does. Cross-island keys are outside this path and stay v2. Messages use AES-256-GCM with power-of-2 padding buckets (starting at 64 bytes, 5-byte header) and a `kid` field for key versioning/archival.
 
+### Attachments
+
+A file is encrypted on the client before it is uploaded; the island gets one opaque blob and nothing about it. The format, the cipher and the marker are `file-crypt.js`, byte-identical in `chrome_extension/` and `Android/src/services/` and platform-free (crypto and file access are injected); the wiring is `uploadEncryptedFile` / `downloadFile` in `panel.js` and `FileTransferService.js` on Android.
+
+- **Blob:** `"WSF3"` ‖ nonce prefix(7) ‖ chunks. Each chunk is AES-256-GCM over up to 1 MiB under a random key made for that file alone; the nonce carries the chunk index and a "last" flag, the AAD is `"ws-file-v3"` ‖ the 11 header bytes — so chunks cannot be dropped, reordered or cut off the end. The plaintext is the file padded with zeros to a Padme size class (min 4096), so the blob's length gives a class, not a size.
+- **Marker:** `FILE3::` ‖ base64url(JSON `{v:3, t:token, k:key, n:name, m:type, s:size, ts}`) — the plaintext of an ordinary room or DM message. It holds the key: it goes out only through `encryptMessageForRoom` / `encryptDm`, and is never what gets quoted or copied (the file's name is).
+- **Server:** `POST /rooms/{id}/files` and `/dm/{id}/files` refuse anything that does not start with `WSF3` (400 — which is what an older client gets), store the name `blob` and the type `application/octet-stream` whatever the upload claims, and `GET /files/{token}` returns only those. Expired files are purged on every upload. `MAX_UPLOAD_BYTES` is 100 MiB + 64 KiB: the padded, tagged blob of a 100 MiB file.
+- **Readers** check the blob's length against the marker's size before decrypting and save nothing unless every chunk verified. `FILE2::` markers (files sent before attachments were encrypted, `key: null`) are still read: the blob is the file itself, and the card says "sent unencrypted".
+- **Limits:** extension 100 MB, Android 50 MB (`MAX_FILE_BYTES`). Not encrypted this way: room logos (public by design). Not possible yet: files to a cross-island contact or in a guest room.
+
 ### Key Recovery
 
 `crypto-utils.js` includes BIP39 encoding/decoding (`bip39Encode` / `bip39Decode`) that converts the 32-byte raw X25519 private key to a 24-word mnemonic (256-bit entropy + 8-bit checksum). A `deriveRecoveryAuth` helper derives a recovery auth token via HKDF.
@@ -193,6 +203,7 @@ DMs use a **separate** WebSocket connection (`/ws-dm?thread_id=...`) managed in 
 | `chrome.storage.local` | EPK (`e2ee_local_identity_v2:<username>` — JSON with `v`/`username`/`salt`/`iv`/`data`/`kdf`), room pinned context, UI preferences |
 | `chrome.storage.session` | Active username marker (`e2ee_active_user_v2`) and transient UI hand-off state. **Nothing password-derived.** |
 | Server DB | Public keys, wrapped room/DM key blobs, ciphertext, metadata, delivery secrets — **no private key material, no plaintext** |
+| Server disk (`UPLOAD_DIR`) | Encrypted attachment blobs under random tokens (no name, no type), and room logos as uploaded. Files uploaded before attachments were encrypted stay there in the clear until they expire (`FILE_TTL_DAYS`, 7 by default). |
 | Panel RAM | Non-extractable `CryptoKey`s (identity, room, DM) in `CryptoManager`. Cleared on lock/logout. |
 | Service-worker RAM | `_masterKey`, `_unlockKekKey`, handoff P-256 key pairs, JWT, WebSocket state, `dmDeliverySecrets` Map. Cleared on lock/logout/10-min idle. |
 
@@ -270,6 +281,7 @@ Full reasoning, threat model and what this deliberately does *not* buy:
 | `chrome_extension/guest-rooms.js` | Guest-room protocol (guest sessions per island, room invitations, key slots) — byte-identical to `Android/src/services/guest-rooms.js` |
 | `chrome_extension/key-sweep.js` | Room-key backfill: when to hand out missing keys, how often, what a failure costs — byte-identical to `Android/src/services/key-sweep.js` |
 | `chrome_extension/guest-room-feed.js` | What a guest room shows and in what order (socket before history, dedupe, resync, serialized draws) — byte-identical to `Android/src/services/guest-room-feed.js` |
+| `chrome_extension/file-crypt.js` | Attachments: per-file key, chunked AES-GCM blob, padding, the `FILE3` marker — byte-identical to `Android/src/services/file-crypt.js` |
 | `chrome_extension/notifications.js` | Badge management; exposes `window.Notifications` singleton |
 | `chrome_extension/login.js` | Login, registration, 2FA, BIP39 recovery form, KEK derivation → background handoff |
 | `chrome_extension/argon2-selftest.js` | WASM integrity check (pinned SHA-256) + KDF test vector; blocks unlock on failure |

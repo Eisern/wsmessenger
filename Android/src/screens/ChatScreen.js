@@ -36,7 +36,8 @@ import { useApp } from '../contexts/AppContext';
 import { Colors, Spacing, Radii, Typography } from '../theme';
 import FileCard from '../components/FileCard';
 import RoomLogo from '../components/RoomLogo';
-import { parseFileMarker, makeFileMarker } from '../utils/fileMarker';
+import { parseFileMarker } from '../utils/fileMarker';
+import { sendEncryptedFile } from '../services/FileTransferService';
 import { roomSigVerdict } from '../utils/roomSig';
 import { pick as pickDocument, types as pickerTypes } from '@react-native-documents/picker';
 
@@ -180,11 +181,14 @@ function MessageBubble({ msg, myUsername, isSearchHit, isSearchActive, onReply }
 
   const handleLongPress = useCallback(() => {
     const actions = [];
+    // A file is copied by its name: the marker holds the file's key, and has
+    // no business on the clipboard.
+    const copyText = fileInfo ? fileInfo.filename : text;
     if (onReply && text) actions.push({ text: 'Reply', onPress: () => onReply(msg) });
-    if (text) actions.push({ text: 'Copy', onPress: () => _copyMessage(text) });
+    if (copyText) actions.push({ text: 'Copy', onPress: () => _copyMessage(copyText) });
     actions.push({ text: 'Cancel', style: 'cancel' });
     Alert.alert('Message', null, actions);
-  }, [text, msg, onReply]);
+  }, [text, fileInfo, msg, onReply]);
 
   return (
     <TouchableOpacity
@@ -211,7 +215,7 @@ function MessageBubble({ msg, myUsername, isSearchHit, isSearchActive, onReply }
         {decryptFailed ? (
           <Text style={styles.decryptFailedText}>Could not decrypt this message</Text>
         ) : fileInfo ? (
-          <FileCard token={fileInfo.token} filename={fileInfo.filename} sizeBytes={fileInfo.sizeBytes} />
+          <FileCard file={fileInfo} />
         ) : (
           <MessageText text={text} isMe={isMe} />
         )}
@@ -737,7 +741,8 @@ export default function ChatScreen({ navigation, route }) {
   }
 
   function handleReply(msg) {
-    const text = (msg._decrypted || '').slice(0, 120);
+    const file = parseFileMarker(msg._decrypted || '');
+    const text = (file ? file.filename : (msg._decrypted || '')).slice(0, 120);
     setReplyTo({ id: msg.id ?? null, author: msg.author || msg.username || 'Unknown', text });
   }
 
@@ -834,15 +839,14 @@ export default function ChatScreen({ navigation, route }) {
       }
 
       setSending(true);
-      const upload = await NetworkService.uploadFile(roomId, {
-        filename: res.name || 'file',
-        mimeType: res.type || 'application/octet-stream',
-        fileBlob: res.uri,
+      // Encrypted on the phone; the island gets an opaque blob, and the marker
+      // - which holds the file's key and its name - goes out encrypted below.
+      const marker = await sendEncryptedFile({
+        uri: res.uri,
+        name: res.name || 'file',
+        mime: res.type,
+        upload: (sealedFileUri) => NetworkService.uploadFile(roomId, sealedFileUri),
       });
-
-      if (!upload?.token) throw new Error('Upload failed — no token');
-
-      const marker = makeFileMarker(upload.token, upload.filename || res.name, upload.size_bytes || 0);
       const body = await CryptoService.encryptMessage(roomId, marker, myUsername);
       if (!body) {
         Alert.alert('Encryption failed', 'Unable to encrypt file marker. Please try again.');

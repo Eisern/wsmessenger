@@ -724,6 +724,11 @@ Sees:
 - Public keys (X25519 and Ed25519).
 - Wrapped room / DM keys (opaque blobs).
 - Ciphertext blobs, message timestamps, message ids.
+- For each attachment: an encrypted blob, who uploaded it into which
+  room or thread and when, and its length — a size class, since the file
+  is padded before encryption. Files uploaded before attachments were
+  encrypted are stored as they were sent, name and type included, until
+  they expire (`FILE_TTL_DAYS`). Room logos are stored as uploaded.
 - IP and user-agent on connect, for rate limiting and ban checks.
 - Which JWT sent which room message. **For DMs, with sealed sender
   enabled, only the thread id and timestamp — not the sender.**
@@ -740,6 +745,10 @@ Does not see:
 - Identity private keys (`GET /crypto/keys` returns 410 Gone).
 - Room / DM key plaintext.
 - Message plaintext.
+- An attachment's content, name, type or exact size: the file is
+  encrypted on the device under its own key
+  ([`file-crypt.js`](../chrome_extension/file-crypt.js)), and those
+  travel only inside the encrypted message that announces it.
 - Which member of a DM thread sent a given message, at either the
   application or transport layer — but it does see who is in the
   thread (see [What sealed sender does not hide](#what-sealed-sender-does-not-hide)).

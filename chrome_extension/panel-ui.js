@@ -6609,8 +6609,13 @@ function closeGuestRoomView() {
   if (wasOpen) __renderGuestRoomsSection().catch(() => {});
 }
 
+// A file sent in a room on another island lives on that island and is fetched
+// with the guest session there; the download path only knows this one.
+const GUEST_FILE_ELSEWHERE = "[A file. Files in rooms on other servers cannot be opened from here yet.]";
+
 function __drawGuestItem(it) {
-  const { text, reply } = parseV2Payload(it.text || "");
+  const { text: shown, reply } = parseV2Payload(it.text || "");
+  const text = parseFileMarker(shown) ? GUEST_FILE_ELSEWHERE : shown;
   addMsg(it.user, text, it.mine, it.ts, reply);
   __warnAboutRoomSignature({ from: it.from, sigValid: it.sigValid, mismatch: it.mismatch, unsigned: it.unsigned }, it.user);
 }
