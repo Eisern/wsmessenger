@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 PASSWORD = "Testpass!12345"
+NEW_PASSWORD = "Newpass!67890"
 
 
 @pytest.fixture(scope="module")
@@ -54,10 +55,10 @@ def start(isl, name: str) -> str:
     return r.json()["nonce"]
 
 
-def recover(isl, name: str, nonce: str, auth: bytes, new_password: str = "Newpass!67890") -> httpx.Response:
+def recover(isl, name: str, nonce: str, auth: bytes) -> httpx.Response:
     return httpx.post(isl.base + "/auth/recover", json={
         "username": name, "nonce": nonce,
-        "recovery_auth_b64": base64.b64encode(auth).decode(), "new_password": new_password,
+        "recovery_auth_b64": base64.b64encode(auth).decode(), "new_password": NEW_PASSWORD,
     })
 
 
@@ -69,7 +70,7 @@ def test_the_phrase_resets_the_password(isl):
     name, auth = account(isl)
     r = recover(isl, name, start(isl, name), auth)
     assert r.status_code == 200, r.text
-    assert logs_in(isl, name, "Newpass!67890")
+    assert logs_in(isl, name, NEW_PASSWORD)
     assert not logs_in(isl, name, PASSWORD)
 
 

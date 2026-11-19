@@ -215,6 +215,14 @@ island - waited for somebody's browser extension.
   clients). A replaced key offered as current is refused, the room stays on
   the newer key, and the open room says so. A device with no history of a
   room - new, or recovered - still takes what the server says.
+- **Every sealed DM left a row behind for good.** The nonces that stop a DM
+  being delivered twice were meant to be purged and the purge was never
+  called: `chat_dm_ud_nonces` only grew, holding thread and time of every
+  sealed message ever sent. A nonce only has to outlive the five-minute
+  window its message is accepted in; anything older than an hour
+  (`UD_NONCE_KEEP_S`) is now removed as DMs arrive, at most every ten
+  minutes (`UD_NONCE_PURGE_EVERY_S`). The first DM after updating clears the
+  backlog.
 - **Anybody who knew a name could stop its owner recovering the account.**
   Three made-up requests to `/auth/recover` in that name used up the hourly
   per-account limit, and a single request with a made-up nonce voided the

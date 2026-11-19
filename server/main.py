@@ -7636,15 +7636,41 @@ async def accept_ud_dm(payload: UdDmSendIn, source: dict):
     except Exception:
         pass
 
+    await _maybe_purge_dm_ud_nonces()
+
     return {"ok": True}
 
-async def cleanup_dm_ud_nonces(days: int = 7):
+
+# A nonce only has to outlive the window its message is accepted in (ts within
+# five minutes either way of now: at most ten minutes after it was stored), so
+# an hour is plenty. The purge used to exist and never be called: every sealed
+# DM left a (thread, nonce, ts) row for good - a growing table, and a record of
+# when each thread was written to that nothing needed.
+UD_NONCE_KEEP_S = _env_int("UD_NONCE_KEEP_S", 3600)
+UD_NONCE_PURGE_EVERY_S = _env_int("UD_NONCE_PURGE_EVERY_S", 600)
+_ud_nonce_purged_at = 0.0
+
+
+async def cleanup_dm_ud_nonces(older_than_s: int = UD_NONCE_KEEP_S) -> None:
     async with SessionLocal() as session:
         async with session.begin():
             await session.execute(text("""
                 DELETE FROM chat_dm_ud_nonces
-                WHERE created_at < now() - (:days * interval '1 day')
-            """), {"days": int(days)})
+                WHERE created_at < now() - (:s * interval '1 second')
+            """), {"s": int(older_than_s)})
+
+
+async def _maybe_purge_dm_ud_nonces() -> None:
+    """At most every UD_NONCE_PURGE_EVERY_S, on the back of an accepted DM."""
+    global _ud_nonce_purged_at
+    now = time.time()
+    if now - _ud_nonce_purged_at < UD_NONCE_PURGE_EVERY_S:
+        return
+    _ud_nonce_purged_at = now
+    try:
+        await cleanup_dm_ud_nonces()
+    except Exception as e:
+        logging.getLogger("uvicorn.error").warning("[ud] nonce purge failed: %s", type(e).__name__)
 
 
 @app.get("/dm/{thread_id}/delivery-secret")
