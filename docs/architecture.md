@@ -764,6 +764,17 @@ See [`login.js#L895`](../chrome_extension/login.js#L895) for the
 client side. The server never sees the raw phrase or the raw
 32-byte key — only the HKDF-derived auth token.
 
+What the nonce does and does not do: it makes each request single-use
+and is spent only by the request that presents it (or by expiry), so
+a stranger cannot void a recovery in progress. It is **not** bound
+into the proof: `recovery_auth` is the same on every recovery, a
+fixed secret derived from the identity key. Whoever sees one recovery
+request — the server that receives it — could reset the password
+again later, and unlike a password it cannot be changed. Failed
+phrases are rate-limited per account; requests that merely name an
+account are not, so they cannot lock its owner out. An account with
+no phrase and a wrong phrase get the same answer.
+
 ---
 
 ## What the server sees and does not see

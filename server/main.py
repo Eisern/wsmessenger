@@ -1222,7 +1222,7 @@ async def _recovery_nonce_set(username: str) -> str:
     nonce = secrets.token_hex(32)
     expires_at = time.time() + RECOVER_NONCE_TTL
     async with SessionLocal() as db:
-        res = await db.execute(
+        await db.execute(
             text("""
                 UPDATE users
                 SET recovery_nonce = :nonce, recovery_nonce_expires = :exp
@@ -1231,16 +1231,18 @@ async def _recovery_nonce_set(username: str) -> str:
             {"nonce": nonce, "exp": expires_at, "u": username},
         )
         await db.commit()
-        rows_updated = res.rowcount
-    _rlog = logging.getLogger("uvicorn.error")
-    _rlog.info("[recovery] nonce_set username=%r rows_updated=%d", username, rows_updated)
-    if rows_updated == 0:
-        _rlog.warning("[recovery] nonce_set UPDATE matched 0 rows for username=%r", username)
+    # Nothing about who: a recovery attempt names an account, and the log is
+    # not where that belongs.
     return nonce
 
 async def _recovery_nonce_consume(username: str, nonce: str) -> bool:
-    """Fetch, verify, and delete nonce atomically. Returns True if valid."""
-    _rlog = logging.getLogger("uvicorn.error")
+    """
+    Verify and spend the nonce atomically. Returns True if valid.
+
+    Spent only when it is the one presented, or when it has expired: clearing
+    it on any request let anybody who knew a name void that person's recovery
+    in progress with one request carrying a made-up nonce.
+    """
     async with SessionLocal() as db:
         # FOR UPDATE prevents a concurrent request from reading the same
         # nonce before we clear it — guarantees single-use.
@@ -1255,36 +1257,26 @@ async def _recovery_nonce_consume(username: str, nonce: str) -> bool:
             {"u": username},
         )
         row = res.mappings().first()
-        _rlog.info(
-            "[recovery] nonce_consume username=%r row_found=%s stored_nonce_present=%s",
-            username,
-            row is not None,
-            bool(row and row["recovery_nonce"]) if row else False,
-        )
         if not row or not row["recovery_nonce"]:
             return False
 
-        stored_nonce = row["recovery_nonce"]
-        expires_at   = row["recovery_nonce_expires"] or 0.0
+        stored_nonce = str(row["recovery_nonce"])
+        expires_at = row["recovery_nonce_expires"] or 0.0
+        expired = time.time() > expires_at
+        matched = hmac.compare_digest(stored_nonce.encode(), str(nonce or "").encode())
 
-        # Always clear the nonce (consumed or expired) to prevent reuse
-        await db.execute(
-            text("""
-                UPDATE users
-                SET recovery_nonce = NULL, recovery_nonce_expires = NULL
-                WHERE LOWER(username) = LOWER(:u)
-            """),
-            {"u": username},
-        )
+        if expired or matched:
+            await db.execute(
+                text("""
+                    UPDATE users
+                    SET recovery_nonce = NULL, recovery_nonce_expires = NULL
+                    WHERE LOWER(username) = LOWER(:u)
+                """),
+                {"u": username},
+            )
         await db.commit()
 
-    now = time.time()
-    _rlog.info("[recovery] nonce_consume expires_at=%s now=%s expired=%s match=%s",
-               expires_at, now, now > expires_at,
-               hmac.compare_digest(stored_nonce, nonce))
-    if now > expires_at:
-        return False
-    return hmac.compare_digest(stored_nonce, nonce)
+    return matched and not expired
 
 
 class RecoverStartIn(BaseModel):
@@ -3023,10 +3015,10 @@ async def recover(payload: RecoverIn, request: Request):
 
     username = (payload.username or "").strip().lower()
 
-    await enforce_http_rate_limit(
-        f"recover:user:{username}", RL_RECOVER_USER_PER_HOUR, 3600,
-        detail="Too many recovery attempts",
-    )
+    # No per-account limit up front: counted on every request, three made-up
+    # requests in a name locked that person out of their own recovery for an
+    # hour. The phrase is 256 bits, so guessing is not what a limit stops here;
+    # failures are counted below, and only failures.
 
     # 1. Consume nonce (single-use, 5-min TTL)
     if not await _recovery_nonce_consume(username, payload.nonce):
@@ -3040,8 +3032,17 @@ async def recover(payload: RecoverIn, request: Request):
         )
         row = res.mappings().first()
 
+    # One answer for "this account has no recovery phrase" and "wrong phrase":
+    # two told anybody which accounts can be recovered at all.
+    async def _refuse():
+        await enforce_http_rate_limit(
+            f"recover:fail:{username}", RL_RECOVER_USER_PER_HOUR, 3600,
+            detail="Too many recovery attempts",
+        )
+        raise HTTPException(status_code=401, detail="Recovery phrase is incorrect")
+
     if not row or not row["recovery_key_hash"]:
-        raise HTTPException(status_code=401, detail="Recovery not available for this account")
+        await _refuse()
 
     user_id = int(row["id"])
 
@@ -3052,8 +3053,8 @@ async def recover(payload: RecoverIn, request: Request):
         raise HTTPException(status_code=400, detail="Invalid recovery_auth_b64 encoding")
 
     actual_hash = hashlib.sha256(recovery_auth_bytes).hexdigest()
-    if not hmac.compare_digest(actual_hash, row["recovery_key_hash"]):
-        raise HTTPException(status_code=401, detail="Recovery phrase is incorrect")
+    if not hmac.compare_digest(actual_hash, str(row["recovery_key_hash"])):
+        await _refuse()
 
     # 4. Update password (recovery_key_hash stays — it's derived from the key, not the password)
     new_password_hash = await hash_password_async(payload.new_password)

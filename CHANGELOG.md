@@ -215,6 +215,16 @@ island - waited for somebody's browser extension.
   clients). A replaced key offered as current is refused, the room stays on
   the newer key, and the open room says so. A device with no history of a
   room - new, or recovered - still takes what the server says.
+- **Anybody who knew a name could stop its owner recovering the account.**
+  Three made-up requests to `/auth/recover` in that name used up the hourly
+  per-account limit, and a single request with a made-up nonce voided the
+  nonce of a recovery in progress. Now only wrong phrases count towards the
+  limit (the phrase is 256 bits; guessing is not what it stops), and a nonce
+  is spent only by the request that presents it. "This account has no
+  recovery phrase" and "wrong phrase" now get the same answer, and the
+  server no longer logs the name of every account somebody tried to
+  recover. Still true, now written down in `docs/architecture.md`: the
+  recovery proof is a fixed secret, not an answer to the nonce.
 - **The extension's worker took the account for a key handover from the
   handover itself.** A session opened (and rate-limited) for one account could
   be committed under another, and the one-shot copy of the key a login leaves
