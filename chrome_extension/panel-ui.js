@@ -6147,10 +6147,10 @@ function renderRoomManagePane(roomId) {
       try {
         const result = await rotateRoomKey(rid);
         if (result.ok) {
-          const failNote = result.failed.length
-            ? ` (${result.failed.length} failed: ${result.failed.join(", ")})`
+          const waiting = result.failed.length
+            ? ` ${result.failed.join(", ")} will get it once their key is verified.`
             : "";
-          keysStatus.textContent = `Key rotated. Shared to ${result.shared} member(s).${failNote}`;
+          keysStatus.textContent = `Key rotated. Shared to ${result.shared} member(s).${waiting}`;
         } else {
           keysStatus.textContent = "Rotation failed: " + (result.error || "unknown");
         }

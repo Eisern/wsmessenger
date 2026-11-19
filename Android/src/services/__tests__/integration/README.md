@@ -383,6 +383,13 @@ between two accounts, the sealed envelope and its signature, a room key created
 before the room exists, a rotation that must leave yesterday readable, and a
 fresh client recovering both keys from the island.
 
+`panelKeyRotation.test.js` covers the member who stays after a removal: the
+key changes for everybody in one request, a member with the room open moves
+to the new key from the first message under it (or from `notify_room_key`)
+and then writes under it, the removed member reads nothing new, and a member
+whose key changed is left without the key - a gap the sweep will not fill
+until they are verified - while the room still moves on.
+
 ## If the signing key will not publish
 
 `setUp` fails loudly when `/crypto/ed25519-key` is refused, because the

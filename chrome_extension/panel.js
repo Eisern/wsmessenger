@@ -2327,8 +2327,11 @@ if (msg.type === "rooms_kick") {
           addMsg("System", `Rotating room key after removing ${kickedUser}...`, false, Date.now());
           const result = await rotateRoomKey(rid, { kickedUsername: kickedUser });
           if (result.ok) {
+            const waiting = result.failed.length
+              ? ` ${result.failed.join(", ")} will get it once their key is verified.`
+              : "";
             addMsg("System",
-              `\uD83D\uDC51 Room key rotated. New key distributed to ${result.shared} member(s).`,
+              `\uD83D\uDC51 Room key rotated. New key distributed to ${result.shared} member(s).${waiting}`,
               false, Date.now());
           } else {
             addMsg("System",
@@ -2341,6 +2344,13 @@ if (msg.type === "rooms_kick") {
             `\u26A0\u00A0 Room key rotation error: ${e?.message || e}`,
             false, Date.now());
         }
+      } else if (rid && !roomOwnerById[String(rid)]) {
+        // An admin removed somebody. Only the owner can change the room's key,
+        // so nothing changed - and saying nothing would pass for the opposite.
+        addMsg("System",
+          `\u26A0\u00A0 ${kickedUser} was removed, but only the room's owner can change the room key. ` +
+          `Until the owner rotates it (Rooms \u2192 Manage \u2192 Keys), new messages stay under the key ${kickedUser} holds.`,
+          false, Date.now());
       }
     } else {
       await __ui.alert(msg.message || "Kick failed");
@@ -2829,6 +2839,18 @@ if (msg.type === "notify_room_msg") {
 if (msg.type === "notify_key_gap") {
   const rid = Number(msg.room_id) || 0;
   if (rid) scheduleRoomKeySweep("notify", { roomId: rid });
+  return;
+}
+
+// The owner changed this room's key. Read it now if we hold the old one:
+// until we do, what we write goes out under the key a removed member holds.
+// A wake-up, like the one above - the key itself comes from the island, and
+// is judged there (acceptWrappedKey) like any other.
+if (msg.type === "notify_room_key") {
+  const rid = Number(msg.room_id) || 0;
+  if (rid && isCryptoUsable()) {
+    refreshRoomKeyIfHeld(rid).catch((e) => console.warn("room key refresh failed:", e?.message || e));
+  }
   return;
 }
 

@@ -74,6 +74,42 @@ describe('a run', () => {
     expect(H.done).toHaveLength(1);
   });
 
+  test('a room whose current key cannot be read is not served from memory', async () => {
+    // The key in memory may be from before a rotation. Handed out, it becomes
+    // the member's current key, and nothing later replaces a copy that exists.
+    const H = harness({
+      refreshRoomKey: async (rid) => {
+        H.calls.refresh.push(rid);
+        if (rid === 7) throw err('network down', { status: 0 });
+        if (rid === 9) throw err('this account holds no key for the room', { status: 404 });
+      },
+    });
+    H.island.pages = [gaps([7, 'ann'], [7, 'bob'], [8, 'cat'], [9, 'dan'])];
+    const res = await H.sweep.run({ reason: 'test' });
+    expect(H.calls.share).toEqual(['8:cat']);          // only the room whose key is known to be current
+    expect(res).toEqual({ ran: true, shared: 1, alreadyHad: 0, skipped: 0, failed: 3, incomplete: true });
+    // Infrastructure trouble earns the long backoff ...
+    expect(H.sweep.nextAllowedAt).toBe(1_000_000 + L.ERROR_BACKOFF_MS);
+
+    // ... and nobody is put on a cooldown for it: the next run tries them all.
+    H.advance(L.ERROR_BACKOFF_MS);
+    const H2calls = H.calls.share.length;
+    H.island.pages = [gaps([7, 'ann'])];
+    await H.sweep.run();
+    expect(H.calls.refresh.filter((r) => r === 7)).toHaveLength(2);
+    expect(H.calls.share).toHaveLength(H2calls);       // still refused: 7 still cannot be read
+  });
+
+  test('a room with no key of ours to read costs no backoff', async () => {
+    const H = harness({
+      refreshRoomKey: async () => { throw err('this account holds no key for the room', { status: 404 }); },
+    });
+    H.island.pages = [gaps([9, 'dan'])];
+    expect(await H.sweep.run()).toMatchObject({ ran: true, shared: 0, failed: 1, incomplete: true });
+    expect(H.calls.share).toEqual([]);
+    expect(H.sweep.nextAllowedAt).toBe(1_000_000 + L.MIN_INTERVAL_MS);
+  });
+
   test('does not start while locked, and asks nothing', async () => {
     const H = harness();
     H.island.ready = false;

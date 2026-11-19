@@ -396,6 +396,8 @@ FRIENDS_DECLINE_COOLDOWN_SEC       = _env_int("FRIENDS_DECLINE_COOLDOWN_SEC", 86
 
 MAX_WS_MSG_BYTES = _env_int("MAX_WS_MSG_BYTES", 32 * 1024)  # 32KB
 MAX_ENCRYPTED_KEY_B64_LEN = _env_int("MAX_ENCRYPTED_KEY_B64_LEN", 16384)
+# Copies of a room key in one rotation request - one per member.
+MAX_ROTATE_MEMBERS = _env_int("MAX_ROTATE_MEMBERS", 5000)
 MAX_PIN_URL_LEN = _env_int("MAX_PIN_URL_LEN", 2048)
 MAX_PIN_TEXT_LEN = _env_int("MAX_PIN_TEXT_LEN", 4000)
 
@@ -1135,6 +1137,17 @@ class RoomKeyIn(BaseModel):
     room_id: int
     encrypted_room_key: str = Field(..., max_length=MAX_ENCRYPTED_KEY_B64_LEN)
     key_id: str | None = None
+
+class RoomKeyRotateItem(BaseModel):
+    username: str = Field(..., min_length=1, max_length=128)
+    encrypted_room_key: str = Field(..., min_length=1, max_length=MAX_ENCRYPTED_KEY_B64_LEN)
+
+class RoomKeyRotateIn(BaseModel):
+    key_id: str = Field(..., min_length=1, max_length=64)
+    # Everybody who gets the new key, the owner included ...
+    keys: list[RoomKeyRotateItem] = Field(..., min_length=1, max_length=MAX_ROTATE_MEMBERS)
+    # ... and everybody who cannot yet. Together: exactly the room's members.
+    without: list[str] = Field(default_factory=list, max_length=MAX_ROTATE_MEMBERS)
 
 class RoomKeyShareIn(BaseModel):
     encrypted_room_key: str = Field(..., max_length=MAX_ENCRYPTED_KEY_B64_LEN)
@@ -3415,6 +3428,124 @@ async def share_room_key(
     # a success for the caller's purpose, not an error. Callers racing to close
     # the same gap must treat it as such.
     return {"ok": True, "written": written}
+
+
+@app.post("/crypto/room/{room_id}/rotate")
+async def rotate_room_key(
+    room_id: int,
+    payload: RoomKeyRotateIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Replace the room's key for everybody at once.
+
+    A rotation used to be one /share per member. Stopped half way - a dropped
+    connection, or the key-write limit, which a room of any size reaches after
+    a kick or two - it left some members on the new key and the rest, the owner
+    included, on the old one, each side writing what the other could not read.
+    Here every copy changes in one transaction or none does.
+
+    The owner names every accepted member: under `keys` with their copy, or
+    under `without` - somebody the new key cannot go to yet (their key changed
+    and has not been verified, or they have none). Those lose their current
+    copy and become an ordinary key gap, filled by the sweep once the reason is
+    gone. A list that is not exactly the room's members is refused with 409:
+    somebody joined or left since the owner looked, and it has to look again.
+    """
+    u = require_user_from_bearer(authorization)
+    actor_user_id = int(u["user_id"])
+    key_id = _normalize_key_id(payload.key_id)
+    if not key_id:
+        raise HTTPException(status_code=400, detail="key_id required")
+    ip = get_client_ip_request(request)
+    # One write, however many members: the limit is there for a client gone
+    # wrong, and a rotation that trips it half way is the failure this removes.
+    await enforce_http_rate_limit(f"crypto:keywrite:ip:{ip}", RL_CRYPTO_KEYWRITE_IP_PER_10MIN, 600)
+    await enforce_http_rate_limit(f"crypto:keywrite:user:{actor_user_id}", RL_CRYPTO_KEYWRITE_USER_PER_10MIN, 600)
+
+    wraps: dict[str, str] = {}
+    for item in payload.keys:
+        name = (item.username or "").strip().lower()
+        if not name or name in wraps:
+            raise HTTPException(status_code=400, detail="keys: empty or repeated username")
+        wraps[name] = item.encrypted_room_key
+    without = {(n or "").strip().lower() for n in payload.without}
+    if "" in without or len(without) != len(payload.without) or (without & set(wraps)):
+        raise HTTPException(status_code=400, detail="without: empty, repeated or also under keys")
+
+    async with SessionLocal() as session:
+        await _ensure_key_archive_tables(session)
+
+        # Locked for the transaction: two rotations of one room run one after
+        # the other, and the second answers to the members the first left.
+        res = await session.execute(sql_i("""
+            SELECT owner_user_id
+            FROM chat_rooms
+            WHERE id = :rid
+            FOR UPDATE
+        """, "rid"), {"rid": room_id})
+        room = res.mappings().first()
+        if not room:
+            raise HTTPException(status_code=404, detail="Room not found")
+        if int(room["owner_user_id"]) != actor_user_id:
+            # Not require_room_moderator: an admin may fill a gap with the key
+            # the room has, never decide what that key is.
+            raise HTTPException(status_code=403, detail="Only the room owner can change the room key")
+
+        res = await session.execute(sql_i("""
+            SELECT u.id, LOWER(u.username) AS username
+            FROM users u
+            WHERE u.id = :oid
+               OR u.id IN (
+                   SELECT m.user_id FROM chat_room_members m
+                   WHERE m.room_id = :rid AND m.status = 'accepted'
+               )
+        """, "rid", "oid"), {"rid": room_id, "oid": actor_user_id})
+        members = {str(r["username"]): int(r["id"]) for r in res.mappings().all()}
+        owner_name = next((n for n, i in members.items() if i == actor_user_id), "")
+
+        if owner_name not in wraps:
+            raise HTTPException(status_code=400, detail="The owner's own copy of the key is missing")
+        if set(wraps) | without != set(members):
+            raise HTTPException(status_code=409, detail="Room members changed; fetch the list and try again")
+
+        for name, erk in wraps.items():
+            uid = members[name]
+            await session.execute(sql_i("""
+                INSERT INTO chat_room_keys (room_id, user_id, encrypted_room_key)
+                VALUES (:rid, :uid, :erk)
+                ON CONFLICT (room_id, user_id)
+                DO UPDATE SET encrypted_room_key = EXCLUDED.encrypted_room_key
+            """, "rid", "uid"), {"rid": room_id, "uid": uid, "erk": erk})
+            await session.execute(sql_i("""
+                INSERT INTO chat_room_key_archive (room_id, user_id, key_id, encrypted_room_key)
+                VALUES (:rid, :uid, :kid, :erk)
+                ON CONFLICT (room_id, user_id, key_id)
+                DO NOTHING
+            """, "rid", "uid"), {"rid": room_id, "uid": uid, "kid": key_id, "erk": erk})
+        for name in without:
+            await session.execute(sql_i("""
+                DELETE FROM chat_room_keys
+                WHERE room_id = :rid AND user_id = :uid
+            """, "rid", "uid"), {"rid": room_id, "uid": members[name]})
+
+        await session.commit()
+
+    # Wake-ups, not data. Members read the new key now instead of when they
+    # next open the room - until then they would go on writing under the old
+    # one. Whoever was left without is a gap for the providers.
+    try:
+        await notify_manager.notify_many(
+            {members[n] for n in wraps if members[n] != actor_user_id},
+            {"type": "notify_room_key", "room_id": int(room_id), "ts": int(time.time())},
+        )
+        if without:
+            await _notify_room_key_providers(room_id)
+    except Exception:
+        pass
+
+    return {"ok": True, "rotated": len(wraps), "without": len(without)}
 
 @app.get("/crypto/room-key/{room_id}")
 async def get_room_key(room_id: int, authorization: str | None = Header(default=None)):

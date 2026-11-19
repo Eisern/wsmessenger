@@ -47,6 +47,7 @@ const NOTIFY_RELAY_TYPES = new Set([
   "notify_room_msg",
   "notify_dm_msg",
   "notify_key_gap",
+  "notify_room_key",
 ]);
 
 function hasMasterKey(maxAgeMs = 10 * 60 * 1000) {

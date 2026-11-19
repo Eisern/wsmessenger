@@ -53,8 +53,18 @@ const _sweep = KS.createKeySweep({
     }
     return { gaps: Array.isArray(body?.gaps) ? body.gaps : [], truncated: !!body?.truncated };
   },
+  // _loadRoomKey answers {notFound} / {refused} instead of throwing; the sweep
+  // must hear a failure, or it shares whatever key is in memory - possibly one
+  // from before a rotation - as the current one.
   refreshRoomKey: async (roomId) => {
-    await CryptoService._loadRoomKey(roomId);
+    const res = await CryptoService._loadRoomKey(roomId);
+    if (res?.ok) return;
+    // No key of ours there, or one we refuse: asking again changes nothing,
+    // so not a status the global backoff reacts to.
+    throw Object.assign(
+      new Error(res?.refused ? "the island's copy of the key was refused" : 'this account holds no key for the room'),
+      { status: 404 },
+    );
   },
   share: async (roomId, username) => {
     const res = await CryptoService.shareRoomKeyToUser(roomId, username, { ifAbsent: true });
@@ -102,10 +112,22 @@ function start() {
       _sweep.schedule(action, { roomId: rid });
     }
   };
+  // The owner changed a room's key. Read it now if we hold the old one: until
+  // we do, what we write goes out under the key a removed member holds.
+  const onRoomKey = (msg) => {
+    const rid = Number(msg?.room_id) || 0;
+    if (rid) CryptoService.refreshRoomKeyIfHeld(rid).catch(() => {});
+  };
   NetworkService.on('notify_key_gap', onGap);
+  NetworkService.on('notify_room_key', onRoomKey);
   NetworkService.on('members_changed', onMembers);
   _unsubs.push(() => NetworkService.off('notify_key_gap', onGap));
+  _unsubs.push(() => NetworkService.off('notify_room_key', onRoomKey));
   _unsubs.push(() => NetworkService.off('members_changed', onMembers));
+  // Our own rotation left somebody without the key: an ordinary gap now.
+  _unsubs.push(CryptoService.on('room_key_rotated', ({ roomId, without } = {}) => {
+    if (roomId && without?.length) _sweep.schedule('rotation', { roomId: Number(roomId) });
+  }));
 
   if (CryptoService.isReady()) _sweep.schedule('startup', { delayMs: 2500 });
 }

@@ -42,7 +42,8 @@
    * @param {function} d.isReady        async ({interactive}) => boolean - unlocked and signed in
    * @param {function} d.fetchGaps      async ({roomId, limit}) => {gaps:[{room_id, username}], truncated, notProvider?}
    *                                    throws on failure; a 429 carries {status: 429, retryAfterS}
-   * @param {function} d.refreshRoomKey async (roomId) => void - the CURRENT key, from the island
+   * @param {function} d.refreshRoomKey async (roomId) => void - the CURRENT key, from the island;
+   *                                    throws when it could not be had, and the room is then skipped
    * @param {function} d.share          async (roomId, username) => {written} - fill the gap only
    *                                    (if_absent); trust refusals carry .code TRUST_*
    * @param {function} d.isTransient    (error) => boolean - infrastructure, worth the global backoff
@@ -164,11 +165,18 @@
 
         for (const [rid, names] of byRoom.entries()) {
           // The current key from the island first: a key held since before a
-          // rotation would otherwise be handed out as current.
+          // rotation would otherwise be handed out as current - and stay so
+          // for whoever got it, since nothing later replaces a copy that
+          // exists. So no fresh key, no sharing: the room waits for the next
+          // run. (This used to log the failure and share what was in memory.)
           try {
             await d.refreshRoomKey(rid);
           } catch (e) {
-            log("room " + rid + ": key refresh failed:", e && e.message ? e.message : e);
+            summary.failed += names.length;
+            summary.incomplete = true;
+            if (d.isTransient(e)) anyFailure = true;
+            log("room " + rid + ": no current key, nothing shared:", e && e.message ? e.message : e);
+            continue;
           }
 
           for (const name of names) {

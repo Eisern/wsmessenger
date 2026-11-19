@@ -1985,6 +1985,20 @@ class NetworkService {
   }
 
   /**
+   * Replace the room's key for everybody in one transaction (owner only).
+   * `keys`: [{username, encrypted_room_key}] - every member who gets it, the
+   * owner included; `without`: members left without it for now. Together they
+   * must be exactly the room's members, or the island answers 409.
+   */
+  async rotateRoomKey(roomId, { keyId, keys, without = [] }) {
+    return this._fetch(`/crypto/room/${encodeURIComponent(roomId)}/rotate`, {
+      method: 'POST',
+      body: { key_id: keyId, keys, without },
+    });
+    // → { ok, rotated, without }
+  }
+
+  /**
    * Accepted members without a room key, in rooms this account may serve
    * (owner or admin): { gaps: [{room_id, room_name, username}], truncated }.
    */

@@ -685,6 +685,10 @@ function lockCryptoSession() {
   }
   stopMasterKeyTouch();
   _ed25519PubKeyCache.clear();
+  // Which unknown key ids were already asked about: the keys they were asked
+  // for are gone, so the next message is entitled to ask again.
+  _unknownKid.asked.clear();
+  _unknownKid.slotAt.clear();
   // Tokens for rooms on other islands were signed for with the key that is
   // being put away; they go with it.
   try {
@@ -1210,29 +1214,116 @@ async function signCreatedRoomKey(roomId, roomKeyBase64) {
 // Flow:
 //   1. Fetch current member list via GET /rooms/{roomId}/members
 //   2. Generate new AES-256-GCM room key
-//   3. Preflight each remaining member
-//   4. Share the new key to every remaining member with retries
-//   5. Save encrypted copy for self (owner) via POST /crypto/room-key
-//   6. Load new key locally
+//   3. Wrap it for every member, the owner included. A member it cannot go to
+//      yet - their key changed and nobody verified it, or they have none - is
+//      named as left without it
+//   4. POST /crypto/room/{roomId}/rotate: every copy changes in one
+//      transaction on the island, or none does
+//   5. Load new key locally
+//
+// It used to be one /share per member, then the owner's own copy. Stopped half
+// way - a dropped connection, or the island's key-write limit, which a room of
+// any size reaches after a removal or two - it left some members on the new
+// key and the rest on the old one, and the owner without the key it had just
+// handed out. And one member with an unverified key kept the whole room on the
+// old key, the removed member's.
 //
 // This is called automatically after a successful kick.
 
-const KEY_ROTATION_SHARE_MAX_ATTEMPTS = 5;
-const KEY_ROTATION_SHARE_RETRY_BASE_MS = 1200;
-const KEY_ROTATION_OWNER_SAVE_MAX_ATTEMPTS = 3;
+const KEY_ROTATION_MAX_ATTEMPTS = 4;        // of the one request, when the island does not answer
+const KEY_ROTATION_RETRY_BASE_MS = 1200;
+const KEY_ROTATION_MEMBER_ROUNDS = 3;       // times the member list may change under us
+const KEY_ROTATION_MAX_WAIT_S = 30;         // the longest a 429 is waited out
 
 function waitMs(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 /**
- * Rotate the room key: generate a new key and distribute to all current members.
+ * Whether a member who could not be given the new key should simply be left
+ * without it (true), or the rotation should stop because we could not tell
+ * (false). Their key needing a person to verify it, or not existing, is an
+ * answer about them; a request that failed is not.
+ */
+function _rotationCanLeaveOut(e) {
+  if (e?.code === "TRUST_CHANGED" || e?.code === "TRUST_UNVERIFIED") return true;
+  return !!e?.noUsableKey;
+}
+
+/**
+ * The member's copy of a new room key, or a throw that says why not.
+ */
+async function _wrapRotatedKeyFor(rid, uname, newKeyBase64, keyId, token) {
+  const pkResp = await fetch(
+    API_BASE + `/keys/${encodeURIComponent(uname)}`,
+    { method: "GET", headers: { "Authorization": "Bearer " + token } }
+  );
+  const pkBody = await pkResp.json().catch(() => ({}));
+  if (pkResp.status === 404 || (pkResp.ok && !pkBody.public_key)) {
+    throw Object.assign(new Error("no public key"), { noUsableKey: true });
+  }
+  if (!pkResp.ok) throw new Error(pkBody.detail || `public key unavailable (${pkResp.status})`);
+
+  let raw;
+  try {
+    raw = CU().base64ToArrayBuffer(pkBody.public_key);
+  } catch {
+    raw = null;
+  }
+  if (!raw || raw.byteLength !== 32) {
+    throw Object.assign(new Error("public key is not a usable X25519 key"), { noUsableKey: true });
+  }
+
+  await assertPeerKeyTrustedForSharing(uname, "sharing room key", { peerPublicKeyB64: pkBody.public_key });
+  return CU().encryptRoomKeyForUser(pkBody.public_key, newKeyBase64, wrapSignOpts(rid, uname, keyId));
+}
+
+/**
+ * The one request that changes the room's key. Resolves the island's answer -
+ * {status, body}. Status 0 (it never answered) or a 5xx (something in front
+ * of it did) means nobody knows whether the key changed.
+ */
+async function _postRoomKeyRotation(rid, payload, token) {
+  let last = { status: 0, body: {} };
+  for (let attempt = 1; attempt <= KEY_ROTATION_MAX_ATTEMPTS; attempt++) {
+    let waitFor = KEY_ROTATION_RETRY_BASE_MS * attempt;
+    try {
+      const resp = await fetch(API_BASE + `/crypto/room/${rid}/rotate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+        body: JSON.stringify(payload),
+      });
+      last = { status: resp.status, body: await resp.json().catch(() => ({})) };
+      // An answer that will not change by asking again - or a success.
+      if (resp.status < 500 && resp.status !== 429) return last;
+      if (resp.status === 429) {
+        const retryAfterS = Number(resp.headers.get("Retry-After")) || 0;
+        if (retryAfterS > KEY_ROTATION_MAX_WAIT_S) return last;
+        waitFor = Math.max(waitFor, retryAfterS * 1000);
+      }
+    } catch (e) {
+      last = { status: 0, body: {}, error: e?.message || String(e) };
+    }
+    console.warn(`[KeyRotation] attempt ${attempt} for room ${rid} did not go through (${last.status || last.error})`);
+    // The same request again: the same key and the same copies, so an attempt
+    // that did reach the island and one that did not end in the same state.
+    if (attempt < KEY_ROTATION_MAX_ATTEMPTS) await waitMs(waitFor);
+  }
+  return last;
+}
+
+/**
+ * Rotate the room key: generate a new key and give it to all current members.
  * Should only be called by the room owner.
  *
  * @param {number} roomId
  * @param {object} opts
  * @param {string} [opts.kickedUsername] the kicked user (for logging)
  * @returns {Promise<{ok: boolean, shared: number, failed: string[], error?: string}>}
+ *   ok: the room is on the new key. `shared` members hold it; `failed` are
+ *   members left without it until their key can be trusted - the key sweep
+ *   hands it to them then. Not ok: the room is on the old key (`error` says
+ *   why), with one exception it names - the island never answered.
  */
 async function rotateRoomKey(roomId, { kickedUsername = "" } = {}) {
   const rid = Number(roomId);
@@ -1254,196 +1345,109 @@ async function rotateRoomKey(roomId, { kickedUsername = "" } = {}) {
     const myPub = cm.userPublicKeyPem;
     if (!myPub) throw new Error("Own public key not available");
 
-    const meName = getMeUsername().toLowerCase();
+    const me = getMeUsername();
+    const meName = me.toLowerCase();
+    if (!meName) throw new Error("Not signed in");
 
     const token = await requestToken();
     if (!token) throw new Error("No token");
 
-    // 2. Fetch current members (after the kick has been processed) before any
-    // server-side key mutation so we can abort cleanly if distribution cannot
-    // be prepared for every remaining member.
-    const membersResp = await fetch(API_BASE + `/rooms/${encodeURIComponent(rid)}/members`, {
-      method: "GET",
-      headers: { "Authorization": "Bearer " + token }
-    });
-
-    if (!membersResp.ok) {
-      console.warn(`[KeyRotation] Failed to fetch members for room ${rid}: ${membersResp.status}`);
-      return { ok: false, shared: 0, failed: [], error: "Member list unavailable; old key remains active" };
-    }
-
-    const members = await membersResp.json().catch(() => []);
-    if (!Array.isArray(members)) {
-      return { ok: false, shared: 0, failed: [], error: "Member list invalid; old key remains active" };
-    }
-
-    // 3. Generate the new key material only after we know the member list.
+    // One new key for the whole attempt: if the member list changes under us
+    // it is wrapped again for the new list, not replaced.
     const tmp = await cu.generateRoomKey(true);
     const newKeyBase64 = await cu.exportRoomKey(tmp);
     const keyId = await cu.fingerprintRoomKeyBase64(newKeyBase64);
-    console.log(`[KeyRotation] New room key generated for room ${rid}`);
 
-    // 4. Preflight every recipient before mutating server state.
-    const otherMembers = members.filter(m => {
-      const uname = String(m.username || "").trim().toLowerCase();
-      return uname && uname !== meName;
-    });
-
-    const preparedShares = [];
-    const preflightFailed = [];
-    console.log(`[KeyRotation] Preflighting new key distribution to ${otherMembers.length} members`);
-
-    for (const member of otherMembers) {
-      const uname = String(member.username || "").trim();
-      try {
-        const pkResp = await fetch(
-          API_BASE + `/keys/${encodeURIComponent(uname)}`,
-          { method: "GET", headers: { "Authorization": "Bearer " + token } }
-        );
-        const pkBody = await pkResp.json().catch(() => ({}));
-        if (!pkResp.ok || !pkBody.public_key) {
-          throw new Error("public key unavailable");
-        }
-
-        await assertPeerKeyTrustedForSharing(uname, "sharing room key", { peerPublicKeyB64: pkBody.public_key });
-        const encryptedForMember = await cu.encryptRoomKeyForUser(
-          pkBody.public_key, newKeyBase64, wrapSignOpts(rid, uname, keyId),
-        );
-        preparedShares.push({ uname, encryptedForMember });
-      } catch (e) {
-        console.warn(`[KeyRotation] Preflight failed for ${uname}:`, e?.message || e);
-        preflightFailed.push(uname);
+    for (let round = 1; round <= KEY_ROTATION_MEMBER_ROUNDS; round++) {
+      // 2. Current members (after the kick has been processed).
+      const membersResp = await fetch(API_BASE + `/rooms/${encodeURIComponent(rid)}/members`, {
+        method: "GET",
+        headers: { "Authorization": "Bearer " + token }
+      });
+      if (!membersResp.ok) {
+        console.warn(`[KeyRotation] Failed to fetch members for room ${rid}: ${membersResp.status}`);
+        return { ok: false, shared: 0, failed: [], error: "Member list unavailable; old key remains active" };
       }
-    }
+      const members = await membersResp.json().catch(() => null);
+      if (!Array.isArray(members)) {
+        return { ok: false, shared: 0, failed: [], error: "Member list invalid; old key remains active" };
+      }
 
-    if (preflightFailed.length > 0) {
-      const pendingList = preflightFailed.join(", ");
-      return {
-        ok: false,
-        shared: 0,
-        failed: preflightFailed,
-        error: `Rotation aborted before activation because some members cannot receive the new key (${pendingList})`,
-      };
-    }
-
-    // 5. Share new key with each remaining member (excluding self). We only
-    // activate the new key locally after every recipient has acknowledged it.
-    console.log(`[KeyRotation] Distributing new key to ${preparedShares.length} members`);
-
-    let shared = 0;
-    let pendingShares = preparedShares.slice();
-
-    for (let attempt = 1; attempt <= KEY_ROTATION_SHARE_MAX_ATTEMPTS && pendingShares.length > 0; attempt++) {
-      const nextPending = [];
-
-      for (const share of pendingShares) {
-        const uname = share.uname;
+      // 3. A copy for everybody - ours first.
+      const keys = [{
+        username: me,
+        encrypted_room_key: await cu.encryptRoomKeyForUser(myPub, newKeyBase64, wrapSignOpts(rid, me, keyId)),
+      }];
+      const without = [];
+      const seen = new Set([meName]);
+      for (const member of members) {
+        const uname = String(member?.username || "").trim();
+        if (!uname || seen.has(uname.toLowerCase())) continue;
+        seen.add(uname.toLowerCase());
         try {
-          const shareResp = await fetch(
-            API_BASE + `/crypto/room/${rid}/share?target_username=${encodeURIComponent(uname)}`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": "Bearer " + token
-              },
-              body: JSON.stringify({ encrypted_room_key: share.encryptedForMember, key_id: keyId })
-            }
-          );
-
-          const shareBody = await shareResp.json().catch(() => ({}));
-          if (!shareResp.ok) {
-            console.warn(`[KeyRotation] Share attempt ${attempt} to ${uname} failed:`, shareBody.detail || shareResp.status);
-            nextPending.push(share);
-            continue;
-          }
-
-          shared++;
-          console.log(`[KeyRotation] Key shared to ${uname} on attempt ${attempt}`);
+          keys.push({
+            username: uname,
+            encrypted_room_key: await _wrapRotatedKeyFor(rid, uname, newKeyBase64, keyId, token),
+          });
         } catch (e) {
-          console.warn(`[KeyRotation] Share attempt ${attempt} to ${uname} errored:`, e?.message || e);
-          nextPending.push(share);
+          if (!_rotationCanLeaveOut(e)) {
+            console.warn(`[KeyRotation] Could not prepare the key for ${uname}:`, e?.message || e);
+            return {
+              ok: false, shared: 0, failed: [uname],
+              error: `Could not prepare the new key for ${uname} (${e?.message || e}); old key remains active`,
+            };
+          }
+          console.warn(`[KeyRotation] ${uname} is left without the new key for now:`, e?.message || e);
+          without.push(uname);
         }
       }
 
-      pendingShares = nextPending;
+      // 4. Everybody's copy, in one request.
+      const res = await _postRoomKeyRotation(rid, { key_id: keyId, keys, without }, token);
 
-      if (pendingShares.length > 0 && attempt < KEY_ROTATION_SHARE_MAX_ATTEMPTS) {
-        const retryDelay = KEY_ROTATION_SHARE_RETRY_BASE_MS * attempt;
-        console.warn(
-          `[KeyRotation] Retrying ${pendingShares.length} pending share(s) in ${retryDelay}ms:`,
-          pendingShares.map(x => x.uname).join(", ")
-        );
-        await waitMs(retryDelay);
+      if (res.status === 409) {
+        // Somebody joined or left between our look at the list and the
+        // island's. Left as it was, a newcomer would end up on the old key.
+        console.warn(`[KeyRotation] Members of room ${rid} changed; looking again (round ${round})`);
+        continue;
       }
-    }
-
-    const failed = pendingShares.map(x => x.uname);
-    console.log(`[KeyRotation] Distribution finished for room ${rid}: ${shared} shared, ${failed.length} failed`);
-
-    if (failed.length > 0) {
-      const pendingList = failed.join(", ");
-      return {
-        ok: false,
-        shared,
-        failed,
-        error: `Rotation not activated because not every member received the new key (${pendingList})`,
-      };
-    }
-
-    // 6. Persist the new key for the owner only after all recipient shares
-    // have succeeded, so the room switches generations as atomically as the
-    // current API allows.
-    const encryptedForMe = await cu.encryptRoomKeyForUser(
-      myPub, newKeyBase64, wrapSignOpts(rid, getMeUsername(), keyId),
-    );
-    let ownerSaved = false;
-    let ownerSaveError = "";
-
-    for (let attempt = 1; attempt <= KEY_ROTATION_OWNER_SAVE_MAX_ATTEMPTS; attempt++) {
-      try {
-        const saveResp = await fetch(API_BASE + "/crypto/room-key", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + token
-          },
-          body: JSON.stringify({ room_id: rid, encrypted_room_key: encryptedForMe, key_id: keyId })
-        });
-
-        const saveBody = await saveResp.json().catch(() => ({}));
-        if (!saveResp.ok) {
-          throw new Error(saveBody.detail || `Save new room key failed (${saveResp.status})`);
-        }
-
-        ownerSaved = true;
-        break;
-      } catch (e) {
-        ownerSaveError = e?.message || String(e);
-        console.warn(`[KeyRotation] Owner save attempt ${attempt} failed:`, ownerSaveError);
-        if (attempt < KEY_ROTATION_OWNER_SAVE_MAX_ATTEMPTS) {
-          await waitMs(KEY_ROTATION_SHARE_RETRY_BASE_MS * attempt);
-        }
+      if (res.status === 0 || res.status >= 500) {
+        // No answer from the island itself (nothing at all, or an error from
+        // whatever stands in front of it): it may have changed the key or not. Keep the
+        // new one where it opens messages without making it the key we write
+        // with; the next read of the room's key from the island settles which
+        // one is current.
+        await cm.loadArchivedKey(rid, keyId, newKeyBase64);
+        await saveRoomKeyArchive(rid);
+        return {
+          ok: false, shared: 0, failed: [],
+          error: "The server did not answer, so the key may or may not have changed. Reopen the room and rotate again if in doubt",
+        };
       }
+      if (res.status < 200 || res.status >= 300) {
+        const detail = String(res.body?.detail || `status ${res.status}`);
+        const tooOld = (res.status === 404 && detail === "Not Found") || res.status === 405;
+        return {
+          ok: false, shared: 0, failed: [],
+          error: tooOld
+            ? "This server cannot change a room key in one step (it needs an update); old key remains active"
+            : `${detail}; old key remains active`,
+        };
+      }
+
+      // 5. The room is on the new key: write with it from now on.
+      await cm.loadRoomKey(rid, newKeyBase64);
+      await saveRoomKeyArchive(rid);
+      console.log(`[KeyRotation] Room ${rid} is on the new key: ${keys.length - 1} member(s), ${without.length} left without`);
+      // Whoever was left without is an ordinary gap now.
+      if (without.length) scheduleRoomKeySweep("rotation", { roomId: rid });
+      return { ok: true, shared: keys.length - 1, failed: without };
     }
 
-    if (!ownerSaved) {
-      return {
-        ok: false,
-        shared,
-        failed: [],
-        error: `All members received the new key, but owner activation failed: ${ownerSaveError}`,
-      };
-    }
-
-    // 7. Load new key locally now that it has been distributed to all members.
-    //    This ensures messages sent during distribution were encrypted with the old key,
-    //    which every member still had at that point.
-    await cm.loadRoomKey(rid, newKeyBase64);
-    await saveRoomKeyArchive(rid);
-    console.log(`[KeyRotation] New key activated locally for room ${rid}`);
-
-    return { ok: true, shared, failed };
+    return {
+      ok: false, shared: 0, failed: [],
+      error: "The member list kept changing; old key remains active. Try again",
+    };
   } catch (e) {
     console.error(`[KeyRotation] Failed for room ${rid}:`, e);
     return { ok: false, shared: 0, failed: [], error: e?.message || String(e) };
@@ -2561,6 +2565,63 @@ function isPingPayloadText(text) {
   return false;
 }
 
+// --- a key that changed while the room was open ---
+//
+// A message under a key id this device has never held means the room's key was
+// changed since we read it. Nothing used to react to that: the message was
+// shown as "decryption failed", and - worse - we went on WRITING under the old
+// key, the one a removed member still holds, until the room was opened again.
+// Now the key is read from the island again, which makes the new one current
+// and files the old one.
+//
+// One read serves every message that arrives meanwhile (they wait for it), an
+// id that stays unknown is not asked for again for a minute, and a slot is not
+// read more often than every ten seconds whatever ids are thrown at it - the
+// id is the sender's to write, and must not become a request per message.
+const _UNKNOWN_KID_RETRY_MS = 60 * 1000;
+const _UNKNOWN_KID_SLOT_FLOOR_MS = 10 * 1000;
+const _unknownKid = { inflight: new Map(), asked: new Map(), slotAt: new Map() };
+
+/**
+ * @param {number|string} slot  the key slot (a room id, or a guest room's slot)
+ * @param {string} kid          the id the message names
+ * @param {function} load       async () => any - reads the slot's current key
+ *                              and its archive from the island
+ */
+async function refreshKeyForUnknownKid(slot, kid, load) {
+  if (!kid || typeof kid !== "string") return;
+  if (CM()?.roomKeyArchive?.get(slot)?.has(kid)) return;
+  const running = _unknownKid.inflight.get(slot);
+  if (running) {
+    await running;
+    return;
+  }
+  const now = Date.now();
+  const id = `${slot}:${kid}`;
+  if (now - (_unknownKid.asked.get(id) || 0) < _UNKNOWN_KID_RETRY_MS) return;
+  if (now - (_unknownKid.slotAt.get(slot) || 0) < _UNKNOWN_KID_SLOT_FLOOR_MS) return;
+  if (_unknownKid.asked.size >= 500) _unknownKid.asked.clear();
+  _unknownKid.asked.set(id, now);
+  _unknownKid.slotAt.set(slot, now);
+  const p = Promise.resolve().then(load)
+    .catch((e) => { console.warn("key refresh for an unknown key id failed:", e?.message || e); })
+    .finally(() => { _unknownKid.inflight.delete(slot); });
+  _unknownKid.inflight.set(slot, p);
+  await p;
+}
+
+/**
+ * The island says this room's key was changed (`notify_room_key`). If we hold
+ * the room's key - so might write under it - read the new one now. A room we
+ * have not opened reads its key when it is.
+ */
+async function refreshRoomKeyIfHeld(roomId) {
+  const rid = Number(roomId);
+  if (!rid || !CM()?.roomKeys?.has(rid)) return false;
+  const res = await loadRoomKey(rid);
+  return !!res?.ok;
+}
+
 //Decrypt received message
 async function decryptMessageFromRoom(roomId, text, claimedAuthor = null) {
   if (isPingPayloadText(text)) return null;
@@ -2598,6 +2659,7 @@ if (!CM()?.roomKeys?.has(rid)) {
     return "[Encrypted message - key not available]";
   }
 }
+  await refreshKeyForUnknownKid(rid, parsed.kid, () => loadRoomKey(rid));
   try {
     const decrypted = await CM().decryptMessage(rid, parsed);
     return await openRoomEnvelope(rid, decrypted, claimedAuthor);
@@ -2779,11 +2841,25 @@ function _sweepIsPermanentish(msg) {
 const _keySweep = globalThis.WSKeySweep.createKeySweep({
   isReady: ({ interactive }) => ensureCryptoReady({ interactive }),
   fetchGaps: ({ roomId, limit }) => fetchRoomKeyGaps({ roomId, limit }),
-  refreshRoomKey: (rid) => loadRoomKey(rid),
+  // loadRoomKey answers instead of throwing; the sweep must hear a failure,
+  // or it shares whatever key is in memory - possibly one from before a
+  // rotation - as the current one.
+  refreshRoomKey: async (rid) => {
+    const res = await loadRoomKey(rid);
+    if (res?.ok) return;
+    const err = new Error(
+      res?.notFound ? "this account holds no key for the room"
+        : res?.refused ? "the island's copy of the key was refused"
+          : res?.locked ? "locked" : "the key could not be read from the island");
+    // No key of ours there, or one we refuse: asking again changes nothing.
+    err.permanent = !!(res?.notFound || res?.refused);
+    throw err;
+  },
   // shareRoomKeyToUser fetches the member's key itself and checks it against
   // the pin before wrapping - a trust refusal comes back with its .code.
   share: (rid, uname) => shareRoomKeyToUser(rid, uname, { interactive: false, ifAbsent: true }),
-  isTransient: (e) => e?.code === "TRUST_UNVERIFIABLE" || !_sweepIsPermanentish(e?.message || String(e)),
+  isTransient: (e) => e?.code === "TRUST_UNVERIFIABLE"
+    || (!e?.permanent && !_sweepIsPermanentish(e?.message || String(e))),
   onDone: (summary, blocked) => { window.onKeyGapSweepDone?.(summary, blocked); },
   log: (...args) => console.log("[KeySweep]", ...args),
 });
@@ -4659,6 +4735,7 @@ async function decryptFromGuestRoom(room, text, claimedAuthor = null) {
     const res = await loadGuestRoomKey(room, { throttled: true });
     if (!res.ok) return "[Encrypted message - key not available]";
   }
+  await refreshKeyForUnknownKid(slot, parsed.kid, () => loadGuestRoomKey(room));
   try {
     const plain = await CM().decryptMessage(slot, parsed);
     return await openRoomEnvelope(room.roomId, plain, claimedAuthor, _guestCtx(room));

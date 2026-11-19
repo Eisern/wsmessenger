@@ -199,6 +199,39 @@ island - waited for somebody's browser extension.
 
 ### Fixed — security
 
+- **Changing a room's key could stop half way, and then nobody noticed.** A
+  rotation - after a removal, or from Manage → Keys - was one request per
+  member and then one for the owner. Stopped part way (a dropped connection,
+  or the key-write limit, which a room of any size reaches after a removal or
+  two), it left some members on the new key and the rest on the old one,
+  writing what the other side could not read; on Android the owner switched
+  to the new key before handing out any copy, and a member whose copy failed
+  was locked out of everything written after, under an answer that said
+  "ok". One member with an unverified key also kept the whole room on the old
+  key - the removed member's. Now `POST /crypto/room/{id}/rotate` changes
+  every copy in one transaction or none (owner only, one key write however
+  many members). The owner names every member: with their copy, or as left
+  without it for now - their key changed and nobody verified it, or they
+  have none - and those become an ordinary key gap the sweep fills once they
+  are verified. A list that is not exactly the room's members is refused
+  with 409, and the client reads the members again. A request the server
+  never answered keeps the new key for reading only; the next read of the
+  room's key settles which one is current.
+- **A member went on writing under the old key after it was changed.** Until
+  they reopened the room, messages went out under the key the removed member
+  still held, and messages under the new key showed as undecryptable. The
+  server now sends `notify_room_key` to every member who got the new key,
+  and a message under a key id the device has never held makes it read the
+  room's key again - once for all such messages, at most every ten seconds
+  per room, so the id a sender writes cannot become a request per message.
+- **The key sweep handed out a key it could not confirm was current.** When
+  the room's key could not be read from the island, it logged that and shared
+  the key it had in memory, possibly one from before a rotation - and a copy
+  once written is never replaced by the sweep. It now skips the room until it
+  can read the current key.
+- **An admin's removal looked like a rotation.** Only the owner can change a
+  room's key, so after an admin removes somebody, nothing changes; both
+  clients now say so, and that the owner has to rotate it.
 - **Attachments were not encrypted.** Neither client encrypted a file: the
   server received its bytes, its name and its type, kept all three, and every
   backup of the upload directory carried them - while this README said the
@@ -236,6 +269,17 @@ island - waited for somebody's browser extension.
 
 ### Added — tests
 
+- Changing a room's key: `server/tests/test_room_keys.py` (one transaction
+  for every copy, owner only, names in any case, a list that is not the
+  members changes nothing, a removed or merely invited member cannot be
+  named, a member left without becomes a gap filled like any other, one key
+  write for a room over the limit's size, the wake-up), and
+  `extensionKeyRotation.test.js` / `cryptoServiceKeyRotation.test.js` (the
+  real `rotateRoomKey` of each client: one request, who is left without and
+  who stops it, a member list that changes or never settles, the same request
+  again when unanswered, an unanswered rotation never made current, a long
+  429, an unknown key id read once and throttled, the wake-up from the worker
+  to the panel, the sweep refusing to share from memory).
 - Attachments: `fileCrypt.test.js` (the shared format, both copies: known
   blobs, padding, every way to drop, repeat, reorder or cut a chunk, the
   marker and what a name may contain), `extensionFileTransfer.test.js` (the

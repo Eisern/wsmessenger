@@ -1645,29 +1645,21 @@ function MembersModal({ visible, onClose, members, onlineUsers, roomId, roomName
             // Rotate room key so kicked user can't decrypt new messages
             const sysMsg = (text) => onSystemMessage?.(text);
             try {
-              sysMsg(`Rotating room key after removing ${username}...`);
-              const membersList = await NetworkService.getRoomMembers(roomId);
-              const remaining = (membersList || []).filter(
-                m => (m.username || '').toLowerCase() !== username.toLowerCase(),
-              );
-              // Fetch public keys for each remaining member
-              const withKeys = await Promise.all(
-                remaining.map(async m => {
-                  try {
-                    const peerData = await NetworkService.fetchPeerKey(m.username);
-                    return { ...m, public_key: peerData?.public_key };
-                  } catch (_) { return m; }
-                }),
-              );
-              if (withKeys.length > 0) {
-                const result = await CryptoService.rotateRoomKey(roomId, withKeys);
+              if (myRole === 'owner') sysMsg(`Rotating room key after removing ${username}...`);
+              if (myRole !== 'owner') {
+                // Only the owner can change the room's key, so nothing
+                // changed - and saying nothing would pass for the opposite.
+                sysMsg(`${username} was removed, but only the room's owner can change the room key. ` +
+                  `Until the owner rotates it, new messages stay under the key ${username} holds.`);
+              } else {
+                const result = await CryptoService.rotateRoomKey(roomId);
                 if (result.ok) {
-                  const failNote = result.failed.length
-                    ? ` (${result.failed.length} member(s) failed: ${result.failed.join(', ')})`
+                  const waiting = result.failed.length
+                    ? ` ${result.failed.join(', ')} will get it once their key is verified.`
                     : '';
-                  sysMsg(`Room key rotated. New key distributed to ${result.shared} member(s).${failNote}`);
+                  sysMsg(`Room key rotated. New key distributed to ${result.shared} member(s).${waiting}`);
                 } else {
-                  sysMsg(`Room key rotation failed: ${result.error || 'unknown error'}. Old key is still in use.`);
+                  sysMsg(`Room key rotation failed: ${result.error || 'unknown error'}`);
                 }
               }
             } catch (rotateErr) {

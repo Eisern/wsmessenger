@@ -424,10 +424,17 @@ const CryptoService = {
     } catch (_e) { /* ignore */ }
   },
 
+  /** What _refreshKeyForUnknownKid remembers having asked for. */
+  _forgetUnknownKeyIds() {
+    _unknownKid.asked.clear();
+    _unknownKid.roomAt.clear();
+  },
+
   lockSession() {
     _unlocked = false;
     _initialized = false;
     cryptoManager.clear();
+    CryptoService._forgetUnknownKeyIds();
     _clearLockTimer();
     _ed25519Seed = null;
     _ed25519PubKeyCache.clear();
@@ -553,45 +560,118 @@ const CryptoService = {
   },
 
   /**
-   * Rotate room key: create new key, re-encrypt for all members.
+   * Change the room's key: a new one for every current member, at once.
+   * Owner only.
+   *
+   * Every copy goes to the island in one request, which changes all of them in
+   * one transaction or none. It used to be one request per member, with the
+   * new key made current here BEFORE any of them: a member whose share failed
+   * was locked out of everything written from then on, and the answer was
+   * still "ok".
+   *
+   * A member the key cannot go to yet - their key changed and nobody verified
+   * it, or they have none - is left without it and named in `failed`; the key
+   * sweep hands it over once the reason is gone. Anything that only stopped us
+   * from finding out (a request that failed) stops the rotation instead.
+   *
    * @param {number|string} roomId
-   * @param {Array<{username: string, public_key: string}>} members
-   * @returns {Promise<boolean>}
+   * @returns {Promise<{ok: boolean, shared: number, failed: string[], error?: string}>}
+   *   ok: the room is on the new key. Not ok: it is on the old one (`error`
+   *   says why), with one exception it names - the island never answered.
    */
-  async rotateRoomKey(roomId, members) {
-    if (!CryptoService.isReady()) return { ok: false, shared: 0, failed: [], error: 'Crypto not ready' };
+  async rotateRoomKey(roomId) {
+    const none = (error, failed = []) => ({ ok: false, shared: 0, failed, error });
+    if (!CryptoService.isReady()) return none('Crypto not ready');
     try {
-      const newRawB64 = await cryptoManager.createRoomKey(roomId);
-      const keyId = await CryptoUtils.fingerprintRoomKeyBase64(newRawB64);
-      const failed = [];
-      let shared = 0;
+      const myPubB64 = cryptoManager.userPublicKeyB64;
+      const me = await _resolveUsername();
+      if (!myPubB64 || !me) throw new Error('Locked, or not signed in');
+      const meName = me.toLowerCase();
 
-      for (const m of members) {
-        if (!m.public_key) { failed.push(m.username); continue; }
+      // One new key for the whole attempt: if the member list changes under us
+      // it is wrapped again for the new list, not replaced.
+      const tmp = await CryptoUtils.generateRoomKey(true);
+      const newRawB64 = await CryptoUtils.exportRoomKey(tmp);
+      const keyId = await CryptoUtils.fingerprintRoomKeyBase64(newRawB64);
+
+      for (let round = 1; round <= KEY_ROTATION_MEMBER_ROUNDS; round++) {
+        let members;
         try {
-          // TOFU: verify peer key before sharing room key
-          await _assertPeerKeyTrustedForSharing(
-            m.username, 'sharing room key', { peerPublicKeyB64: m.public_key },
-          );
-          const wrapped = await CryptoUtils.encryptRoomKeyForUser(
-            m.public_key, newRawB64, await CryptoService._wrapSignOpts(roomId, m.username, keyId),
-          );
-          await NetworkService.shareRoomKey(roomId, m.username, wrapped, keyId);
-          shared++;
+          members = await NetworkService.getRoomMembers(roomId);
         } catch (_e) {
-          console.warn(`[rotateRoomKey] skip ${m.username}:`, _e?.message);
-          failed.push(m.username);
+          return none('Member list unavailable; old key remains active');
         }
+        if (!Array.isArray(members)) return none('Member list invalid; old key remains active');
+
+        const keys = [{
+          username: me,
+          encrypted_room_key: await CryptoUtils.encryptRoomKeyForUser(
+            myPubB64, newRawB64, await CryptoService._wrapSignOpts(roomId, me, keyId),
+          ),
+        }];
+        const without = [];
+        const seen = new Set([meName]);
+        for (const m of members) {
+          const uname = String(m?.username || '').trim();
+          if (!uname || seen.has(uname.toLowerCase())) continue;
+          seen.add(uname.toLowerCase());
+          try {
+            keys.push({
+              username: uname,
+              encrypted_room_key: await _wrapRotatedKeyFor(roomId, uname, newRawB64, keyId),
+            });
+          } catch (e) {
+            if (!_rotationCanLeaveOut(e)) {
+              return none(
+                `Could not prepare the new key for ${uname} (${e?.message || e}); old key remains active`, [uname],
+              );
+            }
+            console.warn(`[rotateRoomKey] ${uname} is left without the new key for now:`, e?.message);
+            without.push(uname);
+          }
+        }
+
+        const res = await _postRoomKeyRotation(roomId, { keyId, keys, without });
+
+        if (res.status === 409) continue;   // somebody joined or left: look again
+        if (res.status === 0 || res.status >= 500) {
+          // No answer from the island itself: it may have changed the key or
+          // not. Keep the new one where it opens messages without writing
+          // under it; the next read of the room's key settles which is current.
+          await cryptoManager.loadArchivedKey(roomId, keyId, newRawB64);
+          await _persistRoomKeyArchive(roomId);
+          return none('The server did not answer, so the key may or may not have changed. Reopen the room and rotate again if in doubt');
+        }
+        if (!res.ok) {
+          const tooOld = (res.status === 404 && res.detail === 'Not Found') || res.status === 405;
+          return none(tooOld
+            ? 'This server cannot change a room key in one step (it needs an update); old key remains active'
+            : `${res.detail || `status ${res.status}`}; old key remains active`);
+        }
+
+        // The room is on the new key: write with it from now on.
+        await cryptoManager.loadRoomKey(roomId, newRawB64);
+        await _persistRoomKeyArchive(roomId);
+        _emit('room_key_loaded', { roomId });
+        _emit('room_key_rotated', { roomId, without });
+        return { ok: true, shared: keys.length - 1, failed: without };
       }
-      await _persistRoomKeyArchive(roomId);
-      if (failed.length > 0) {
-        console.warn('[rotateRoomKey] failed for:', failed.join(', '));
-      }
-      return { ok: true, shared, failed };
+      return none('The member list kept changing; old key remains active. Try again');
     } catch (_e) {
       console.warn('[CryptoService] rotateRoomKey error:', _e?.message);
-      return { ok: false, shared: 0, failed: [], error: _e?.message || 'Unknown error' };
+      return none(_e?.message || 'Unknown error');
     }
+  },
+
+  /**
+   * The island says this room's key was changed (`notify_room_key`). If we
+   * hold the room's key - so might write under it - read the new one now.
+   */
+  async refreshRoomKeyIfHeld(roomId) {
+    if (!CryptoService.isReady() || !cryptoManager.roomKeys.has(roomId)) return false;
+    const res = await CryptoService._loadRoomKey(roomId).catch(() => null);
+    if (res?.ok) await _loadRoomKeyArchiveFromServer(roomId).catch(() => {});
+    return !!res?.ok;
   },
 
   /**
@@ -712,6 +792,7 @@ const CryptoService = {
       if (!cryptoManager.roomKeys.has(roomId)) {
         await CryptoService.ensureRoomKeyReady(roomId).catch(() => {});
       }
+      await _refreshKeyForUnknownKid(roomId, _kidOf(encryptedJson));
       const plain = await cryptoManager.decryptMessage(roomId, encryptedJson);
       return await _openRoomEnvelope(roomId, plain, claimedAuthor);
     } catch (_e) {
@@ -2163,6 +2244,118 @@ async function _persistRoomKeyArchive(roomId) {
     });
     await StorageService.setRoomKeyArchive(roomId, entries);
   } catch (_e) { /* ignore */ }
+}
+
+// ---- changing a room's key (rotateRoomKey) ----
+
+const KEY_ROTATION_MAX_ATTEMPTS = 4;      // of the one request, when the island does not answer
+const KEY_ROTATION_RETRY_BASE_MS = 1200;
+const KEY_ROTATION_MEMBER_ROUNDS = 3;     // times the member list may change under us
+
+/**
+ * Whether a member who could not be given the new key should simply be left
+ * without it (true), or the rotation should stop because we could not tell
+ * (false). Their key needing a person to verify it, or not existing, is an
+ * answer about them; a request that failed is not.
+ */
+function _rotationCanLeaveOut(e) {
+  if (e?.code === 'TRUST_CHANGED' || e?.code === 'TRUST_UNVERIFIED') return true;
+  return !!e?.noUsableKey;
+}
+
+/** The member's copy of a new room key, or a throw that says why not. */
+async function _wrapRotatedKeyFor(roomId, uname, newRawB64, keyId) {
+  let pub;
+  try {
+    pub = (await NetworkService.fetchPeerKey(uname))?.public_key;
+  } catch (e) {
+    if (e?.status === 404) throw Object.assign(new Error('no public key'), { noUsableKey: true });
+    throw e;
+  }
+  let raw = null;
+  try { raw = pub ? CryptoUtils.base64ToArrayBuffer(pub) : null; } catch (_e) { raw = null; }
+  if (!raw || raw.byteLength !== 32) {
+    throw Object.assign(new Error('public key is not a usable X25519 key'), { noUsableKey: true });
+  }
+  await _assertPeerKeyTrustedForSharing(uname, 'sharing room key', { peerPublicKeyB64: pub });
+  return CryptoUtils.encryptRoomKeyForUser(
+    pub, newRawB64, await CryptoService._wrapSignOpts(roomId, uname, keyId),
+  );
+}
+
+/**
+ * The one request that changes the room's key. Resolves {status, ok, detail};
+ * status 0 (or a 5xx from something in front of the island) means nobody
+ * knows whether the key changed.
+ */
+async function _postRoomKeyRotation(roomId, payload) {
+  let last = { status: 0, ok: false, detail: '' };
+  for (let attempt = 1; attempt <= KEY_ROTATION_MAX_ATTEMPTS; attempt++) {
+    try {
+      await NetworkService.rotateRoomKey(roomId, payload);
+      return { status: 200, ok: true, detail: '' };
+    } catch (e) {
+      const status = Number(e?.status) || 0;
+      last = { status, ok: false, detail: String(e?.message || '') };
+      // An answer that will not change by asking again.
+      if (status !== 0 && status !== 429 && status < 500) return last;
+    }
+    // The same request again: the same key and the same copies, so an attempt
+    // that did reach the island and one that did not end in the same state.
+    if (attempt < KEY_ROTATION_MAX_ATTEMPTS) {
+      await new Promise(resolve => setTimeout(resolve, KEY_ROTATION_RETRY_BASE_MS * attempt));
+    }
+  }
+  return last;
+}
+
+// ---- a key that changed while the room was open ----
+//
+// A message under a key id this device has never held means the room's key was
+// changed since we read it. Nothing used to react: the message failed to
+// decrypt, and we went on WRITING under the old key - the one a removed member
+// still holds - until the room was opened again. Now the key is read from the
+// island again, which makes the new one current and files the old one.
+//
+// One read serves every message that arrives meanwhile, an id that stays
+// unknown is not asked for again for a minute, and a room is not read more
+// often than every ten seconds whatever ids are thrown at it - the id is the
+// sender's to write, and must not become a request per message.
+const UNKNOWN_KID_RETRY_MS = 60 * 1000;
+const UNKNOWN_KID_ROOM_FLOOR_MS = 10 * 1000;
+const _unknownKid = { inflight: new Map(), asked: new Map(), roomAt: new Map() };
+
+function _kidOf(encryptedJson) {
+  try {
+    const p = typeof encryptedJson === 'string' ? JSON.parse(encryptedJson) : encryptedJson;
+    return typeof p?.kid === 'string' ? p.kid : '';
+  } catch (_e) {
+    return '';
+  }
+}
+
+async function _refreshKeyForUnknownKid(roomId, kid) {
+  if (!kid || cryptoManager.roomKeyArchive?.get(roomId)?.has(kid)) return;
+  const running = _unknownKid.inflight.get(roomId);
+  if (running) {
+    await running;
+    return;
+  }
+  const now = Date.now();
+  const id = `${roomId}:${kid}`;
+  if (now - (_unknownKid.asked.get(id) || 0) < UNKNOWN_KID_RETRY_MS) return;
+  if (now - (_unknownKid.roomAt.get(roomId) || 0) < UNKNOWN_KID_ROOM_FLOOR_MS) return;
+  if (_unknownKid.asked.size >= 500) _unknownKid.asked.clear();
+  _unknownKid.asked.set(id, now);
+  _unknownKid.roomAt.set(roomId, now);
+  const p = (async () => {
+    const res = await CryptoService._loadRoomKey(roomId);
+    if (res?.ok) await _loadRoomKeyArchiveFromServer(roomId).catch(() => {});
+  })()
+    .catch((e) => { console.warn('[CryptoService] key refresh for an unknown key id failed:', e?.message); })
+    .finally(() => { _unknownKid.inflight.delete(roomId); });
+  _unknownKid.inflight.set(roomId, p);
+  await p;
 }
 
 function _clearLockTimer() {

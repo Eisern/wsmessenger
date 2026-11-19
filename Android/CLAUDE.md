@@ -353,8 +353,9 @@ Room management features ported from the Chrome Extension:
 - `CryptoService.shareRoomKeyToUser(roomId, username)` — exports current room key, fetches peer's X25519 public key, validates 32-byte length, TOFU check, encrypts and shares via API.
 
 **Key rotation after kick**:
-- After `NetworkService.kickFromRoom()`, ChatScreen fetches remaining members, retrieves each member's public key via `NetworkService.fetchPeerKey()`, then calls `CryptoService.rotateRoomKey(roomId, members)`.
-- `rotateRoomKey` generates a new room key, encrypts for each member with TOFU verification, and distributes via API. Kicked user cannot decrypt new messages.
+- After `NetworkService.kickFromRoom()`, an **owner**'s ChatScreen calls `CryptoService.rotateRoomKey(roomId)`; an admin is told that only the owner can change the key (nothing changed).
+- `rotateRoomKey` reads the members itself, wraps one new key for each (TOFU-checked, signed), and sends every copy in one `POST /crypto/room/{id}/rotate` (`NetworkService.rotateRoomKey`) — all change or none. A member whose key changed unverified, or who has none, goes under `without` and is filled later by the key sweep (`room_key_rotated` event → `KeySweepService`); any other failure stops the rotation with the old key in place. 409 = members changed → re-read and retry with the same key. No answer → the new key is archive-only, never current. Only after a 2xx does the new key become the one written with. See `../CLAUDE.md` → Room Key Delivery.
+- Members are woken by `notify_room_key` (`KeySweepService` → `CryptoService.refreshRoomKeyIfHeld`), and a message under an unknown `kid` re-reads the room's key (`_refreshKeyForUnknownKid`).
 
 **Room Settings (owner only)**:
 - RoomSettingsModal in ChatScreen: edit description (`NetworkService.setRoomMeta`), change password (`PUT /rooms/{id}/password`), delete room (`NetworkService.deleteRoom`).

@@ -446,7 +446,34 @@ moment someone joins:
   key changed until they are verified. It runs on start-up, unlock, the
   wake-up, a membership change, a moderator opening the room, and the
   manual **Send missing keys**. Locked means deferred; it never asks for
-  a password.
+  a password. A room whose current key cannot be read from the island
+  is skipped, never served from memory.
+
+### Changing a room's key
+
+After a removal (automatically, when the owner removes somebody) or
+from Manage → Keys, the owner makes a new key and wraps it for every
+member, and `POST /crypto/room/{id}/rotate` replaces every copy in one
+transaction or none. Only the owner may call it; an admin who removes
+somebody cannot change the key, and the clients say so.
+
+- The request names every accepted member: under `keys` with their
+  copy, the owner's own included, or under `without` — somebody the
+  key cannot go to yet (their key changed and is not verified, or they
+  have none). Those lose their copy and become a key gap, filled by the
+  sweep once the reason is gone. A request that failed while finding
+  out about a member stops the rotation instead: "could not ask" is not
+  "has no usable key".
+- A list that is not exactly the room's members is refused with 409;
+  the client reads the members again and wraps the same key for them.
+- An unanswered request (no response, or a 5xx) is retried unchanged,
+  so an attempt that reached the server and one that did not end in the
+  same state. If none is answered, the new key is kept for reading only;
+  the next read of the room's key decides which is current.
+- Members who got the new key are woken with `notify_room_key` and read
+  it at once. A message under a key id the device has never held does
+  the same — one read for all such messages, at most every ten seconds
+  per room — so nobody keeps writing under the old key.
 
 ---
 
