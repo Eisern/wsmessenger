@@ -215,6 +215,15 @@ island - waited for somebody's browser extension.
   clients). A replaced key offered as current is refused, the room stays on
   the newer key, and the open room says so. A device with no history of a
   room - new, or recovered - still takes what the server says.
+- **The extension's worker took the account for a key handover from the
+  handover itself.** A session opened (and rate-limited) for one account could
+  be committed under another, and the one-shot copy of the key a login leaves
+  for the panel went to a request that named no account at all. The account
+  is now the one the session was opened for - the sealed payload is checked
+  against it, a commit naming another is refused, a session needs a name -
+  and the copy goes only to a request for that account. Everything involved
+  is the extension's own pages, so this tightens a check rather than closing
+  a way in from outside.
 - **An owner the server had no copy for made a key for themselves alone.**
   The members stayed on the key they had, the owner wrote under one nobody
   else held, and the key sweep saw nothing to do because every member had a

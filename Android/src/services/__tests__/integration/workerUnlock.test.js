@@ -192,6 +192,84 @@ describe('handing the key from the panel to the worker', () => {
     expect(String(res.error)).toMatch(/expired|not found/i);
   });
 
+  it('commits only for the account the session was opened for', async () => {
+    // The commit used to name its own account: a session opened (and rate
+    // limited) as one user could file the key under another.
+    const w = startWorker();
+    const reqId = `req_other_${Date.now()}`;
+    w.clear();
+    await w.send({ type: 'unlock_handoff_begin', reqId, username: USER });
+    const begun = await w.waitFor('unlock_handoff_begin_res');
+    expect(begun.ok).toBe(true);
+    const master = b64(globalThis.crypto.getRandomValues(new Uint8Array(32)));
+    const commit = await panelSide({
+      serverPubB64: begun.server_pub_b64 || begun.serverPubB64,
+      nonceB64: begun.nonce_b64 || begun.nonceB64,
+      reqId, username: 'someone_else', masterB64: master, kekB64: '',
+    });
+    w.clear();
+    await w.send(commit);
+    const res = await w.waitFor('unlock_handoff_commit_res');
+    expect(res.ok).toBe(false);
+
+    // Nor does an AAD that leaves the name out let a payload sealed for
+    // somebody else through: the worker builds it from the session. (A fresh
+    // worker: the failure above rightly slowed this account's next attempt.)
+    const w2 = startWorker();
+    const reqId2 = `req_noname_${Date.now()}`;
+    w2.clear();
+    await w2.send({ type: 'unlock_handoff_begin', reqId: reqId2, username: USER });
+    const begun2 = await w2.waitFor('unlock_handoff_begin_res');
+    expect(begun2.ok).toBe(true);
+    const commit2 = await panelSide({
+      serverPubB64: begun2.server_pub_b64 || begun2.serverPubB64,
+      nonceB64: begun2.nonce_b64 || begun2.nonceB64,
+      reqId: reqId2, username: 'someone_else', masterB64: master, kekB64: '',
+    });
+    commit2.aad = { ...commit2.aad, username: '' };
+    w2.clear();
+    await w2.send(commit2);
+    expect((await w2.waitFor('unlock_handoff_commit_res')).ok).toBe(false);
+
+    // And a commit that names another account is refused as such, even when
+    // what it carries was sealed for the right one.
+    const w3 = startWorker();
+    const reqId3 = `req_named_${Date.now()}`;
+    w3.clear();
+    await w3.send({ type: 'unlock_handoff_begin', reqId: reqId3, username: USER });
+    const begun3 = await w3.waitFor('unlock_handoff_begin_res');
+    const commit3 = await panelSide({
+      serverPubB64: begun3.server_pub_b64 || begun3.serverPubB64,
+      nonceB64: begun3.nonce_b64 || begun3.nonceB64,
+      reqId: reqId3, username: USER, masterB64: master, kekB64: '',
+    });
+    commit3.aad = { ...commit3.aad, username: 'someone_else' };
+    w3.clear();
+    await w3.send(commit3);
+    const res3 = await w3.waitFor('unlock_handoff_commit_res');
+    expect(res3.ok).toBe(false);
+    expect(res3.error).toMatch(/mismatch/);
+  });
+
+  it('opens no session for nobody, and hands the key back to nobody', async () => {
+    const w = startWorker();
+    w.clear();
+    await w.send({ type: 'unlock_handoff_begin', reqId: `req_anon_${Date.now()}`, username: '' });
+    expect((await w.waitFor('unlock_handoff_begin_res')).ok).toBe(false);
+
+    // A real handoff leaves a one-shot copy for the panel that opens next; a
+    // request that names no account is not that panel.
+    const { master } = await handOverAKey(w);
+    expect((await w.waitFor('unlock_handoff_commit_res')).ok).toBe(true);
+    w.clear();
+    await w.send({ type: 'unlock_master_take', reqId: 'take_anon', username: '' });
+    expect((await w.waitFor('unlock_master_take_res')).master_b64).toBe('');
+    // ...and asking like that spent it, so it cannot be fished for again.
+    w.clear();
+    await w.send({ type: 'unlock_master_take', reqId: 'take_owner', username: USER });
+    expect((await w.waitFor('unlock_master_take_res')).master_b64).not.toBe(master);
+  });
+
   it('refuses the key posted directly, the way it used to be sent', async () => {
     // The legacy route. It has to stay refused: a page that can post to this
     // port could otherwise install a key of its own choosing.

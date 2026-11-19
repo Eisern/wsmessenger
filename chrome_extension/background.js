@@ -1994,9 +1994,10 @@ if (msg.type === "unlock_master_take") {
   let out = "";
 
   if (_masterB64) {
+    // Only to a panel that names the account the key was handed over for: a
+    // request that names nobody is not that panel.
     const sameUser = !!reqUser && !!cachedUser && reqUser === cachedUser;
-    const noBinding = !reqUser || !cachedUser;
-    if (sameUser || noBinding) {
+    if (sameUser) {
       out = _masterB64;
       clearMasterB64Cache(); // one-shot wipe (only on successful take)
     } else {
@@ -4083,6 +4084,10 @@ async function beginUnlockHandoff(port, reqId, username = "") {
   if (!normalizedReqId || normalizedReqId.length > 160) {
     throw new Error("Invalid unlock handoff request id");
   }
+  // The session is opened for one account and committed for that account
+  // only (commitUnlockHandoff); the rate limit above is counted under it too.
+  const sessionUser = normalizeUnlockUsername(username);
+  if (!sessionUser) throw new Error("Unlock handoff needs a username");
   cleanupUnlockHandoffSessions();
   _unlockHandoffSessions.delete(normalizedReqId);
 
@@ -4100,7 +4105,7 @@ async function beginUnlockHandoff(port, reqId, username = "") {
     createdAt: Date.now(),
     nonceB64,
     privateKey: kp.privateKey,
-    username: normalizeUnlockUsername(username),
+    username: sessionUser,
   });
 
   return { serverPubB64: b64encode(rawPub), nonceB64 };
@@ -4148,10 +4153,17 @@ async function commitUnlockHandoff(port, msg) {
 
   _unlockHandoffSessions.delete(reqId); // one-shot; prevents replay
 
+  // The account is the one the session was opened for, never one the commit
+  // names: the AAD is built from the session, so a payload sealed for anybody
+  // else does not open, and the key cannot be filed under another account.
+  const claimed = normalizeUnlockUsername(msg?.aad?.username || "");
+  if (!session.username || (claimed && claimed !== session.username)) {
+    throw new Error("Unlock handoff username mismatch");
+  }
   const aadMeta = {
     v: Number(msg?.aad?.v || 1),
     req_id: reqId,
-    username: normalizeUnlockUsername(msg?.aad?.username || session.username || ""),
+    username: session.username,
     ts: Number(msg?.aad?.ts || 0),
   };
   const aadBytes = utf8enc(unlockHandoffAadString(aadMeta));
