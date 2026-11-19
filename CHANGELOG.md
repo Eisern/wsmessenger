@@ -19,6 +19,11 @@ they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 - **Guests from other islands are accepted as soon as `ISLAND_ID` is set** —
   also on a server that had the island identity before this version, with
   nothing to opt in to. `ISLAND_ACCEPT_GUESTS=0` in `.env` refuses them.
+- **After restoring the database from a backup, have room owners change their
+  rooms' keys** (Rooms → Manage → Keys). A backup can hold a room key older
+  than the one members' devices already moved to, and those devices now
+  refuse to go back to it, while a device that never saw the newer key takes
+  the older one - the room is split until its owner rotates the key.
 - No schema change and no new required setting. The guest table is created on
   first use, as the archive tables are: the database user must be allowed to
   create tables (the database owner is, as in `docs/self-hosting.md`).
@@ -199,6 +204,25 @@ island - waited for somebody's browser extension.
 
 ### Fixed — security
 
+- **A room's key could be moved back.** A client took whatever key the server
+  served as the room's current one, as long as the wrap around it was
+  genuine - and a wrap the owner signed for an older key is genuine; a
+  signature says who wrapped a key for which room and member, not that the
+  key is still the room's. A server that kept an old wrap could put a member
+  back on the key from before somebody was removed, the key that person still
+  holds. Now each device remembers, per room, the key that was current there
+  last and the keys it has replaced (`room-key-guard.js`, shared by both
+  clients). A replaced key offered as current is refused, the room stays on
+  the newer key, and the open room says so. A device with no history of a
+  room - new, or recovered - still takes what the server says.
+- **An owner the server had no copy for made a key for themselves alone.**
+  The members stayed on the key they had, the owner wrote under one nobody
+  else held, and the key sweep saw nothing to do because every member had a
+  copy: one room, two keys, for good. Sharing a key with a new member did the
+  same when no key could be loaded. Now an owner whose device knows the
+  room's key puts their copy back; one that knows none changes the key for
+  every member at once, as a rotation does (at most every ten minutes per
+  room); and sharing never makes a key.
 - **Changing a room's key could stop half way, and then nobody noticed.** A
   rotation - after a removal, or from Manage → Keys - was one request per
   member and then one for the owner. Stopped part way (a dropped connection,
@@ -269,6 +293,15 @@ island - waited for somebody's browser extension.
 
 ### Added — tests
 
+- A room's key only moving forward: `roomKeyGuard.test.js` (the shared module:
+  retired keys, stale answers, history per island and account and across a
+  restart, keys noted before the first read, failing storage) and
+  `extensionKeyRollback.test.js` / `cryptoServiceKeyRollback.test.js` (each
+  client's real code: an older key refused and the newer one kept, from
+  memory or from the stored archive, a newer key still taken, a late answer
+  not applied over a key changed meanwhile, the owner with no copy putting
+  theirs back or changing the key for everybody, a member with none making
+  nothing). `endpoints-parity.test.js` keeps the two copies identical.
 - Changing a room's key: `server/tests/test_room_keys.py` (one transaction
   for every copy, owner only, names in any case, a list that is not the
   members changes nothing, a removed or merely invited member cannot be

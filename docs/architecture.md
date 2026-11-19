@@ -475,6 +475,31 @@ somebody cannot change the key, and the clients say so.
   the same — one read for all such messages, at most every ten seconds
   per room — so nobody keeps writing under the old key.
 
+### A room's key only moves forward
+
+A signed wrap proves who wrapped a key for which room, member and key
+id — not that the key is still the room's. An island that kept an old
+wrap could serve it again after a rotation and put a member back on the
+key a removed person holds. So each device keeps, per room (and per
+island and account), the key id that was current there last and the ids
+it has replaced: `room-key-guard.js`, byte-identical in both clients.
+
+- The key manager reports every key that becomes current, by any path
+  (`setCurrentKeyListener`), so no caller can forget to.
+- A key read from the island goes through `loadRoomKey(…, {accept})`:
+  the check against that history and the switch happen in one
+  synchronous step. A replaced key is refused and the room stays on the
+  newer one — from memory, or from the stored archive after a restart —
+  and the open room says so. An answer requested before another key
+  became current here (a rotation of our own) is stale and not applied.
+- An owner the island has no copy for puts back their copy of the key
+  the device knows; knowing none, they rotate for every member (at most
+  every ten minutes per room) instead of making a key for themselves
+  alone, which used to leave the room on two keys.
+- Not covered: a device with no history of a room (new, or recovered)
+  takes what the island says. After a database restore, owners should
+  rotate (`docs/self-hosting.md`, Backups).
+
 ---
 
 ## Sealed sender (DM)

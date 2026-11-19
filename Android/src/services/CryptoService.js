@@ -21,6 +21,7 @@ import EP from './endpoints';
 import StorageService from './StorageService';
 import { CryptoUtils, cryptoManager } from '../crypto';
 import TC from './thread-chain';
+import RKG from './room-key-guard';
 import ChainStore from './chainStore';
 
 const { x25519 } = require('@noble/curves/ed25519');
@@ -81,6 +82,27 @@ async function _pinScope() {
   await _pinsMigrated;
   return island;
 }
+// A room's key only moves forward on this device (room-key-guard.js, shared
+// with the extension). Scoped by island and account: room ids are an island's
+// own, and an account switch on one phone is another history.
+const _roomKeyGuard = RKG.createRoomKeyGuard({
+  read: (name) => StorageService.get(name),
+  write: (name, value) => StorageService.set(name, value),
+  scope: () => {
+    // The name _resolveUsername settled on last: NetworkService.username can be
+    // empty while crypto is not (a restored session), and an empty scope would
+    // switch the protection off without a word.
+    const me = String(NetworkService.username || _guardMe || '').trim().toLowerCase();
+    let island = '';
+    try { island = String(EP.islandIdOf(NetworkService.getServerConfig()) || ''); } catch (_e) { island = ''; }
+    return me && island ? island + ':' + me : '';
+  },
+  log: (...args) => console.warn('[RoomKeyGuard]', ...args),
+});
+cryptoManager.setCurrentKeyListener((slot, kid) => _roomKeyGuard.noteCurrent(slot, kid));
+const _heldBackNoted = new Set();
+let _guardMe = '';
+
 const _kcLastChecked = new Map(); // peerLower -> timestamp
 const _kcAlerted = new Set(); // peerLower — session dedup for key change alerts
 
@@ -435,6 +457,9 @@ const CryptoService = {
     _initialized = false;
     cryptoManager.clear();
     CryptoService._forgetUnknownKeyIds();
+    _roomKeyGuard.clear();
+    _heldBackNoted.clear();
+    _guardMe = '';
     _clearLockTimer();
     _ed25519Seed = null;
     _ed25519PubKeyCache.clear();
@@ -540,24 +565,6 @@ const CryptoService = {
     await NetworkService.postRoomKey(roomId, wrapped, keyId);
   },
 
-  async createAndShareRoomKey(roomId, ownerPubB64) {
-    if (!CryptoService.isReady()) return null;
-    try {
-      const rawB64 = await cryptoManager.createRoomKey(roomId);
-      const keyId = await CryptoUtils.fingerprintRoomKeyBase64(rawB64);
-      const me = await _resolveUsername();
-      const wrapped = await CryptoUtils.encryptRoomKeyForUser(
-        ownerPubB64, rawB64, await CryptoService._wrapSignOpts(roomId, me, keyId),
-      );
-      await NetworkService.postRoomKey(roomId, wrapped, keyId);
-      await _persistRoomKeyArchive(roomId);
-      _emit('room_key_loaded', { roomId });
-      return rawB64;
-    } catch (_e) {
-      console.warn('[CryptoService] createAndShareRoomKey error:', _e?.message);
-      return null;
-    }
-  },
 
   /**
    * Change the room's key: a new one for every current member, at once.
@@ -661,6 +668,44 @@ const CryptoService = {
       console.warn('[CryptoService] rotateRoomKey error:', _e?.message);
       return none(_e?.message || 'Unknown error');
     }
+  },
+
+  /**
+   * Read this room's history before asking the island for its key
+   * (room-key-guard.js); the token goes to _adoptIslandRoomKey.
+   */
+  async roomKeyGuardPrepare(slot) {
+    await _resolveUsername();
+    return _roomKeyGuard.prepare(slot);
+  },
+
+  /**
+   * Make the island's `keyB64` the slot's current key, unless this device has
+   * moved on from it. `token` is from roomKeyGuardPrepare, taken before the
+   * island was asked.
+   *
+   * @returns {Promise<{ok: boolean, heldBack?: boolean, stale?: boolean, error?: boolean}>}
+   *   heldBack: the island offered a key this device had replaced; the room
+   *   stays on the last key it had here (ok says whether that one is loaded).
+   *   stale: another key became current while the island was being asked.
+   */
+  async _adoptIslandRoomKey(slot, keyB64, token) {
+    let verdict = 'ok';
+    const ok = await cryptoManager.loadRoomKey(slot, keyB64, {
+      accept: (kid) => (verdict = _roomKeyGuard.verdict(token, kid)) === 'ok',
+    });
+    if (ok) return { ok: true };
+    if (verdict === 'stale') return { ok: cryptoManager.roomKeys.has(slot), stale: true };
+    if (verdict === 'retired') {
+      const restored = await _restoreLastCurrentRoomKey(slot);
+      if (!_heldBackNoted.has(slot)) {
+        _heldBackNoted.add(slot);
+        console.warn(`[RoomKeyGuard] room ${slot}: the server offered a key this device had already replaced; kept the newer one`);
+        _emit('room_key_held_back', { roomId: slot });
+      }
+      return { ok: restored, heldBack: true };
+    }
+    return { ok: false, error: true };
   },
 
   /**
@@ -866,6 +911,9 @@ const CryptoService = {
       // accepted only for one of those, so the archive must be in memory
       // before the island's answer is judged.
       await CryptoService.restoreRoomKeyArchive(roomId);
+      // Before asking: an answer is applied only if no other key became
+      // current here meanwhile.
+      const guardToken = await CryptoService.roomKeyGuardPrepare(roomId);
       const data = await NetworkService.getRoomKey(roomId);
       if (!data?.encrypted_room_key) return { notFound: true };
       const keyB64 = await _acceptWrappedKey(data.encrypted_room_key, {
@@ -873,10 +921,11 @@ const CryptoService = {
         signers: () => _roomSigners(roomId),
       });
       if (!keyB64) return { refused: true };
-      await cryptoManager.loadRoomKey(roomId, keyB64);
+      const adopted = await CryptoService._adoptIslandRoomKey(roomId, keyB64, guardToken);
+      if (!adopted.ok) return { refused: true, heldBack: !!adopted.heldBack };
       await _persistRoomKeyArchive(roomId);
       _emit('room_key_loaded', { roomId });
-      return { ok: true };
+      return adopted.heldBack ? { ok: true, heldBack: true } : { ok: true };
     } catch (e) {
       console.warn('[_loadRoomKey] ERROR:', e?.message, 'status:', e?.status);
       if (e?.status === 404 || String(e?.message || '').includes('404')) {
@@ -920,17 +969,9 @@ const CryptoService = {
         await _loadRoomKeyArchiveFromServer(roomId).catch(() => {});
         if (cryptoManager.roomKeys.has(roomId)) return;
 
-        // If owner, auto-create room key (mirrors extension behavior)
+        // The island has no copy for the owner (mirrors the extension).
         if (isOwner && CryptoService.isReady()) {
-          console.log('[ensureRoomKeyReady] Owner of room', roomId, '— auto-creating room key');
-          const pubB64 = cryptoManager.userPublicKeyB64;
-          if (pubB64) {
-            const created = await CryptoService.createAndShareRoomKey(roomId, pubB64);
-            if (created) {
-              console.log('[ensureRoomKeyReady] Room key auto-created for room', roomId);
-              return;
-            }
-          }
+          await _ownerRoomKeyMissing(roomId);
         }
       }
     })().finally(() => _roomKeyLocks.delete(roomId));
@@ -2057,10 +2098,12 @@ async function _pinnedEd25519(username, served) {
 
 async function _resolveUsername() {
   const fromNs = String(NetworkService.username || '').trim().toLowerCase();
-  if (fromNs) return fromNs;
+  if (fromNs) return (_guardMe = fromNs);
   try {
     const fromActive = await StorageService.getActiveUsername();
-    return String(fromActive || '').trim().toLowerCase();
+    const name = String(fromActive || '').trim().toLowerCase();
+    if (name) _guardMe = name;
+    return name;
   } catch (_e) {
     return '';
   }
@@ -2244,6 +2287,68 @@ async function _persistRoomKeyArchive(roomId) {
     });
     await StorageService.setRoomKeyArchive(roomId, entries);
   } catch (_e) { /* ignore */ }
+}
+
+// ---- the island's key, and this device's history of the room ----
+
+/**
+ * The key that was this room's current one here last, back in place - from
+ * memory or from the stored archive. True when the room has a current key.
+ */
+async function _restoreLastCurrentRoomKey(slot) {
+  if (cryptoManager.roomKeys.has(slot)) return true;
+  const kid = await _roomKeyGuard.lastCurrent(slot);
+  if (!kid) return false;
+  let b64 = cryptoManager.roomKeyArchiveB64.get(slot)?.get(kid) || '';
+  if (!b64) {
+    try {
+      const entries = await StorageService.getRoomKeyArchive(slot);
+      b64 = ((entries || []).find((e) => e && e.kid === kid) || {}).b64 || '';
+    } catch (_e) { b64 = ''; }
+  }
+  if (!b64) return false;
+  return !!(await cryptoManager.loadRoomKey(slot, b64));
+}
+
+// Owner-only, and at most this often per room: a key for everybody because the
+// island had none for the owner.
+const OWNER_REKEY_MIN_MS = 10 * 60 * 1000;
+const _ownerRekeyAt = new Map();
+
+/**
+ * The island has no copy of the room's key for its owner.
+ *
+ * This used to make a new key for the owner alone and save it: the members
+ * stayed on the key they had, the owner wrote under one nobody else held, and
+ * the key sweep saw nothing to do, since every member had a copy - one room,
+ * two keys, for good. Now: if this device knows the key the room was on, the
+ * owner's copy is put back; otherwise the key is changed for everybody, the
+ * way a rotation does it.
+ */
+async function _ownerRoomKeyMissing(roomId) {
+  if (await _restoreLastCurrentRoomKey(roomId)) {
+    const keyB64 = await cryptoManager.exportRoomKeyForSharing(roomId);
+    if (keyB64) {
+      try {
+        await CryptoService.signCreatedRoomKey(roomId, keyB64);
+      } catch (e) {
+        console.warn(`[CryptoService] could not put the owner's copy of room ${roomId}'s key back:`, e?.message);
+      }
+    }
+    await _loadRoomKeyArchiveFromServer(roomId).catch(() => {});
+    _emit('room_key_loaded', { roomId });
+    return true;
+  }
+  const since = Date.now() - (_ownerRekeyAt.get(roomId) || 0);
+  if (since < OWNER_REKEY_MIN_MS) return false;
+  _ownerRekeyAt.set(roomId, Date.now());
+  const rotated = await CryptoService.rotateRoomKey(roomId);
+  if (!rotated.ok) {
+    console.warn(`[CryptoService] no key for room ${roomId}, and a new one could not be given to its members:`, rotated.error);
+    return false;
+  }
+  await _loadRoomKeyArchiveFromServer(roomId).catch(() => {});
+  return true;
 }
 
 // ---- changing a room's key (rotateRoomKey) ----

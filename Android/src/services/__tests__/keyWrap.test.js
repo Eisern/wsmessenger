@@ -366,7 +366,9 @@ describe('what this client writes (0.5.0: the writer is on)', () => {
       };
     });
     try {
-      expect(await CryptoService.createAndShareRoomKey(ROOM2, me.pubB64)).toBeTruthy();
+      const raw = await CryptoUtils.exportRoomKey(await CryptoUtils.generateRoomKey(true));
+      expect(await CryptoService.loadRoomKey(ROOM2, raw)).toBe(true);
+      await CryptoService.signCreatedRoomKey(ROOM2, raw);
       expect(uploaded?.room_id).toBe(ROOM2);
 
       const info = CryptoUtils.inspectWrappedKey(uploaded.encrypted_room_key, {

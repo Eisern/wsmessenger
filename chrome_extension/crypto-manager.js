@@ -27,6 +27,18 @@ class CryptoManager {
     this.roomKeyIds = new Map();          // room_id -> kid string (latest key's fingerprint)
     this.roomKeyArchive = new Map();      // room_id -> Map<kid, CryptoKey> (all known keys)
     this.roomKeyArchiveB64 = new Map();   // room_id -> Map<kid, base64> (for persistence)
+
+    // Told of every key that becomes a room's current one, whatever the path
+    // (room-key-guard.js keeps the room from going back to a replaced key).
+    this._onCurrentKey = null;
+  }
+
+  setCurrentKeyListener(fn) {
+    this._onCurrentKey = typeof fn === "function" ? fn : null;
+  }
+
+  _noteCurrent(roomId, kid) {
+    try { this._onCurrentKey?.(roomId, kid); } catch (e) { console.warn("current key listener failed:", e); }
   }
 
   async initializeUserKey(encrypted, password, publicKeyB64, expectedUsername = "") {
@@ -131,6 +143,7 @@ class CryptoManager {
     this.roomKeys.set(roomId, roomKey);
     this.roomKeysExportable.set(roomId, tmp);
     this.roomKeyIds.set(roomId, kid);
+    this._noteCurrent(roomId, kid);
 
     await this._registerInArchive(roomId, kid, roomKey, rawB64);
 
@@ -138,23 +151,46 @@ class CryptoManager {
   }
 
   /**
-   * Load existing room key (raw base64).
+   * Load existing room key (raw base64) as the room's current one.
+   *
+   * `accept(kid)`, when given, is asked synchronously at the moment of the
+   * switch - after every await here - and a false answer leaves the room as it
+   * was (returns false). That is what makes a check against the room's history
+   * and the switch one step: nothing else can make a key current in between.
    */
-  async loadRoomKey(roomId, roomKeyBase64) {
+  async loadRoomKey(roomId, roomKeyBase64, { accept = null } = {}) {
     try {
       const kid = await CryptoUtils.fingerprintRoomKeyBase64(roomKeyBase64);
-
-      const oldKid = this.roomKeyIds.get(roomId);
-      if (oldKid && oldKid !== kid) {
-        await this._archiveCurrentKey(roomId);
-      }
 
       const roomKey = await CryptoUtils.importRoomKey(roomKeyBase64);
       const exportable = await CryptoUtils.importRoomKeyExportable(roomKeyBase64);
 
+      if (accept && !accept(kid)) return false;
+
+      // Archived synchronously, so the step above and the switch below stay
+      // one: the old key's CryptoKey goes to the archive now, its base64
+      // (for persistence) right after.
+      const oldKid = this.roomKeyIds.get(roomId);
+      const oldExportable = this.roomKeysExportable.get(roomId);
+      if (oldKid && oldKid !== kid) {
+        if (!this.roomKeyArchive.has(roomId)) this.roomKeyArchive.set(roomId, new Map());
+        this.roomKeyArchive.get(roomId).set(oldKid, this.roomKeys.get(roomId));
+      }
+
       this.roomKeys.set(roomId, roomKey);
       this.roomKeysExportable.set(roomId, exportable);
       this.roomKeyIds.set(roomId, kid);
+      this._noteCurrent(roomId, kid);
+
+      if (oldKid && oldKid !== kid && oldExportable) {
+        try {
+          const oldB64 = await CryptoUtils.exportRoomKey(oldExportable);
+          if (!this.roomKeyArchiveB64.has(roomId)) this.roomKeyArchiveB64.set(roomId, new Map());
+          this.roomKeyArchiveB64.get(roomId).set(oldKid, oldB64);
+        } catch (e) {
+          console.warn("Failed to export old key for archive:", e);
+        }
+      }
 
       await this._registerInArchive(roomId, kid, roomKey, roomKeyBase64);
 
@@ -355,6 +391,7 @@ class CryptoManager {
     createRoomKey: manager.createRoomKey.bind(manager),
     loadRoomKey: manager.loadRoomKey.bind(manager),
     loadArchivedKey: manager.loadArchivedKey.bind(manager),
+    setCurrentKeyListener: manager.setCurrentKeyListener.bind(manager),
     exportRoomKeyForSharing: manager.exportRoomKeyForSharing.bind(manager),
 
     encryptMessage: manager.encryptMessage.bind(manager),

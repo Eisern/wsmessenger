@@ -147,6 +147,12 @@ besides the secrets it holds `ISLAND_SIGNING_KEY_B64` (§8.3), the one
 value that cannot be regenerated without breaking contacts on other
 servers.
 
+After **restoring** a backup, ask room owners to change their rooms' keys
+(Rooms → Manage → Keys). The backup may hold a room key older than the one
+members' devices already moved to; those devices refuse to go back to it,
+while a device that never saw the newer key takes the older one. Until the
+owner rotates, such a room is split between the two.
+
 ---
 
 ## 6. Configure `.env`

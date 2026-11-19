@@ -1941,6 +1941,8 @@ if (msg.type === "history_res") {
     __warnAboutRoomSignature(dec, user);
   }
   if (appendOlder) __applyOlderScrollRestore("room", rid);
+  // Said after the history, which starts by clearing the chat.
+  else try { window.showRoomKeyHeldBackNotice?.(rid); } catch {}
   __roomOlderLoading = false;
   return;
 }

@@ -301,6 +301,18 @@ describe('the room key, from an island that is not ours', () => {
     expect(P.manager.roomKeys.has(slot())).toBe(true);
   });
 
+  test('is not moved back to a key this device already replaced (room-key-guard.js)', async () => {
+    const k1 = await freshKey();
+    const k2 = await freshKey();
+    R.roomKey = { encrypted_room_key: await wrapForAlice(k1.keyB64, bob, 'bob') };
+    expect(await P.sandbox.loadGuestRoomKey(room)).toEqual({ ok: true });
+    R.roomKey = { encrypted_room_key: await wrapForAlice(k2.keyB64, bob, 'bob') };
+    expect(await P.sandbox.loadGuestRoomKey(room)).toEqual({ ok: true });
+    R.roomKey = { encrypted_room_key: await wrapForAlice(k1.keyB64, bob, 'bob') };
+    await P.sandbox.loadGuestRoomKey(room);
+    expect(P.manager.roomKeyIds.get(slot())).toBe(k2.kid);
+  });
+
   test('is refused when signed in the inviter\'s name with the key the island made up', async () => {
     const k = await freshKey();
     R.roomKey = { encrypted_room_key: await wrapForAlice(k.keyB64, islandMade, 'bob') };

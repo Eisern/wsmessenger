@@ -5741,6 +5741,43 @@ window.onKeyGapSweepDone = function (summary, blocked) {
   } catch {}
 };
 
+// The server offered this room a key this device had already replaced
+// (room-key-guard.js); the newer one was kept. panel-crypto reports it once
+// per room and session - usually while the room is being opened, before its
+// history is drawn, and drawing the history clears the chat. So it is held
+// until the room's history is on screen (showRoomKeyHeldBackNotice, called by
+// panel.js after drawing) and said then, once.
+const _roomKeyHeldBackPending = new Set();
+
+function _sayRoomKeyHeldBack() {
+  if (typeof addMsg !== "function") return;
+  addMsg(
+    "System",
+    "⚠ The server offered this room an older key than the one this device " +
+    "already uses. It was refused: messages stay under the newer key. If it happens " +
+    "again, the room's owner can change the key (Rooms → Manage → Keys)."
+  );
+}
+
+window.onRoomKeyHeldBack = function (slot) {
+  try {
+    if (typeof slot !== "number") return;
+    const shown = slot === Number(activeRoomId || 0)
+      && typeof renderedHistoryRoomId !== "undefined" && renderedHistoryRoomId === slot;
+    if (shown) _sayRoomKeyHeldBack();
+    else _roomKeyHeldBackPending.add(slot);
+  } catch {}
+};
+
+window.showRoomKeyHeldBackNotice = function (roomId) {
+  try {
+    const rid = Number(roomId);
+    if (!_roomKeyHeldBackPending.has(rid) || rid !== Number(activeRoomId || 0)) return;
+    _roomKeyHeldBackPending.delete(rid);
+    _sayRoomKeyHeldBack();
+  } catch {}
+};
+
 function renderRoomManagePane(roomId) {
   const el = document.getElementById("roomManageContent");
   if (!el) return;

@@ -39,6 +39,21 @@ function getCryptoUtils() {
 function CM() { return globalThis.__wsCrypto?.manager || null; }
 function CU() { return globalThis.__wsCrypto?.utils || null; }
 
+// A room's key only moves forward on this device (room-key-guard.js, shared
+// with Android). Scoped by island and account: room ids are an island's own,
+// and two accounts on one browser have two histories.
+const _roomKeyGuard = globalThis.WSRoomKeyGuard.createRoomKeyGuard({
+  read: async (name) => (await chrome.storage.local.get([name]))[name] || null,
+  write: async (name, value) => { await chrome.storage.local.set({ [name]: value }); },
+  scope: () => {
+    const me = String((typeof getMeUsername === "function" && getMeUsername()) || "").trim().toLowerCase();
+    const island = String((typeof ISLAND_ID !== "undefined" && ISLAND_ID) || "");
+    return me && island ? island + ":" + me : "";
+  },
+  log: (...args) => console.warn("[RoomKeyGuard]", ...args),
+});
+CM()?.setCurrentKeyListener?.((slot, kid) => _roomKeyGuard.noteCurrent(slot, kid));
+
 // ── Ed25519 helpers ────────────────────────────────────────────────────────────
 // username -> Uint8Array (pubkey) | null (no key on server) | undefined (not fetched)
 // The three writers below were staged: readers shipped in 0.4.0 on both
@@ -689,6 +704,8 @@ function lockCryptoSession() {
   // for are gone, so the next message is entitled to ask again.
   _unknownKid.asked.clear();
   _unknownKid.slotAt.clear();
+  _roomKeyGuard.clear();
+  _heldBackNoted.clear();
   // Tokens for rooms on other islands were signed for with the key that is
   // being put away; they go with it.
   try {
@@ -1126,50 +1143,102 @@ async function initializeCrypto({ interactive = false, reason = "", kekKey = nul
 }
 
 
-async function createAndSaveRoomKeyForMe(roomId) {
-  try {
-    const rid = Number(roomId);
-    console.log(`Creating room key for room ${rid} (owner/self)...`);
+// --- the island's key, and this device's history of the room ---
 
-    await ensureCryptoReady({ interactive: true, reason: "Create room key" });
+const _heldBackNoted = new Set();
 
-    const roomKeyBase64 = await CM().createRoomKey(rid);
-    const keyId = await CU().fingerprintRoomKeyBase64(roomKeyBase64);
-
-    const pub = CM()?.userPublicKeyPem;
-    if (!pub) throw new Error("User public key not available");
-
-    const encryptedForMe = await CU().encryptRoomKeyForUser(
-      pub, roomKeyBase64, wrapSignOpts(rid, getMeUsername(), keyId),
-    );
-
-    const token = await requestToken();
-    if (!token) throw new Error("No token");
-
-    const resp = await fetch(API_BASE + `/crypto/room-key`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + token
-      },
-      body: JSON.stringify({ room_id: rid, encrypted_room_key: encryptedForMe, key_id: keyId })
-      
-    });
-
-    const body = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      CM().roomKeys.delete(rid);
-      CM().roomKeysExportable.delete(rid);
-      CM().roomKeyIds.delete(rid);
-      throw new Error(body.detail || `Save room key failed (${resp.status})`);
-    }
-
-    console.log(`Room key saved for owner in room ${rid}`);
-    return true;
-  } catch (e) {
-    console.error("createAndSaveRoomKeyForMe failed:", e);
-    return false;
+/**
+ * Make the island's `keyB64` the slot's current key, unless this device has
+ * moved on from it (room-key-guard.js). `token` is from _roomKeyGuard.prepare,
+ * taken before the island was asked.
+ *
+ * @returns {Promise<{ok: boolean, heldBack?: boolean, stale?: boolean, error?: boolean}>}
+ *   heldBack: the island offered a key this device had replaced; the room
+ *   stays on the last key it had here (ok says whether that one is loaded).
+ *   stale: another key became current while the island was being asked; that
+ *   one stays.
+ */
+async function _adoptIslandRoomKey(slot, keyB64, token) {
+  let verdict = "ok";
+  const ok = await CM().loadRoomKey(slot, keyB64, {
+    accept: (kid) => (verdict = _roomKeyGuard.verdict(token, kid)) === "ok",
+  });
+  if (ok) return { ok: true };
+  if (verdict === "stale") return { ok: !!CM()?.roomKeys?.has(slot), stale: true };
+  if (verdict === "retired") {
+    const restored = await _restoreLastCurrentRoomKey(slot);
+    _reportRoomKeyHeldBack(slot);
+    return { ok: restored, heldBack: true };
   }
+  return { ok: false, error: true };
+}
+
+/**
+ * The key that was this room's current one here last, back in place - from
+ * memory or from the local archive. True when the room has a current key.
+ */
+async function _restoreLastCurrentRoomKey(slot) {
+  const cm = CM();
+  if (cm?.roomKeys?.has(slot)) return true;
+  const kid = await _roomKeyGuard.lastCurrent(slot);
+  if (!kid || !cm) return false;
+  let b64 = cm.roomKeyArchiveB64?.get(slot)?.get(kid) || "";
+  if (!b64 && typeof slot === "number") {
+    try {
+      const { entries } = await _readStoredArchive(_ARCHIVE_PREFIX + _archiveRid(slot));
+      b64 = (entries.find((e) => e && e.kid === kid) || {}).b64 || "";
+    } catch { /* nothing on disk */ }
+  }
+  if (!b64) return false;
+  return !!(await cm.loadRoomKey(slot, b64));
+}
+
+/** Said once per room and session: the island offered a key we had replaced. */
+function _reportRoomKeyHeldBack(slot) {
+  if (_heldBackNoted.has(slot)) return;
+  _heldBackNoted.add(slot);
+  console.warn(`[RoomKeyGuard] room ${slot}: the server offered a key this device had already replaced; kept the newer one`);
+  try { globalThis.window?.onRoomKeyHeldBack?.(slot); } catch { /* UI not there */ }
+}
+
+// Owner-only, and at most this often per room: a key for everybody because the
+// island had none for the owner.
+const _OWNER_REKEY_MIN_MS = 10 * 60 * 1000;
+const _ownerRekeyAt = new Map();
+
+/**
+ * The island has no copy of the room's key for its owner.
+ *
+ * This used to make a new key for the owner alone and save it: the members
+ * stayed on the key they had, the owner wrote under one nobody else held, and
+ * the key sweep saw nothing to do, since every member had a copy - one room,
+ * two keys, for good. Now: if this device knows the key the room was on, the
+ * owner's copy is put back; otherwise the key is changed for everybody, the
+ * way a rotation does it.
+ */
+async function _ownerRoomKeyMissing(rid) {
+  if (await _restoreLastCurrentRoomKey(rid)) {
+    const keyB64 = await CM().exportRoomKeyForSharing(rid);
+    if (keyB64) {
+      try {
+        await signCreatedRoomKey(rid, keyB64);
+      } catch (e) {
+        console.warn(`Could not put the owner's copy of room ${rid}'s key back:`, e?.message || e);
+      }
+    }
+    await loadRoomKeyArchiveFromServer(rid);
+    return { ok: true };
+  }
+  const since = Date.now() - (_ownerRekeyAt.get(rid) || 0);
+  if (since < _OWNER_REKEY_MIN_MS) return { ok: false, error: true };
+  _ownerRekeyAt.set(rid, Date.now());
+  const rotated = await rotateRoomKey(rid);
+  if (!rotated.ok) {
+    console.error(`No key for room ${rid}, and a new one could not be given to its members:`, rotated.error);
+    return { ok: false, error: true };
+  }
+  await loadRoomKeyArchiveFromServer(rid);
+  return { ok: true };
 }
 
 /**
@@ -1704,6 +1773,9 @@ async function loadRoomKey(roomId) {
 
     // Restore archived keys first (before loading current, so archive is preserved)
     await loadRoomKeyArchive(rid);
+    // Before asking: an answer is applied only if no other key became
+    // current here meanwhile.
+    const guardToken = await _roomKeyGuard.prepare(rid);
 
     const token = await requestToken();
     if (!token) return { ok: false, locked: true };
@@ -1724,16 +1796,7 @@ async function loadRoomKey(roomId) {
         return { ok: false, notFound: true };
       }
 
-      console.log(`We are owner of room ${rid}, creating room key...`);
-      const created = await createAndSaveRoomKeyForMe(rid);
-      if (created) {
-        await loadRoomKeyArchiveFromServer(rid);
-        console.log(`Room key auto-created for room ${rid}`);
-        return { ok: true };
-      }
-
-      console.error(`Failed to auto-create room key for room ${rid}`);
-      return { ok: false, error: true };
+      return await _ownerRoomKeyMissing(rid);
     }
 
     if (!response.ok) {
@@ -1753,14 +1816,15 @@ async function loadRoomKey(roomId) {
     });
     if (!roomKeyBase64) return { ok: false, refused: true };
 
-    await CM().loadRoomKey(rid, roomKeyBase64);
+    const adopted = await _adoptIslandRoomKey(rid, roomKeyBase64, guardToken);
+    if (!adopted.ok) return { ok: false, refused: true, heldBack: !!adopted.heldBack };
 
     // Persist updated archive (current key is now part of it)
     await saveRoomKeyArchive(rid);
     await loadRoomKeyArchiveFromServer(rid);
 
     console.log(`Room key loaded for room ${rid}`);
-    return { ok: true };
+    return adopted.heldBack ? { ok: true, heldBack: true } : { ok: true };
   } catch (error) {
     console.error("loadRoomKey failed:", error);
     return { ok: false, error: true };
@@ -2705,16 +2769,9 @@ async function shareRoomKeyToUser(roomId, targetUsername, { interactive = true, 
     roomKeyBase64 = await CM().exportRoomKeyForSharing(rid);
   }
 
-  if (!roomKeyBase64) {
-    const isOwner = !!roomOwnerById[String(rid)];
-    if (!isOwner) throw new Error("Not owner, and room key is not available");
-
-    const ok = await createAndSaveRoomKeyForMe(rid);
-    if (!ok) throw new Error("Failed to create/save room key for owner");
-
-    roomKeyBase64 = await CM().exportRoomKeyForSharing(rid);
-    if (!roomKeyBase64) throw new Error("Room key raw not available after create");
-  }
+  // No minting here: a key made for one share would be a second key for the
+  // room. loadRoomKey above already did what an owner with no key can do.
+  if (!roomKeyBase64) throw new Error("Room key is not available");
 
   const token = await requestToken();
   const r1 = await fetch(API_BASE + `/keys/${encodeURIComponent(uname)}`, {
@@ -4628,6 +4685,7 @@ async function _loadGuestRoomKeyOnce(room, slot) {
   const okCrypto = await ensureCryptoReady({ interactive: false });
   if (!okCrypto) return { ok: false, locked: true };
   const island = await _guestIsland(room);
+  const guardToken = await _roomKeyGuard.prepare(slot);
 
   let r;
   try {
@@ -4657,7 +4715,8 @@ async function _loadGuestRoomKeyOnce(room, slot) {
 
   const key = await acceptWrappedKey(r.body.encrypted_room_key, opts(String(r.body.key_id || "")));
   if (!key) return { ok: false, refused: true };
-  if (!await CM()?.loadRoomKey(slot, key)) return { ok: false, error: true };
+  const adopted = await _adoptIslandRoomKey(slot, key, guardToken);
+  if (!adopted.ok) return adopted.heldBack ? { ok: false, refused: true, heldBack: true } : { ok: false, error: true };
 
   try {
     const a = await guestSessions().request(island, `/crypto/room-key/${room.roomId}/archive`);

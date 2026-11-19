@@ -226,6 +226,18 @@ describe('the room key, from an island that is not ours', () => {
     expect(cryptoManager.roomKeys.has(ROOM)).toBe(false);   // never under the bare id
   });
 
+  test('is not moved back to a key this phone already replaced (room-key-guard.js)', async () => {
+    const k1 = await freshKey();
+    const k2 = await freshKey();
+    R.roomKey = { encrypted_room_key: await wrapForMe(k1.keyB64, bob, 'bob') };
+    expect(await GuestRoomService.loadKey(room)).toEqual({ ok: true });
+    R.roomKey = { encrypted_room_key: await wrapForMe(k2.keyB64, bob, 'bob') };
+    expect(await GuestRoomService.loadKey(room)).toEqual({ ok: true });
+    R.roomKey = { encrypted_room_key: await wrapForMe(k1.keyB64, bob, 'bob') };
+    await GuestRoomService.loadKey(room);
+    expect(cryptoManager.roomKeyIds.get(slot())).toBe(k2.kid);
+  });
+
   test('is refused when signed in the inviter\'s name with the key the island made up', async () => {
     const k = await freshKey();
     R.roomKey = { encrypted_room_key: await wrapForMe(k.keyB64, islandMade, 'bob') };

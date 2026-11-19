@@ -444,6 +444,7 @@ async function _loadKeyOnce(room, slot) {
   if (!CryptoService.isReady()) await CryptoService.ensureReady({ interactive: false });
   if (!CryptoService.isReady()) return { ok: false, locked: true };
   const island = await islandOf(room);
+  const guardToken = await CryptoService.roomKeyGuardPrepare(slot);
 
   let r;
   try {
@@ -470,7 +471,8 @@ async function _loadKeyOnce(room, slot) {
 
   const key = await CryptoService.acceptWrappedKeyIn(ctx, r.body.encrypted_room_key, opts(String(r.body.key_id || '')));
   if (!key) return { ok: false, refused: true };
-  if (!await cryptoManager.loadRoomKey(slot, key)) return { ok: false, error: true };
+  const adopted = await CryptoService._adoptIslandRoomKey(slot, key, guardToken);
+  if (!adopted.ok) return adopted.heldBack ? { ok: false, refused: true, heldBack: true } : { ok: false, error: true };
 
   try {
     const a = await sessions().request(island, `/crypto/room-key/${room.roomId}/archive`);

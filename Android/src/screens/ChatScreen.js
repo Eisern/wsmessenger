@@ -626,7 +626,7 @@ export default function ChatScreen({ navigation, route }) {
     };
     CryptoService.on('unlocked', handler);
 
-    // Room-key-specific retry: fires when _loadRoomKey / createAndShareRoomKey /
+    // Room-key-specific retry: fires when _loadRoomKey / the owner-key repair /
     // _loadRoomKeyArchiveFromServer succeed. Covers the case where crypto is unlocked
     // but the room key failed to load on first entry (server 500, transient network).
     const roomKeyHandler = async (data) => {
@@ -670,10 +670,25 @@ export default function ChatScreen({ navigation, route }) {
     };
     CryptoService.on('room_key_loaded', roomKeyHandler);
 
+    // The server offered this room a key this device had already replaced
+    // (room-key-guard.js); the newer one was kept. Said once per session.
+    const heldBackHandler = (data) => {
+      if (data?.roomId == null || String(data.roomId) !== String(roomId)) return;
+      const text = '⚠ The server offered this room an older key than the one this device ' +
+        'already uses. It was refused: messages stay under the newer key. If it happens ' +
+        'again, the room owner can change the key.';
+      dispatch({
+        type: 'APPEND_ROOM_MESSAGE',
+        message: normMsg({ id: `sys_${Date.now()}_kh`, author: 'System', text, ts: Date.now(), _decrypted: text }),
+      });
+    };
+    CryptoService.on('room_key_held_back', heldBackHandler);
+
     return () => {
       CryptoService.off('locked', lockedHandler);
       CryptoService.off('unlocked', handler);
       CryptoService.off('room_key_loaded', roomKeyHandler);
+      CryptoService.off('room_key_held_back', heldBackHandler);
     };
   }, [screenReady, roomId]);
 

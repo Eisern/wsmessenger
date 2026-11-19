@@ -128,7 +128,7 @@ function makePanel({ apiBase, islandId, username, token }) {
 
   for (const f of ['crypto-utils.js', 'crypto-manager.js', 'endpoints.js', 'thread-chain.js',
     'island-list.js', 'outbox.js', 'foreign-dm.js', 'guest-rooms.js', 'guest-room-feed.js',
-    'key-sweep.js']) {
+    'key-sweep.js', 'room-key-guard.js']) {
     vm.runInContext(fs.readFileSync(path.join(EXT_DIR, f), 'utf8'), sandbox, { filename: f });
   }
   const CU = sandbox.__wsCrypto.utils;

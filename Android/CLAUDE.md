@@ -357,6 +357,11 @@ Room management features ported from the Chrome Extension:
 - `rotateRoomKey` reads the members itself, wraps one new key for each (TOFU-checked, signed), and sends every copy in one `POST /crypto/room/{id}/rotate` (`NetworkService.rotateRoomKey`) — all change or none. A member whose key changed unverified, or who has none, goes under `without` and is filled later by the key sweep (`room_key_rotated` event → `KeySweepService`); any other failure stops the rotation with the old key in place. 409 = members changed → re-read and retry with the same key. No answer → the new key is archive-only, never current. Only after a 2xx does the new key become the one written with. See `../CLAUDE.md` → Room Key Delivery.
 - Members are woken by `notify_room_key` (`KeySweepService` → `CryptoService.refreshRoomKeyIfHeld`), and a message under an unknown `kid` re-reads the room's key (`_refreshKeyForUnknownKid`).
 
+**A room key never goes back** (`src/services/room-key-guard.js`, byte-identical to the extension's):
+- `CryptoManager.setCurrentKeyListener` reports every key that becomes current; the guard (AsyncStorage, scoped by island + account) keeps the last current kid and the replaced ones.
+- `_loadRoomKey` and `GuestRoomService` take a token with `CryptoService.roomKeyGuardPrepare(slot)` **before** asking the island and apply the answer with `CryptoService._adoptIslandRoomKey` (`cryptoManager.loadRoomKey(slot, b64, {accept})`). A replaced kid is refused (`heldBack`, event `room_key_held_back`, a system line in ChatScreen); the newer key stays or is restored from the stored archive.
+- Owner with no copy on the island (`ensureRoomKeyReady(..., {isOwner: true})`): restore the known key and re-sign the owner's copy, or rotate for everybody (`_ownerRoomKeyMissing`, 10 min floor). `createAndShareRoomKey` (a key for the owner alone) is gone.
+
 **Room Settings (owner only)**:
 - RoomSettingsModal in ChatScreen: edit description (`NetworkService.setRoomMeta`), change password (`PUT /rooms/{id}/password`), delete room (`NetworkService.deleteRoom`).
 - Gear icon (⚙) in header visible to owners only.
