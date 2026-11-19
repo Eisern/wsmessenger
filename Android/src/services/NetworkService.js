@@ -405,14 +405,18 @@ class NetworkService {
     return { ok: true, username: resp.username || username, token: this._token, refreshToken: this._refreshToken };
   }
 
-  async register(username, password, publicKeyB64, encryptedPrivKey, recoveryKeyHash) {
+  async register(username, password, publicKeyB64, encryptedPrivKey, recoveryKeyHash, recoveryPub) {
     if (!this._registerRateLimit.allow()) {
       const s = this._registerRateLimit.secondsRemaining();
       throw Object.assign(new Error(`Too many registration attempts. Try again in ${s} seconds.`), { code: 'RATE_LIMITED' });
     }
     try {
-      const body = { username, password, public_key: publicKeyB64, encrypted_private_key: encryptedPrivKey };
+      // No encrypted_private_key: the EPK never leaves the device. (It used to
+      // be sent here and thrown away by the server - but sent.)
+      void encryptedPrivKey;
+      const body = { username, password, public_key: publicKeyB64 };
       if (recoveryKeyHash) body.recovery_key_hash = recoveryKeyHash;
+      if (recoveryPub) body.recovery_pub = recoveryPub;
       await this._fetch('/auth/register', {
         method: 'POST',
         body,
@@ -465,23 +469,29 @@ class NetworkService {
     });
   }
 
-  async recover(username, nonce, recoveryAuthB64, newPassword) {
+  /**
+   * POST /auth/recover with a body account-recovery.js built: a signature, or
+   * (an account from before) the old recovery secret.
+   */
+  async recover(body) {
     if (!this._loginRateLimit.allow()) {
       const s = this._loginRateLimit.secondsRemaining();
       throw Object.assign(new Error(`Too many attempts. Try again in ${s} seconds.`), { code: 'RATE_LIMITED' });
     }
-    const resp = await this._fetch('/auth/recover', {
-      method: 'POST',
-      body: {
-        username,
-        nonce,
-        recovery_auth_b64: recoveryAuthB64,
-        new_password: newPassword,
-      },
-      noAuth: true,
-    });
+    const resp = await this._fetch('/auth/recover', { method: 'POST', body, noAuth: true });
     this._loginRateLimit.reset();
     return resp;
+  }
+
+  /** How this account recovers: "key", "hash" (from before) or "none". */
+  async getRecoveryKeyState() {
+    const resp = await this._fetch('/auth/recovery-key');
+    return String(resp?.state || 'unknown');
+  }
+
+  /** Move this account from the old recovery secret to a recovery key. */
+  async setRecoveryKey(body) {
+    return this._fetch('/auth/recovery-key', { method: 'POST', body });
   }
 
   async logout() {

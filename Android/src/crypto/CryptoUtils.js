@@ -1180,6 +1180,33 @@ const CryptoUtils = {
     return hkdf(_sha256, raw, salt, info, 32);
   },
 
+  /**
+   * The seed of the recovery signing key (account-recovery.js): an Ed25519
+   * key the server holds the public half of, so a recovery proves itself with
+   * a signature over the server's nonce instead of a fixed secret.
+   * HKDF-SHA256(ikm=rawKey, salt=0x00*32, info="ws-recovery-sign-v1")
+   */
+  deriveRecoverySigningSeed(rawKeyBytes) {
+    const raw = rawKeyBytes instanceof Uint8Array ? rawKeyBytes : new Uint8Array(rawKeyBytes);
+    return hkdf(_sha256, raw, new Uint8Array(32), new TextEncoder().encode('ws-recovery-sign-v1'), 32);
+  },
+
+  /**
+   * What an account needs from its identity key to move to a recovery key
+   * (POST /auth/recovery-key): the old secret, once, and the new public key.
+   */
+  recoveryProof(rawKeyBytes) {
+    const seed = this.deriveRecoverySigningSeed(rawKeyBytes);
+    try {
+      return {
+        authB64: this.arrayBufferToBase64(this.deriveRecoveryAuth(rawKeyBytes)),
+        pubB64: this.arrayBufferToBase64(this.ed25519GetPublicKey(seed)),
+      };
+    } finally {
+      seed.fill(0);
+    }
+  },
+
   /** SHA-256 of bytes → hex string (synchronous, uses @noble/hashes). */
   sha256Hex(bytes) {
     const hash = _sha256(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));

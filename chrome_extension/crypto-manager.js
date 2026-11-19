@@ -66,11 +66,12 @@ class CryptoManager {
    */
   async initializeUserKeyWithKek(encrypted, aesKey, publicKeyB64, expectedUsername = "") {
     try {
-      const { privateKey, ed25519Seed } = await CryptoUtils.decryptPrivateKeyWithAesKeyAll(
+      const { privateKey, ed25519Seed, recoveryProof } = await CryptoUtils.decryptPrivateKeyWithAesKeyAll(
         encrypted, aesKey, { expectedUsername }
       );
       this.userPrivateKey = privateKey;
       this.ed25519Seed = ed25519Seed;
+      this._recoveryProof = recoveryProof || null;
 
       if (publicKeyB64) {
         this.userPublicKeyB64 = publicKeyB64;
@@ -363,7 +364,15 @@ class CryptoManager {
     this.roomKeyArchiveB64.delete(roomId);
   }
 
+  /** The proof for moving to a recovery key, once; null after. */
+  takeRecoveryProof() {
+    const p = this._recoveryProof || null;
+    this._recoveryProof = null;
+    return p;
+  }
+
   clear() {
+    this._recoveryProof = null;
     this.userPrivateKey = null;
     this.userPublicKey = null;
     this.userPublicKeyB64 = null;
@@ -387,6 +396,7 @@ class CryptoManager {
   const facade = Object.freeze({
     initializeUserKey: manager.initializeUserKey.bind(manager),
     initializeUserKeyWithKek: manager.initializeUserKeyWithKek?.bind(manager),
+    takeRecoveryProof: manager.takeRecoveryProof.bind(manager),
 
     createRoomKey: manager.createRoomKey.bind(manager),
     loadRoomKey: manager.loadRoomKey.bind(manager),

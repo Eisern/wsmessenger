@@ -190,7 +190,8 @@ describe('getting back in', () => {
     expect((await http(ISLAND, '/auth/recover', { method: 'POST', body })).ok).toBe(true);
     const replay = await http(ISLAND, '/auth/recover', { method: 'POST', body });
     expect(replay.ok).toBe(false);
-    expect(replay.status).toBe(400);
+    // One answer for every refusal, a spent nonce included.
+    expect(replay.status).toBe(401);
   });
 
   it('leaves the phrase working after a recovery', async () => {
@@ -213,5 +214,107 @@ describe('getting back in', () => {
     expect((await http(ISLAND, '/auth/login', {
       method: 'POST', body: { username: acc.username, password: OLD_PASS },
     })).ok).toBe(true);
+  });
+});
+
+/**
+ * The recovery key, end to end: the extension's own CryptoUtils and
+ * account-recovery.js against the island, so the bytes a client signs are the
+ * bytes the server checks - not two descriptions of them.
+ */
+describe('recovering with a signature', () => {
+  let panel;
+  let AR;
+
+  beforeAll(() => {
+    panel = makePanel({ apiBase: ISLAND, islandId: 'island-local', username: 'x', token: '' });
+    AR = panel.sandbox.WSAccountRecovery;
+  });
+
+  /** The extension's recovery, as login.js runs it. */
+  async function recoverWith(raw, username, newPassword) {
+    const seed = await CU.deriveRecoverySigningSeed(raw);
+    const sent = [];
+    const res = await AR.recover({
+      start: async (name) => (await http(ISLAND, '/auth/recover-start', { method: 'POST', body: { username: name } })).data.nonce,
+      send: async (body) => {
+        sent.push(Object.keys(body).sort().join(','));
+        const r = await http(ISLAND, '/auth/recover', { method: 'POST', body });
+        return { ok: r.ok, status: r.status, detail: r.data?.detail };
+      },
+      sign: (msg) => CU.ed25519Sign(seed, msg),
+      sha256: async (b) => new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256', b)),
+      legacyAuthB64: async () => b64(await CU.deriveRecoveryAuth(raw)),
+    }, { username, newPassword });
+    return { res, sent };
+  }
+
+  async function register(username, raw, { withKey }) {
+    const kp = await CU.generateIdentityKeyPair();
+    const auth = await CU.deriveRecoveryAuth(raw);
+    const body = {
+      username, password: OLD_PASS, public_key: await CU.exportPublicKey(kp.publicKey),
+      recovery_key_hash: await CU.sha256Hex(auth),
+    };
+    if (withKey) body.recovery_pub = (await CU.recoveryProof(raw)).pubB64;
+    const r = await http(ISLAND, '/auth/register', { method: 'POST', body });
+    expect(r.status).toBe(201);
+  }
+
+  const rawKey = () => globalThis.crypto.getRandomValues(new Uint8Array(32));
+  const login = (username, password) => http(ISLAND, '/auth/login', { method: 'POST', body: { username, password } });
+
+  it('an account registered today recovers by signing, and sends no secret', async () => {
+    const name = `rec_k_${stamp}`;
+    const raw = rawKey();
+    await register(name, raw, { withKey: true });
+    const { res, sent } = await recoverWith(raw, name, NEW_PASS);
+    expect(res).toEqual({ ok: true, method: 'key' });
+    expect(sent).toEqual(['new_password,nonce,signature_b64,username']);
+    expect((await login(name, NEW_PASS)).ok).toBe(true);
+  });
+
+  it('the wrong phrase is refused both ways, and the password stays', async () => {
+    const name = `rec_w_${stamp}`;
+    await register(name, rawKey(), { withKey: true });
+    const { res } = await recoverWith(rawKey(), name, NEW_PASS);
+    expect(res.ok).toBe(false);
+    expect((await login(name, OLD_PASS)).ok).toBe(true);
+  });
+
+  it('an account from before recovers with its secret, then moves to a key on unlock', async () => {
+    // The panel's own migrateRecoveryKeyIfNeeded, with the proof the real
+    // key manager kept from the unlock.
+    const name = `rec_m_${stamp}`;
+    const p = makePanel({ apiBase: ISLAND, islandId: 'island-local', username: name, token: '' });
+    const { unlockRealManager, PASS } = require('./helpers/panelHarness');
+    const id = await unlockRealManager(p.sandbox, { username: name, password: PASS });
+    const raw = new Uint8Array(Buffer.from(id.pkcs8B64, 'base64')).slice(-32);
+    const reg = await http(ISLAND, '/auth/register', {
+      method: 'POST',
+      body: { username: name, password: OLD_PASS, public_key: id.publicKeyB64,
+        recovery_key_hash: await CU.sha256Hex(await CU.deriveRecoveryAuth(raw)) },
+    });
+    expect(reg.status).toBe(201);
+
+    // Not moved yet: the old secret still works.
+    expect((await recoverWith(raw, name, NEW_PASS)).res).toEqual({ ok: true, method: 'legacy' });
+
+    const token = (await login(name, NEW_PASS)).data.access_token;
+    p.setToken(token);
+    expect(await p.sandbox.migrateRecoveryKeyIfNeeded()).toBe('moved');
+    const st = await http(ISLAND, '/auth/recovery-key', { token });
+    expect(st.data.state).toBe('key');
+    // The proof was used once and is gone.
+    expect(p.manager.takeRecoveryProof()).toBe(null);
+
+    // From now on only a signature opens it - the old secret, sent on its own, does not.
+    const nonce = (await http(ISLAND, '/auth/recover-start', { method: 'POST', body: { username: name } })).data.nonce;
+    const old = await http(ISLAND, '/auth/recover', {
+      method: 'POST',
+      body: { username: name, nonce, recovery_auth_b64: b64(await CU.deriveRecoveryAuth(raw)), new_password: OLD_PASS },
+    });
+    expect(old.status).toBe(401);
+    expect((await recoverWith(raw, name, OLD_PASS)).res).toEqual({ ok: true, method: 'key' });
   });
 });

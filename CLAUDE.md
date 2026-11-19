@@ -22,7 +22,7 @@ For a full self-hosting walkthrough (VPS, systemd, nginx + TLS, first admin, upd
 
 Deploys: `.github/workflows/deploy.yml` runs after a green `ci` on a push to `main` and SSHes in with a forced-command key that can only run `scripts/deploy/wsapp-deploy <commit>` (installed as `/usr/local/sbin/wsapp-deploy`). The script fetches from origin itself, only moves forward along `origin/main`, restarts only when `server/` changed (backup first, `/health` after, rollback on failure) and never re-runs `bootstrap.sh`. Its tests (`scripts/deploy/test-wsapp-deploy.sh`) run in CI as `test-deploy`. Setup: `docs/self-hosting.md` §11.1.
 
-Schema lives in [`server/schema.sql`](server/schema.sql) — apply once with `psql -d <db> -f server/schema.sql` before starting the server. The server itself creates only a few tables on first use — the archives (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`) and, with `ISLAND_ID` set, the cross-island ones (`chat_dm_foreign_boxes`, `chat_foreign_challenges`, `chat_foreign_guests`), so the DB user must be allowed to create tables; base tables must exist before the first request.
+Schema lives in [`server/schema.sql`](server/schema.sql) — apply once with `psql -d <db> -f server/schema.sql` before starting the server. The server itself creates only a few tables on first use — the archives (`chat_room_key_archive`, `chat_dm_key_archive`, `chat_dm_delete_requests`), the recovery keys (`chat_recovery_keys`) and, with `ISLAND_ID` set, the cross-island ones (`chat_dm_foreign_boxes`, `chat_foreign_challenges`, `chat_foreign_guests`), so the DB user must be allowed to create tables; base tables must exist before the first request.
 
 Configuration is via environment variables — copy `server/config.example.env` to `server/.env` and fill in values.
 
@@ -81,7 +81,9 @@ A file is encrypted on the client before it is uploaded; the island gets one opa
 
 ### Key Recovery
 
-`crypto-utils.js` includes BIP39 encoding/decoding (`bip39Encode` / `bip39Decode`) that converts the 32-byte raw X25519 private key to a 24-word mnemonic (256-bit entropy + 8-bit checksum). A `deriveRecoveryAuth` helper derives a recovery auth token via HKDF.
+`crypto-utils.js` includes BIP39 encoding/decoding (`bip39Encode` / `bip39Decode`) that converts the 32-byte raw X25519 private key to a 24-word mnemonic (256-bit entropy + 8-bit checksum).
+
+A recovery **signs** the server's nonce: `deriveRecoverySigningSeed` (HKDF, info `ws-recovery-sign-v1`) gives an Ed25519 key whose public half the server keeps in `chat_recovery_keys` (created on first use); `account-recovery.js` (byte-identical in both clients) builds the challenge `"ws-recover-v1" 0 lower(username) 0 nonce 0 sha256(new_password)` — the server's `_recovery_challenge` must match it byte for byte — and falls back to the old fixed secret (`deriveRecoveryAuth`, legacy `recovery_key_hash`) only on a 401. After every unlock the client asks `GET /auth/recovery-key` and, only if `"hash"`, moves the account (`POST /auth/recovery-key`: old secret proved once, key stored, hash cleared; never for an account with no phrase). Signatures are base64url from `ed25519Sign`; the server decodes with `b64_to_bytes`. Every `/auth/recover` refusal is the same 401. Design: `docs/architecture.md` → Key recovery.
 
 ### Unlock Flow
 
@@ -282,6 +284,7 @@ Full reasoning, threat model and what this deliberately does *not* buy:
 | `chrome_extension/foreign-dm.js` | Cross-island DM protocol (contact cards, mailbox claims, delivery, relay envelopes) — byte-identical to `Android/src/services/foreign-dm.js` |
 | `chrome_extension/guest-rooms.js` | Guest-room protocol (guest sessions per island, room invitations, key slots) — byte-identical to `Android/src/services/guest-rooms.js` |
 | `chrome_extension/key-sweep.js` | Room-key backfill: when to hand out missing keys, how often, what a failure costs — byte-identical to `Android/src/services/key-sweep.js` |
+| `chrome_extension/account-recovery.js` | Recovering an account: the signed challenge, the fallback to the old secret, moving an account to a recovery key — byte-identical to `Android/src/services/account-recovery.js` |
 | `chrome_extension/room-key-guard.js` | A room's key only moves forward: per room (island + account) the last current kid and the replaced ones; a replaced key from the island is refused — byte-identical to `Android/src/services/room-key-guard.js` |
 | `chrome_extension/guest-room-feed.js` | What a guest room shows and in what order (socket before history, dedupe, resync, serialized draws) — byte-identical to `Android/src/services/guest-room-feed.js` |
 | `chrome_extension/file-crypt.js` | Attachments: per-file key, chunked AES-GCM blob, padding, the `FILE3` marker — byte-identical to `Android/src/services/file-crypt.js` |

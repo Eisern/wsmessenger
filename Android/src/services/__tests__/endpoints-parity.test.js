@@ -204,6 +204,17 @@ describe('room-key-guard.js parity between the two clients', () => {
   });
 });
 
+const AR_ANDROID = path.join(__dirname, '..', 'account-recovery.js');
+const AR_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'account-recovery.js');
+
+describe('account-recovery.js parity between the two clients', () => {
+  it('both copies exist and are identical', () => {
+    expect(fs.existsSync(AR_ANDROID)).toBe(true);
+    expect(fs.existsSync(AR_EXTENSION)).toBe(true);
+    expect(normalized(AR_ANDROID)).toBe(normalized(AR_EXTENSION));
+  });
+});
+
 const GR_ANDROID = path.join(__dirname, '..', 'guest-rooms.js');
 const GR_EXTENSION = path.join(__dirname, '..', '..', '..', '..', 'chrome_extension', 'guest-rooms.js');
 

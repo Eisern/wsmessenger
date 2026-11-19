@@ -22,6 +22,7 @@ import StorageService from './StorageService';
 import { CryptoUtils, cryptoManager } from '../crypto';
 import TC from './thread-chain';
 import RKG from './room-key-guard';
+import AR from './account-recovery';
 import ChainStore from './chainStore';
 
 const { x25519 } = require('@noble/curves/ed25519');
@@ -410,6 +411,7 @@ const CryptoService = {
       // Await cache — caller may .fill(0) privRaw after we return
       await _cachePrivKeyToKeychain().catch(e => console.warn('[CryptoService] Keychain cache failed:', e?.message));
       _emit('unlocked');
+      _scheduleRecoveryKeyMigration();
       // Register Ed25519 public key with server (fire-and-forget, non-blocking).
       CryptoService.ensureEd25519KeyRegistered().catch(() => {});
       return true;
@@ -460,6 +462,7 @@ const CryptoService = {
     _roomKeyGuard.clear();
     _heldBackNoted.clear();
     _guardMe = '';
+    _recoveryMigration = null;
     _clearLockTimer();
     _ed25519Seed = null;
     _ed25519PubKeyCache.clear();
@@ -1632,15 +1635,32 @@ const CryptoService = {
         throw new Error('Recovery phrase does not match this account. Double-check the 24 words.');
       }
 
-      const recoveryAuth = CryptoUtils.deriveRecoveryAuth(privRaw);
-      const recoveryAuthB64 = CryptoUtils.arrayBufferToBase64(recoveryAuth);
-
       const newEpk = await CryptoUtils.encryptPrivateKey(privRaw, newPassword, { username: u });
 
-      const { nonce } = await NetworkService.recoverStart(u);
-      if (!nonce) throw new Error('Server did not return a recovery nonce');
-
-      await NetworkService.recover(u, nonce, recoveryAuthB64, newPassword);
+      // A signature over the server's nonce (account-recovery.js); the old
+      // fixed secret only if the server refuses it - an account from before
+      // that has not moved to a recovery key yet.
+      const seed = CryptoUtils.deriveRecoverySigningSeed(privRaw);
+      let result;
+      try {
+        result = await AR.recover({
+          start: async (name) => (await NetworkService.recoverStart(name))?.nonce,
+          send: async (body) => {
+            try {
+              await NetworkService.recover(body);
+              return { ok: true, status: 200 };
+            } catch (err) {
+              return { ok: false, status: Number(err?.status) || 0, detail: err?.message || String(err) };
+            }
+          },
+          sign: async (msg) => CryptoUtils.ed25519Sign(seed, msg),
+          sha256: async (b) => CryptoUtils.sha256Raw(b),
+          legacyAuthB64: async () => CryptoUtils.arrayBufferToBase64(CryptoUtils.deriveRecoveryAuth(privRaw)),
+        }, { username: u, newPassword });
+      } finally {
+        seed.fill(0);
+      }
+      if (!result.ok) throw new Error(result.detail || 'Recovery failed');
 
       const uLower = u.toLowerCase();
       await StorageService.setIdentity(uLower, {
@@ -2137,6 +2157,7 @@ async function _initWithPassword(password) {
     // Must await — matches unlockWithRawKey() invariant; crash before write = key loss
     await _cachePrivKeyToKeychain().catch(e => console.warn('[CryptoService] Keychain cache failed:', e?.message));
     _emit('unlocked');
+    _scheduleRecoveryKeyMigration();
     CryptoService.publishIdentityKey().catch(() => {});
     CryptoService.ensureEd25519KeyRegistered().catch(() => {});
     return true;
@@ -2169,6 +2190,7 @@ async function _initWithKek(kekKey) {
     _unlocked = true;
     CryptoService.resetIdleTimer();
     _emit('unlocked');
+    _scheduleRecoveryKeyMigration();
     // Auto-publish identity key to server keyring (fire-and-forget)
     CryptoService.publishIdentityKey().catch(() => {});
     CryptoService.ensureEd25519KeyRegistered().catch(() => {});
@@ -2209,6 +2231,7 @@ async function _tryAutoUnlockFromKeychain() {
     _unlocked = true;
     CryptoService.resetIdleTimer();
     _emit('unlocked');
+    _scheduleRecoveryKeyMigration();
     CryptoService.publishIdentityKey().catch(() => {});
     CryptoService.ensureEd25519KeyRegistered().catch(() => {});
     return true;
@@ -2287,6 +2310,50 @@ async function _persistRoomKeyArchive(roomId) {
     });
     await StorageService.setRoomKeyArchive(roomId, entries);
   } catch (_e) { /* ignore */ }
+}
+
+// ---- moving an account to a recovery key ----
+
+let _recoveryMigration = null;   // the run in progress, or settled for this unlock
+
+/**
+ * An account that still recovers with the old fixed secret moves to a
+ * recovery key (account-recovery.js): the server is asked first, and the old
+ * secret is sent only if the account needs it. Once per unlock.
+ */
+function _scheduleRecoveryKeyMigration() {
+  if (_recoveryMigration) return _recoveryMigration;
+  const raw = cryptoManager.userPrivateKey && cryptoManager.userPrivateKey.priv;
+  if (!raw || raw.length !== 32) return Promise.resolve('none');
+  let proof = null;
+  _recoveryMigration = (async () => {
+    try {
+      const res = await AR.migrate({
+        state: () => NetworkService.getRecoveryKeyState().catch(() => 'unknown'),
+        proof: async () => (proof = CryptoUtils.recoveryProof(raw)),
+        post: async (body) => {
+          try {
+            await NetworkService.setRecoveryKey(body);
+            return { ok: true, status: 200 };
+          } catch (err) {
+            return { ok: false, status: Number(err?.status) || 0 };
+          }
+        },
+      });
+      if (res === 'moved') console.log('[Recovery] this account now recovers with a signed challenge');
+      // Not settled - nobody signed in yet, the server down, a refusal: the
+      // next unlock asks again.
+      if (res !== 'key' && res !== 'moved' && res !== 'none') _recoveryMigration = null;
+      return res;
+    } catch (e) {
+      _recoveryMigration = null;
+      console.warn('[Recovery] recovery key check failed:', e?.message);
+      return 'failed';
+    } finally {
+      if (proof) proof.authB64 = '';
+    }
+  })();
+  return _recoveryMigration;
 }
 
 // ---- the island's key, and this device's history of the room ----

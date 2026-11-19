@@ -338,7 +338,7 @@ RL_REGISTER_IP_PER_5MIN  = _env_int("RL_REGISTER_IP_PER_5MIN", 8)
 RL_WS_CONNECT_IP_PER_MIN = _env_int("RL_WS_CONNECT_IP_PER_MIN", 60)
 
 RL_RECOVER_IP_PER_HOUR   = _env_int("RL_RECOVER_IP_PER_HOUR",   5)
-RL_RECOVER_USER_PER_HOUR = _env_int("RL_RECOVER_USER_PER_HOUR", 3)
+RL_RECOVER_USER_PER_HOUR = _env_int("RL_RECOVER_USER_PER_HOUR", 10)
 RL_WS_MSG_PER_10S        = _env_int("RL_WS_MSG_PER_10S", 30)
 RL_WS_ROOM_TRY_PER_MIN   = _env_int("RL_WS_ROOM_TRY_PER_MIN", 30)
 RL_WS_BADPW_PER_MIN      = _env_int("RL_WS_BADPW_PER_MIN", 6)
@@ -1088,7 +1088,10 @@ class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=32, pattern=r'^[a-zA-Z][a-zA-Z0-9_]*$')
     password: str = Field(..., min_length=8, max_length=128)
     public_key: str | None = None
-    recovery_key_hash: str | None = None        # hex SHA-256(HKDF recovery_auth bytes)
+    recovery_key_hash: str | None = None        # hex SHA-256(HKDF recovery_auth bytes) - legacy
+    # base64 Ed25519 public key of the recovery signing key (HKDF of the
+    # identity key, "ws-recovery-sign-v1"). Given, it replaces the hash.
+    recovery_pub: str | None = None
 
 class RegisterIn(BaseModel):
     username: str
@@ -1279,14 +1282,82 @@ async def _recovery_nonce_consume(username: str, nonce: str) -> bool:
     return matched and not expired
 
 
+# --- the recovery key -------------------------------------------------------
+#
+# A recovery used to prove itself with recovery_auth: a fixed secret derived
+# from the identity key, the same on every recovery. Whoever saw one recovery
+# request could reset the password again whenever they liked, and nothing could
+# change the secret short of a new identity. Now an account holds the public
+# half of a signing key derived from the same identity key (HKDF info
+# "ws-recovery-sign-v1"), and a recovery signs the server's nonce together with
+# the account and the new password. A request seen once is good for nothing:
+# its nonce is spent, and a signature over another nonce or password cannot be
+# made without the phrase.
+#
+# An account from before has only the hash. It moves over the next time its
+# owner unlocks (POST /auth/recovery-key proves the old secret once and sets
+# the key), and from then on the old secret opens nothing.
+
+RECOVERY_CHALLENGE_DOMAIN = b"ws-recover-v1"
+_RECOVERY_KEYS_READY = False
+_RECOVERY_KEYS_LOCK = asyncio.Lock()
+
+
+async def _ensure_recovery_keys_table(session: AsyncSession) -> None:
+    global _RECOVERY_KEYS_READY
+    if _RECOVERY_KEYS_READY:
+        return
+    async with _RECOVERY_KEYS_LOCK:
+        if _RECOVERY_KEYS_READY:
+            return
+        await session.execute(text("""
+            CREATE TABLE IF NOT EXISTS chat_recovery_keys (
+                user_id BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                ed25519_pub TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """))
+        await session.commit()
+        _RECOVERY_KEYS_READY = True
+
+
+def _recovery_challenge(username: str, nonce: str, new_password: str) -> bytes:
+    """What a recovery signs. Both clients build it in account-recovery.js."""
+    return (
+        RECOVERY_CHALLENGE_DOMAIN + b"\x00"
+        + (username or "").strip().lower().encode("utf-8") + b"\x00"
+        + (nonce or "").encode("utf-8") + b"\x00"
+        + hashlib.sha256((new_password or "").encode("utf-8")).digest()
+    )
+
+
+def _recovery_pub_b64(v: str | None) -> str:
+    raw = None
+    try:
+        raw = base64.b64decode((v or "").strip(), validate=True)
+    except Exception:
+        raw = None
+    if not raw or len(raw) != 32:
+        raise HTTPException(status_code=400, detail="recovery_pub must be a 32-byte Ed25519 key")
+    return base64.b64encode(raw).decode("ascii")
+
+
 class RecoverStartIn(BaseModel):
     username: str = Field(..., min_length=1, max_length=32)
 
 class RecoverIn(BaseModel):
     username: str = Field(..., min_length=1, max_length=32)
-    nonce: str
-    recovery_auth_b64: str
+    nonce: str = Field(..., max_length=128)
+    # One of the two: the signature, for an account with a recovery key; the
+    # fixed secret, for an account that has only the hash from before.
+    signature_b64: str | None = Field(default=None, max_length=200)
+    recovery_auth_b64: str | None = Field(default=None, max_length=200)
     new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class RecoveryKeyIn(BaseModel):
+    recovery_auth_b64: str = Field(..., max_length=200)
+    recovery_pub: str = Field(..., max_length=200)
 
 
 _KEY_ARCHIVE_TABLES_READY = False
@@ -2693,9 +2764,15 @@ async def register(payload: RegisterRequest, request: Request):
             raise HTTPException(status_code=400, detail="public_key must be valid base64")
         if len(raw_pk) != 32:
             raise HTTPException(status_code=400, detail="public_key must be 32-byte X25519 key")
+        # The recovery key, when the client sends one, replaces the hash: a
+        # client sends both so an older server still gets something it reads.
+        recovery_pub = _recovery_pub_b64(payload.recovery_pub) if payload.recovery_pub else None
+        if recovery_pub:
+            await _ensure_recovery_keys_table(db)
+
         # Validate recovery_key_hash format if provided (must be hex SHA-256)
         rkh = None
-        if payload.recovery_key_hash:
+        if payload.recovery_key_hash and not recovery_pub:
             rkh = payload.recovery_key_hash.strip().lower()
             if len(rkh) != 64 or not all(c in "0123456789abcdef" for c in rkh):
                 raise HTTPException(status_code=400, detail="Invalid recovery_key_hash format")
@@ -2727,6 +2804,11 @@ async def register(payload: RegisterRequest, request: Request):
             raise HTTPException(status_code=409, detail="User already exists")
 
         user_id = int(res.scalar_one())
+
+        if recovery_pub:
+            await db.execute(sql_i("""
+                INSERT INTO chat_recovery_keys (user_id, ed25519_pub) VALUES (:uid, :pub)
+            """, "uid"), {"uid": user_id, "pub": recovery_pub})
 
         kid = hashlib.sha256(raw_pk).hexdigest()[:32]
         await db.execute(sql_i("""
@@ -3002,6 +3084,79 @@ async def recover_start(payload: RecoverStartIn, request: Request):
     return {"nonce": nonce}
 
 
+RECOVER_REFUSED = "Recovery failed: the phrase does not match this account, or the attempt expired. Start again."
+
+
+@app.get("/auth/recovery-key")
+async def recovery_key_state(authorization: str | None = Header(default=None)):
+    """How this account recovers: "key", "hash" (from before - move it) or "none"."""
+    u = require_user_from_bearer(authorization)
+    async with SessionLocal() as db:
+        await _ensure_recovery_keys_table(db)
+        res = await db.execute(sql_i("""
+            SELECT (k.user_id IS NOT NULL) AS has_key, (u.recovery_key_hash IS NOT NULL) AS has_hash
+            FROM users u LEFT JOIN chat_recovery_keys k ON k.user_id = u.id
+            WHERE u.id = :uid
+        """, "uid"), {"uid": int(u["user_id"])})
+        row = res.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"state": "key" if row["has_key"] else ("hash" if row["has_hash"] else "none")}
+
+
+@app.post("/auth/recovery-key")
+async def recovery_key_set(
+    payload: RecoveryKeyIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """
+    Move an account from the recovery hash to a recovery key.
+
+    The old secret is proved once, here, and then forgotten: the hash is
+    cleared in the same transaction, so from now on only a signature recovers
+    the account. Only an account with a hash can do this - a session alone
+    (a stolen password) cannot plant a recovery key - and a key once set is
+    not replaced.
+    """
+    u = require_user_from_bearer(authorization)
+    uid = int(u["user_id"])
+    await enforce_http_rate_limit(f"recovery-key:user:{uid}", 10, 3600)
+    pub = _recovery_pub_b64(payload.recovery_pub)
+    try:
+        auth = base64.b64decode((payload.recovery_auth_b64 or "").strip(), validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid recovery_auth_b64 encoding")
+
+    async with SessionLocal() as db:
+        await _ensure_recovery_keys_table(db)
+        res = await db.execute(sql_i("""
+            SELECT u.recovery_key_hash, k.ed25519_pub
+            FROM users u LEFT JOIN chat_recovery_keys k ON k.user_id = u.id
+            WHERE u.id = :uid
+            FOR UPDATE OF u
+        """, "uid"), {"uid": uid})
+        row = res.mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Not found")
+        if row["ed25519_pub"]:
+            if row["ed25519_pub"] == pub:
+                return {"state": "key"}
+            raise HTTPException(status_code=409, detail="This account already has a recovery key")
+        if not row["recovery_key_hash"]:
+            raise HTTPException(status_code=409, detail="This account has no recovery phrase to move")
+        if not hmac.compare_digest(hashlib.sha256(auth).hexdigest(), str(row["recovery_key_hash"])):
+            raise HTTPException(status_code=401, detail="Recovery phrase does not match")
+        await db.execute(sql_i("""
+            INSERT INTO chat_recovery_keys (user_id, ed25519_pub) VALUES (:uid, :pub)
+        """, "uid"), {"uid": uid, "pub": pub})
+        await db.execute(sql_i("""
+            UPDATE users SET recovery_key_hash = NULL WHERE id = :uid
+        """, "uid"), {"uid": uid})
+        await db.commit()
+    return {"state": "key"}
+
+
 @app.post("/auth/recover")
 async def recover(payload: RecoverIn, request: Request):
     """
@@ -3020,40 +3175,60 @@ async def recover(payload: RecoverIn, request: Request):
     # hour. The phrase is 256 bits, so guessing is not what a limit stops here;
     # failures are counted below, and only failures.
 
-    # 1. Consume nonce (single-use, 5-min TTL)
-    if not await _recovery_nonce_consume(username, payload.nonce):
-        raise HTTPException(status_code=400, detail="Invalid or expired recovery nonce")
-
-    # 2. Fetch user + recovery_key_hash
-    async with SessionLocal() as db:
-        res = await db.execute(
-            text("SELECT id, recovery_key_hash FROM users WHERE LOWER(username) = LOWER(:u) LIMIT 1"),
-            {"u": username},
-        )
-        row = res.mappings().first()
-
-    # One answer for "this account has no recovery phrase" and "wrong phrase":
-    # two told anybody which accounts can be recovered at all.
+    # One answer for every refusal - an unknown or spent nonce, an account that
+    # cannot be recovered, a wrong phrase: different answers told anybody which
+    # accounts exist and which can be recovered.
     async def _refuse():
         await enforce_http_rate_limit(
             f"recover:fail:{username}", RL_RECOVER_USER_PER_HOUR, 3600,
             detail="Too many recovery attempts",
         )
-        raise HTTPException(status_code=401, detail="Recovery phrase is incorrect")
+        raise HTTPException(status_code=401, detail=RECOVER_REFUSED)
 
-    if not row or not row["recovery_key_hash"]:
+    # 1. Consume nonce (single-use, 5-min TTL)
+    if not await _recovery_nonce_consume(username, payload.nonce):
         await _refuse()
 
+    # 2. The account, and how it proves itself
+    async with SessionLocal() as db:
+        await _ensure_recovery_keys_table(db)
+        res = await db.execute(text("""
+            SELECT u.id, u.recovery_key_hash, k.ed25519_pub
+            FROM users u
+            LEFT JOIN chat_recovery_keys k ON k.user_id = u.id
+            WHERE LOWER(u.username) = LOWER(:u)
+            LIMIT 1
+        """), {"u": username})
+        row = res.mappings().first()
+
+    if not row:
+        await _refuse()
     user_id = int(row["id"])
 
-    # 3. Verify recovery_auth: SHA-256(decoded bytes) == stored hash
-    try:
-        recovery_auth_bytes = base64.b64decode(payload.recovery_auth_b64)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid recovery_auth_b64 encoding")
-
-    actual_hash = hashlib.sha256(recovery_auth_bytes).hexdigest()
-    if not hmac.compare_digest(actual_hash, str(row["recovery_key_hash"])):
+    # 3. A recovery key: only a signature over this nonce, this account and this
+    #    new password. The old secret opens nothing once the key is set.
+    if row["ed25519_pub"]:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        try:
+            # base64 or base64url (what both clients sign into), padded or not
+            sig = b64_to_bytes(payload.signature_b64 or "")
+            if len(sig) != 64:
+                raise ValueError("signature length")
+            Ed25519PublicKey.from_public_bytes(base64.b64decode(row["ed25519_pub"])).verify(
+                sig, _recovery_challenge(username, payload.nonce, payload.new_password),
+            )
+        except Exception:
+            await _refuse()
+    # ...or the hash from before: the fixed secret, until the owner next unlocks.
+    elif row["recovery_key_hash"] and payload.recovery_auth_b64:
+        try:
+            recovery_auth_bytes = base64.b64decode(payload.recovery_auth_b64)
+        except Exception:
+            await _refuse()
+        actual_hash = hashlib.sha256(recovery_auth_bytes).hexdigest()
+        if not hmac.compare_digest(actual_hash, str(row["recovery_key_hash"])):
+            await _refuse()
+    else:
         await _refuse()
 
     # 4. Update password (recovery_key_hash stays — it's derived from the key, not the password)

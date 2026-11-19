@@ -102,6 +102,9 @@ export default function RegisterScreen({ navigation }) {
       // Derive recovery_key_hash and BIP39 mnemonic (matches extension login.js:852-857)
       const recoveryAuth = CryptoUtils.deriveRecoveryAuth(rawKey);
       const recoveryKeyHash = CryptoUtils.sha256Hex(recoveryAuth);
+      // The recovery key: a server that knows it keeps that and drops the hash
+      // (account-recovery.js); an older one keeps the hash.
+      const recoveryPub = CryptoUtils.recoveryProof(rawKey).pubB64;
       const mnemonic = CryptoUtils.bip39Encode(rawKey);
 
       // Encrypt private key (Argon2id preferred, PBKDF2 fallback). AAD pins the
@@ -117,6 +120,7 @@ export default function RegisterScreen({ navigation }) {
         pubB64,
         encryptedPrivKey,
         recoveryKeyHash,
+        recoveryPub,
       );
 
       if (result.ok) {

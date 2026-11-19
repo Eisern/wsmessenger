@@ -19,6 +19,11 @@ they drifted apart (the extension was at 0.3.0 while the last tag was v0.1.0).
 - **Guests from other islands are accepted as soon as `ISLAND_ID` is set** —
   also on a server that had the island identity before this version, with
   nothing to opt in to. `ISLAND_ACCEPT_GUESTS=0` in `.env` refuses them.
+- **Update both clients with this server.** An account that has moved to a
+  recovery key (which happens the first time its owner unlocks with a client
+  of this version) can no longer be recovered by an older client. Recovery
+  refusals are now all `401` (a spent nonce used to be `400`). The recovery
+  keys go in `chat_recovery_keys`, created on first use like the archives.
 - **After restoring the database from a backup, have room owners change their
   rooms' keys** (Rooms → Manage → Keys). A backup can hold a room key older
   than the one members' devices already moved to, and those devices now
@@ -231,8 +236,23 @@ island - waited for somebody's browser extension.
   is spent only by the request that presents it. "This account has no
   recovery phrase" and "wrong phrase" now get the same answer, and the
   server no longer logs the name of every account somebody tried to
-  recover. Still true, now written down in `docs/architecture.md`: the
-  recovery proof is a fixed secret, not an answer to the nonce.
+  recover.
+- **A recovery proved itself with a fixed secret.** `recovery_auth` was the
+  same on every recovery and the nonce was not part of the proof, so whoever
+  saw one recovery request could reset the password again whenever they
+  liked - and the secret, derived from the identity key, could never be
+  changed. An account now holds a recovery signing key (Ed25519, derived from
+  the identity key, `ws-recovery-sign-v1`), and a recovery signs the
+  server's nonce with the account name and the new password; a request seen
+  once is good for nothing. Accounts from before keep recovering with the
+  old secret until their owner next unlocks: the client then proves it once,
+  sets the key, and the server clears the hash, after which the old secret
+  opens nothing. A session alone cannot give a recovery key to an account
+  that had none. Every refusal of `/auth/recover` - unknown name, spent
+  nonce, wrong phrase - is now the same 401. The protocol is
+  `account-recovery.js`, shared by both clients.
+- **Android sent the encrypted private key to the server at registration.**
+  The server threw it away, but it went over the wire; it no longer does.
 - **The extension's worker took the account for a key handover from the
   handover itself.** A session opened (and rate-limited) for one account could
   be committed under another, and the one-shot copy of the key a login leaves
@@ -320,6 +340,16 @@ island - waited for somebody's browser extension.
 
 ### Added — tests
 
+- Recovering with a signature: `server/tests/test_recovery.py` (a signature
+  over the nonce resets the password and is good for its own nonce, name and
+  password only; the old secret opens nothing next to a key; an account from
+  before still recovers with it, moves to a key once - its hash cleared - and
+  then only signs; a session alone plants nothing; one answer for every
+  refusal), `accountRecovery.test.js` (both clients' derivation and both
+  copies of the challenge against vectors computed in Python, the fallback
+  rules, the move), `cryptoServiceRecovery.test.js` (Android's recovery and
+  its move after an unlock) and `integration/recovery.test.js` (the
+  extension's own code against a live island, the move through the panel).
 - A room's key only moving forward: `roomKeyGuard.test.js` (the shared module:
   retired keys, stale answers, history per island and account and across a
   restart, keys noted before the first read, failing storage) and

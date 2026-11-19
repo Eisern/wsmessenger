@@ -399,7 +399,7 @@ ProfileScreen privacy toggles use server-compatible keys:
 
 ### Recovery Phrase (BIP39)
 
-Registration generates a 24-word BIP39 mnemonic and computes `recovery_key_hash` (HKDF → SHA-256). The mnemonic is shown in a modal after registration — user must acknowledge before proceeding. `recovery_key_hash` is sent to the server for future recovery via `ImportKeyScreen`.
+Registration generates a 24-word BIP39 mnemonic and sends the recovery public key (`CryptoUtils.recoveryProof(raw).pubB64`, plus `recovery_key_hash` for an older server). The mnemonic is shown in a modal after registration — user must acknowledge before proceeding. `CryptoService.recoverFromBip39` signs the server's nonce through `account-recovery.js` (byte-identical to the extension's) and falls back to the old secret only on a 401; after every unlock `_scheduleRecoveryKeyMigration` moves an account that still has only the hash. `NetworkService.register` no longer sends the EPK. See `../CLAUDE.md` → Key Recovery.
 
 ProfileScreen has a "Show Recovery Phrase" button (in Encryption Identity section) that requires password re-entry to decrypt EPK and display the 24 words.
 

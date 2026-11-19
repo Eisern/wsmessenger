@@ -897,10 +897,15 @@ const CryptoUtils = {
     const rawBytes = this.extractRawKeyFromPkcs8(pkcs8Bytes);
 
     const ed25519Seed = await this.deriveEd25519Seed(rawBytes);
+    // For an account that still recovers with the old secret: what moving it
+    // to a recovery key takes (account-recovery.js migrate). Taken once by the
+    // panel right after the unlock, and dropped.
+    let recoveryProof = null;
+    try { recoveryProof = await this.recoveryProof(rawBytes); } catch { recoveryProof = null; }
     rawBytes.fill(0); // wipe raw key bytes from memory
 
     const privateKey = await this.importPrivateKey(pkcs8B64);
-    return { privateKey, ed25519Seed };
+    return { privateKey, ed25519Seed, recoveryProof };
   },
 
   // ============================
@@ -1537,6 +1542,38 @@ const CryptoUtils = {
       256
     );
     return new Uint8Array(bits);
+  },
+
+  /**
+   * The seed of the recovery signing key (account-recovery.js): an Ed25519
+   * key the server holds the public half of, so a recovery proves itself with
+   * a signature over the server's nonce instead of a fixed secret.
+   * HKDF-SHA256(ikm=rawKey, salt=0x00*32, info="ws-recovery-sign-v1")
+   */
+  async deriveRecoverySigningSeed(rawKeyBytes) {
+    const raw = rawKeyBytes instanceof Uint8Array ? rawKeyBytes : new Uint8Array(rawKeyBytes);
+    const ikm = await crypto.subtle.importKey("raw", raw, "HKDF", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "HKDF", hash: "SHA-256", salt: new Uint8Array(32), info: new TextEncoder().encode("ws-recovery-sign-v1") },
+      ikm, 256
+    );
+    return new Uint8Array(bits);
+  },
+
+  /**
+   * What an account needs from its identity key to move to a recovery key
+   * (POST /auth/recovery-key): the old secret, once, and the new public key.
+   */
+  async recoveryProof(rawKeyBytes) {
+    const seed = await this.deriveRecoverySigningSeed(rawKeyBytes);
+    try {
+      return {
+        authB64: this.arrayBufferToBase64(await this.deriveRecoveryAuth(rawKeyBytes)),
+        pubB64: this.arrayBufferToBase64(await this.ed25519GetPublicKey(seed)),
+      };
+    } finally {
+      seed.fill(0);
+    }
   },
 
   /** SHA-256 of bytes → hex string (async, uses WebCrypto). */

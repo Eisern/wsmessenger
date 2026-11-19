@@ -746,34 +746,44 @@ recipient's X25519 private key, which the server does not have.
 
 ## Key recovery
 
-A user who loses their password but still has their recovery phrase
-can reset. The flow:
+A user who loses their password but still has their recovery phrase can
+reset it. The phrase is the 32-byte identity key (`bip39Decode`); from it
+the client derives a **recovery signing key** (Ed25519,
+`deriveRecoverySigningSeed`: HKDF-SHA-256, info `ws-recovery-sign-v1`),
+whose public half the server keeps in `chat_recovery_keys`.
 
-1. Client calls `POST /auth/recover-start` with the username and
-   receives a single-use nonce.
-2. Client decodes the phrase to the raw 32 bytes via `bip39Decode`,
-   derives a `recovery_auth_b64` via HKDF, and submits it with the
-   new password to `POST /auth/recover`.
-3. Server verifies `recovery_auth_b64` against the stored
-   `recovery_key_hash` and updates the password hash.
-4. Client re-encrypts the EPK locally under the new password and
-   saves it as `v: 3` in `chrome.storage.local` /
-   `react-native-keychain`.
+1. `POST /auth/recover-start` with the username returns a single-use
+   nonce (a fake one for an unknown name).
+2. The client signs `"ws-recover-v1" 0 lower(username) 0 nonce 0
+   sha256(new password)` (`account-recovery.js`, byte-identical in both
+   clients) and sends the signature with the new password to
+   `POST /auth/recover`.
+3. The server checks the signature against the account's recovery key,
+   spends the nonce and sets the password. A request seen once is good
+   for nothing: its nonce is spent, and no other nonce or password can be
+   signed without the phrase.
+4. The client re-encrypts the EPK locally under the new password.
 
-See [`login.js#L895`](../chrome_extension/login.js#L895) for the
-client side. The server never sees the raw phrase or the raw
-32-byte key — only the HKDF-derived auth token.
+Registration sends the recovery public key (and, for an older server, the
+hash below; a server that has the key does not keep the hash).
 
-What the nonce does and does not do: it makes each request single-use
-and is spent only by the request that presents it (or by expiry), so
-a stranger cannot void a recovery in progress. It is **not** bound
-into the proof: `recovery_auth` is the same on every recovery, a
-fixed secret derived from the identity key. Whoever sees one recovery
-request — the server that receives it — could reset the password
-again later, and unlike a password it cannot be changed. Failed
-phrases are rate-limited per account; requests that merely name an
-account are not, so they cannot lock its owner out. An account with
-no phrase and a wrong phrase get the same answer.
+**Accounts from before** hold only `recovery_key_hash`: SHA-256 of
+`recovery_auth`, a fixed secret derived from the identity key and sent as
+is on every recovery - whoever saw one such request could reset the
+password again later. Such an account still recovers with it (the client
+falls back to it when the signature is refused), and moves over the next
+time its owner unlocks: the client asks `GET /auth/recovery-key`, and only
+if the answer is `"hash"` proves the old secret once to
+`POST /auth/recovery-key` together with the new public key. The server
+stores the key and clears the hash in one transaction; from then on the old
+secret opens nothing. A session alone cannot set a recovery key on an
+account that had none, so a stolen password does not become a way back in.
+
+Every refusal gets one answer (401) - unknown name, spent or made-up nonce,
+no phrase, wrong phrase - so the endpoint does not tell which accounts
+exist or can be recovered. Only failures count towards the per-account
+limit, and a nonce is spent only by the request that presents it, so a
+stranger who knows a name cannot lock its owner out.
 
 ---
 

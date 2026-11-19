@@ -1134,11 +1134,51 @@ async function initializeCrypto({ interactive = false, reason = "", kekKey = nul
       pinEpkKdfNameIfNeeded(username, localIdentity, encryptedPrivateKey).catch(() => {});
     }
     ensureEd25519KeyRegistered().catch(() => {});
+    void migrateRecoveryKeyIfNeeded();
     return true;
 
   } catch (e) {
     console.warn("initializeCrypto error:", e?.name, e?.message || e);
     return false;
+  }
+}
+
+/**
+ * An account that still recovers with the old fixed secret moves to a recovery
+ * key (account-recovery.js): the server is asked first, and the old secret is
+ * sent only if the account needs it. The proof is taken from the key manager
+ * at once and dropped whatever happens.
+ */
+async function migrateRecoveryKeyIfNeeded() {
+  const proof = CM()?.takeRecoveryProof?.() || null;
+  if (!proof) return "none";
+  try {
+    const token = await requestToken();
+    if (!token) return "none";
+    const res = await globalThis.WSAccountRecovery.migrate({
+      state: async () => {
+        const r = await fetch(API_BASE + "/auth/recovery-key", { headers: { Authorization: "Bearer " + token } });
+        if (!r.ok) return "unknown";
+        return String((await r.json().catch(() => ({})))?.state || "unknown");
+      },
+      proof: async () => proof,
+      post: async (body) => {
+        const r = await fetch(API_BASE + "/auth/recovery-key", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+          body: JSON.stringify(body),
+        });
+        return { ok: r.ok, status: r.status };
+      },
+    });
+    if (res === "moved") console.log("[Recovery] this account now recovers with a signed challenge");
+    else if (res === "failed") console.warn("[Recovery] could not move this account to a recovery key; will try at the next unlock");
+    return res;
+  } catch (e) {
+    console.warn("[Recovery] recovery key check failed:", e?.message || e);
+    return "failed";
+  } finally {
+    proof.authB64 = "";
   }
 }
 

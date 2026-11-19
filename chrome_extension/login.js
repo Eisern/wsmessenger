@@ -971,10 +971,6 @@ if (msg.type === "auth_ok") {
         // 1. Decode and verify phrase client-side (checksum)
         const rawKey = CryptoUtils.bip39Decode(phrase);
 
-        // 2. Derive recovery_auth
-        const recoveryAuth = await CryptoUtils.deriveRecoveryAuth(rawKey);
-        const recoveryAuthB64 = btoa(String.fromCharCode(...recoveryAuth));
-
         // 3. Re-encrypt private key with new password (prepared, not saved yet)
         const pkcs8Bytes = CryptoUtils.buildPkcs8FromRawKey(rawKey);
         const pkcs8B64 = btoa(String.fromCharCode(...pkcs8Bytes));
@@ -982,13 +978,30 @@ if (msg.type === "auth_ok") {
 
         showRecoveryErr("Contacting server…");
 
-        // 4. Get single-use nonce
-        const { nonce } = await apiJson("/auth/recover-start", { body: { username } });
-
-        // 5. Submit recovery — server updates password_hash
-        await apiJson("/auth/recover", {
-          body: { username, nonce, recovery_auth_b64: recoveryAuthB64, new_password: newPass }
-        });
+        // 4-5. A signature over the server's nonce (account-recovery.js); the
+        // old fixed secret only if the server refuses it - an account from
+        // before that has not moved to a recovery key yet.
+        const seed = await CryptoUtils.deriveRecoverySigningSeed(rawKey);
+        let result;
+        try {
+          result = await globalThis.WSAccountRecovery.recover({
+            start: async (name) => (await apiJson("/auth/recover-start", { body: { username: name } }))?.nonce,
+            send: async (body) => {
+              try {
+                await apiJson("/auth/recover", { body });
+                return { ok: true, status: 200 };
+              } catch (err) {
+                return { ok: false, status: Number(err?.status) || 0, detail: err?.message || String(err) };
+              }
+            },
+            sign: (msg) => CryptoUtils.ed25519Sign(seed, msg),
+            sha256: async (b) => new Uint8Array(await crypto.subtle.digest("SHA-256", b)),
+            legacyAuthB64: async () => CryptoUtils.arrayBufferToBase64(await CryptoUtils.deriveRecoveryAuth(rawKey)),
+          }, { username, newPassword: newPass });
+        } finally {
+          seed.fill(0);
+        }
+        if (!result.ok) throw new Error(result.detail || "Recovery failed");
 
         // 6. Server confirmed — now safe to update local identity
         await saveLocalIdentity(username, {
@@ -1202,6 +1215,9 @@ if (msg.type === "auth_ok") {
         const rawKey = CryptoUtils.extractRawKeyFromPkcs8(pkcs8Bytes);
         const recoveryAuth = await CryptoUtils.deriveRecoveryAuth(rawKey);
         const recoveryKeyHash = await CryptoUtils.sha256Hex(recoveryAuth);
+        // The recovery key: a server that knows it keeps that and drops the
+        // hash (account-recovery.js); an older one keeps the hash.
+        const recoveryPub = (await CryptoUtils.recoveryProof(rawKey)).pubB64;
         const mnemonic = CryptoUtils.bip39Encode(rawKey);
 
         // Encrypt private key with password
@@ -1218,6 +1234,7 @@ if (msg.type === "auth_ok") {
             password,
             public_key: publicKeyB64,
             recovery_key_hash: recoveryKeyHash,
+            recovery_pub: recoveryPub,
           }),
         });
 
